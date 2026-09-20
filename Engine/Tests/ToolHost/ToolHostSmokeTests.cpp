@@ -4,11 +4,12 @@
 #include <Cue/Platform/Windows/WindowsWindowInterop.h>
 #include <Cue/ToolHost/WindowsD3D12/ToolHost.h>
 
-#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -34,6 +35,31 @@ class TestFatalHandler final : public cue::FatalHandler
         std::_Exit(76);
     }
 };
+
+/// @brief 注入したMouse、Key、Buttonの順序を外部Window Eventと区別して検証する
+[[nodiscard]] bool contains_injected_input_sequence(std::span<const cue::InputEvent> a_events) noexcept
+{
+    std::uint32_t stage = 0U;
+    for (const cue::InputEvent &event : a_events)
+    {
+        if (stage == 0U && event.type == cue::InputEventType::MouseMove && event.mousePosition.x == 10 &&
+            event.mousePosition.y == 20)
+        {
+            stage = 1U;
+        }
+        else if (stage == 1U && event.type == cue::InputEventType::KeyDown && event.key == cue::InputKey::A)
+        {
+            stage = 2U;
+        }
+        else if (stage == 2U && event.type == cue::InputEventType::MouseButtonDown &&
+                 event.mouseButton == cue::InputMouseButton::Right && event.mousePosition.x == 10 &&
+                 event.mousePosition.y == 20)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /// @brief Tool HostへResizeと非表示を含む最小Offscreen Surface要求を3 Frame提供する
 class SmokeClient final : public cue::tool_host::ToolHostClient
@@ -80,10 +106,6 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
         {
             m_requests[0U] = {256U, 144U, true};
             m_requests[1U] = {300U, 180U, true};
-            m_inputInjectionWasValid = m_inputInjectionWasValid &&
-                                       PostMessageW(m_nativeWindow, WM_MOUSEMOVE, 0U, MAKELPARAM(13, 25)) != FALSE &&
-                                       PostMessageW(m_nativeWindow, WM_KEYUP, 'A', 0) != FALSE &&
-                                       PostMessageW(m_nativeWindow, WM_RBUTTONUP, 0U, MAKELPARAM(13, 25)) != FALSE;
         }
         else if (m_drawCount == 2U)
         {
@@ -102,10 +124,7 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
             return;
         }
         m_nativeWindow = static_cast<HWND>(const_cast<void *>(nativeView.try_value()->value()));
-        m_inputInjectionWasValid =
-            m_nativeWindow != nullptr && PostMessageW(m_nativeWindow, WM_MOUSEMOVE, 0U, MAKELPARAM(10, 20)) != FALSE &&
-            PostMessageW(m_nativeWindow, WM_KEYDOWN, 'A', 0) != FALSE &&
-            PostMessageW(m_nativeWindow, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(10, 20)) != FALSE;
+        m_inputInjectionWasValid = m_nativeWindow != nullptr && IsWindow(m_nativeWindow) != FALSE;
     }
 
     /// @brief Portable Input Event順とFrame Snapshotの押下、解放、一時値Resetを検証する
@@ -114,19 +133,12 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
         ++m_inputFrameCount;
         if (m_inputFrameCount == 1U)
         {
-            const auto contains = [&a_input](cue::InputEventType a_type)
-            {
-                return std::ranges::any_of(a_input.events,
-                                           [a_type](const cue::InputEvent &a_event) { return a_event.type == a_type; });
-            };
-            const cue::InputPoint position = a_input.snapshot.mouse_position();
             m_firstInputFrameWasValid =
-                contains(cue::InputEventType::MouseMove) && contains(cue::InputEventType::KeyDown) &&
-                contains(cue::InputEventType::MouseButtonDown) && a_input.snapshot.is_key_down(cue::InputKey::A) &&
+                contains_injected_input_sequence(a_input.events) && a_input.snapshot.is_key_down(cue::InputKey::A) &&
                 a_input.snapshot.was_key_pressed(cue::InputKey::A) &&
                 a_input.snapshot.is_mouse_button_down(cue::InputMouseButton::Right) &&
                 a_input.snapshot.was_mouse_button_pressed(cue::InputMouseButton::Right) &&
-                a_input.snapshot.has_mouse_position() && position.x == 10 && position.y == 20;
+                a_input.snapshot.has_mouse_position();
         }
         else if (m_inputFrameCount == 2U)
         {
@@ -147,6 +159,23 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
     /// @brief 現在FrameのSurface要求を返す
     [[nodiscard]] cue::tool_host::ToolHostRenderSurfaceRequests render_surface_requests() const noexcept override
     {
+        // Message Pump後かつInput Frame更新前に同期配送し、CIのForeground Window変動とFrame境界を分離する
+        if (m_inputInjectionWasValid && m_inputFrameCount == 0U)
+        {
+            SendMessageW(m_nativeWindow, WM_SETFOCUS, 0U, 0);
+            SendMessageW(m_nativeWindow, WM_MOUSEMOVE, 0U, MAKELPARAM(10, 20));
+            SendMessageW(m_nativeWindow, WM_KEYDOWN, 'A', 0);
+            SendMessageW(m_nativeWindow, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(10, 20));
+        }
+        else if (m_inputInjectionWasValid && m_inputFrameCount == 1U)
+        {
+            SendMessageW(m_nativeWindow, WM_SETFOCUS, 0U, 0);
+            SendMessageW(m_nativeWindow, WM_MOUSEMOVE, 0U, MAKELPARAM(13, 25));
+            SendMessageW(m_nativeWindow, WM_KEYDOWN, 'A', 0);
+            SendMessageW(m_nativeWindow, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(13, 25));
+            SendMessageW(m_nativeWindow, WM_KEYUP, 'A', 0);
+            SendMessageW(m_nativeWindow, WM_RBUTTONUP, 0U, MAKELPARAM(13, 25));
+        }
         return m_requests;
     }
 
@@ -285,7 +314,12 @@ int main(int a_argumentCount, char **a_arguments)
     cue::Logger logger(handler, std::move(sinks));
     cue::AssertContext context(logger, handler);
     const bool useWarp = a_argumentCount == 2 && std::string_view(a_arguments[1]) == "--warp";
-    return run_smoke(useWarp ? cue::tool_host::ToolHostAdapterPreference::Warp
-                             : cue::tool_host::ToolHostAdapterPreference::HardwarePreferred,
-                     context);
+    const int exitCode = run_smoke(useWarp ? cue::tool_host::ToolHostAdapterPreference::Warp
+                                          : cue::tool_host::ToolHostAdapterPreference::HardwarePreferred,
+                                   context);
+    if (exitCode != 0)
+    {
+        std::fprintf(stderr, "ToolHost smoke failed with exit code %d\n", exitCode);
+    }
+    return exitCode;
 }
