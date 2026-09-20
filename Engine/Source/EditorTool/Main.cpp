@@ -898,6 +898,12 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         cue::editor::enable_editor_docking();
     }
 
+    /// @brief Tool HostのPortable入力を現在FrameのViewport Routing用に所有Copyする
+    void input_frame(cue::tool_host::ToolHostInputFrameView a_input) noexcept override
+    {
+        m_inputSnapshot = a_input.snapshot;
+    }
+
     /// @brief Game Viewが前Frameで計測した描画領域をTool Host要求へ変換する
     [[nodiscard]] cue::tool_host::ToolHostRenderSurfaceRequests render_surface_requests() const noexcept override
     {
@@ -1604,6 +1610,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             m_playPresenter->draw();
             m_gameViewRequest = cue::editor::draw_game_view(m_gameViewSurface);
             m_debugViewRequest = cue::editor::draw_debug_view(m_debugViewSurface);
+            update_debug_camera();
             refresh_render_snapshot();
             if (m_buildPresenter != nullptr)
             {
@@ -1845,6 +1852,34 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         m_presenter = cue::editor::EditorPresenter::create(m_session->controller(), *m_session->active_document_id(),
                                                            m_session->identity_source(), m_session->schema_registry(),
                                                            std::move(componentTemplates), *m_assertContext);
+    }
+
+    /// @brief Debug Viewが占有したMouse入力だけをEditor専用Cameraへ適用する
+    void update_debug_camera() noexcept
+    {
+        if (!m_debugCamera.has_value())
+        {
+            m_debugCameraInput.reset();
+            return;
+        }
+
+        const cue::editor::DebugViewCameraMotion inputMotion =
+            m_debugCameraInput.update(m_inputSnapshot, m_debugViewRequest);
+        const cue::renderer::DebugCameraMotion motion{inputMotion.yawDeltaRadians, inputMotion.pitchDeltaRadians,
+                                                      inputMotion.rightTranslation, inputMotion.upTranslation,
+                                                      inputMotion.forwardTranslation};
+
+        if (motion.yawDeltaRadians == 0.0F && motion.pitchDeltaRadians == 0.0F && motion.rightTranslation == 0.0F &&
+            motion.upTranslation == 0.0F && motion.forwardTranslation == 0.0F)
+        {
+            return;
+        }
+        cue::Result<void> moved = m_debugCamera->apply_motion(m_assertContext->fatal_handler(), motion);
+        if (!moved)
+        {
+            m_debugCameraInput.reset();
+            report_error(*moved.try_error());
+        }
     }
 
     /// @brief Edit中はAuthoring Scene、Play中はRuntime SystemのSnapshotを描画入力へ選択する
@@ -2700,6 +2735,8 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
     cue::editor::GameViewSurface m_gameViewSurface;
     cue::editor::DebugViewRequest m_debugViewRequest;
     cue::editor::DebugViewSurface m_debugViewSurface;
+    cue::editor::DebugViewCameraInput m_debugCameraInput;
+    cue::FrameInputSnapshot m_inputSnapshot;
     std::vector<cue::editor_core::RecoveryCandidateInspection> m_recoveryCandidates;
     std::array<char, 512> m_sceneLocator{};
     std::string m_message;

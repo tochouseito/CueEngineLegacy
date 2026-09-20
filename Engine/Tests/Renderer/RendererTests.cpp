@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -179,6 +180,37 @@ template <typename T> [[nodiscard]] T take_value(cue::Result<T> &&a_result) noex
     return runtimeSnapshot;
 }
 
+/// @brief Debug Cameraの回転Clamp、Local移動、失敗時Rollbackを検証する
+void test_debug_camera_motion(const cue::AssertContext &a_assertContext) noexcept
+{
+    cue::renderer::DebugCamera camera =
+        take_value(cue::renderer::DebugCamera::create_default(a_assertContext.fatal_handler()));
+    const cue::math::Vector3 initialTranslation = camera.camera().transform.translation();
+    const cue::math::Quaternion initialRotation = camera.camera().transform.rotation();
+    require(camera.apply_motion(a_assertContext.fatal_handler(), {0.25F, -0.1F, 0.0F, 0.0F, 0.0F}).has_value());
+    require(camera.camera().transform.translation() == initialTranslation);
+    require(camera.camera().transform.rotation() != initialRotation);
+
+    require(camera.apply_motion(a_assertContext.fatal_handler(), {0.0F, 1000.0F, -0.5F, 0.25F, 1.0F}).has_value());
+    const cue::math::Tolerance tolerance =
+        take_value(cue::math::Tolerance::create(a_assertContext.fatal_handler(), 0.0001F, 0.0001F));
+    const cue::math::Vector3 forward = take_value(cue::math::rotate(a_assertContext.fatal_handler(), {0.0F, 0.0F, 1.0F},
+                                                                    camera.camera().transform.rotation(), tolerance));
+    require(cue::math::is_finite(camera.camera().transform.translation()) && forward.y < -0.99F);
+
+    const cue::math::Vector3 validTranslation = camera.camera().transform.translation();
+    const cue::math::Quaternion validRotation = camera.camera().transform.rotation();
+    cue::Result<void> invalid = camera.apply_motion(a_assertContext.fatal_handler(),
+                                                    {std::numeric_limits<float>::infinity(), 0.0F, 0.0F, 0.0F, 0.0F});
+    require(!invalid);
+    require(!camera
+                 .apply_motion(a_assertContext.fatal_handler(),
+                               {0.0F, std::numeric_limits<float>::infinity(), 0.0F, 0.0F, 0.0F})
+                 .has_value());
+    require(camera.camera().transform.translation() == validTranslation);
+    require(camera.camera().transform.rotation() == validRotation);
+}
+
 /// @brief Scene Component BuilderとGameCore Systemを通したRuntime Snapshot抽出を検証する
 void test_runtime_extraction(const cue::scene::SceneSnapshot &a_snapshot,
                              const cue::schema::SchemaRegistry &a_schemaRegistry,
@@ -228,6 +260,7 @@ int main()
     cue::scene::SceneDocument document = make_render_scene(*schemaRegistry, valueSchemaRegistry, assertContext);
     cue::scene::SceneSnapshot runtimeSnapshot =
         test_authoring_extraction(document, typeIds, *schemaRegistry, valueSchemaRegistry, assertContext);
+    test_debug_camera_motion(assertContext);
     test_runtime_extraction(runtimeSnapshot, *schemaRegistry, assertContext);
     return 0;
 }
