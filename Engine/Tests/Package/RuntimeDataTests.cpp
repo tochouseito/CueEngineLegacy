@@ -9,6 +9,8 @@
 #include <Cue/Math/Transform.h>
 #include <Cue/Package/Error.h>
 #include <Cue/Project/Descriptor.h>
+#include <Cue/Renderer/RendererSchema.h>
+#include <Cue/Runtime/RuntimeSchema.h>
 #include <Cue/Scene/ComponentData.h>
 #include <Cue/Scene/Identity.h>
 #include <Cue/Scene/Instantiation.h>
@@ -225,6 +227,112 @@ template <typename Value>
                  : cue::Result<cue::package::MinimalRuntimeDataPublication>::failure(std::move(*snapshot.try_error()));
     return published && published.try_value()->startup_scene_data().bytes().find("\"translation\":[0.1,-0.2,1.25]") !=
                             std::string_view::npos;
+}
+
+/// @brief CameraとBuilt-in Cubeを含むSceneだけが完全なv2を生成し不正投影を拒否するか検証する
+[[nodiscard]] bool test_renderer_scene_v2(const cue::AssertContext &a_assertContext)
+{
+    auto descriptor = make_descriptor(k_sceneId, a_assertContext);
+    auto scene = make_scene(k_sceneId, a_assertContext);
+    auto objectId = cue::scene::ObjectId::parse("20000000-0000-4000-8000-000000000001", a_assertContext);
+    auto cameraId = cue::scene::ComponentInstanceId::parse("30000000-0000-4000-8000-000000000001", a_assertContext);
+    auto meshId = cue::scene::ComponentInstanceId::parse("30000000-0000-4000-8000-000000000002", a_assertContext);
+    if (!descriptor || !scene || !objectId || !cameraId || !meshId)
+    {
+        return false;
+    }
+    cue::schema::SchemaRegistryIdentitySource identitySource;
+    cue::schema::SchemaRegistryBuilder builder(identitySource, a_assertContext);
+    auto addedCore = cue::runtime::add_runtime_schema_types(builder, a_assertContext);
+    auto addedRenderer = addedCore ? cue::renderer::add_renderer_schema_types(builder, a_assertContext)
+                                    : cue::Result<void>::failure(std::move(*addedCore.try_error()));
+    if (!addedRenderer)
+    {
+        return false;
+    }
+    auto registry = builder.seal();
+    if (!registry)
+    {
+        return false;
+    }
+    auto schemas = cue::renderer::make_renderer_value_schemas(**registry.try_value(), a_assertContext);
+    if (!schemas)
+    {
+        return false;
+    }
+    auto values = cue::scene::ComponentValueSchemaRegistry::create(std::move(*schemas.try_value()),
+                                                                    **registry.try_value(), a_assertContext);
+    if (!values)
+    {
+        return false;
+    }
+    auto camera = cue::renderer::make_camera_component(*cameraId.try_value(), true, **registry.try_value(),
+                                                        *values.try_value(), a_assertContext);
+    auto mesh = cue::renderer::make_cube_mesh_component(*meshId.try_value(), **registry.try_value(),
+                                                         *values.try_value(), a_assertContext);
+    if (!camera || !mesh || !scene.try_value()->add_object(*objectId.try_value(), "Authoring Camera And Cube", true,
+                                                           std::nullopt, cue::math::Transform{}) ||
+        !scene.try_value()->add_component(*objectId.try_value(), std::move(*camera.try_value())) ||
+        !scene.try_value()->add_component(*objectId.try_value(), std::move(*mesh.try_value())))
+    {
+        return false;
+    }
+    auto snapshot = cue::scene::create_scene_snapshot(*scene.try_value(), a_assertContext);
+    auto published = snapshot ? cue::package::publish_minimal_runtime_data(*descriptor.try_value(),
+                                                                            *snapshot.try_value(), a_assertContext)
+                              : cue::Result<cue::package::MinimalRuntimeDataPublication>::failure(
+                                    std::move(*snapshot.try_error()));
+    if (!published)
+    {
+        return false;
+    }
+    const std::string_view bytes = published.try_value()->startup_scene_data().bytes();
+    if (!bytes.starts_with("{\"schemaVersion\":2,") ||
+        bytes.find("\"typeId\":\"70000000-0000-4000-8000-000000000001\"") == std::string_view::npos ||
+        bytes.find("\"typeId\":\"70000000-0000-4000-8000-000000000002\"") == std::string_view::npos ||
+        bytes.find("cue://engine/mesh/cube") == std::string_view::npos ||
+        bytes.find("Authoring Camera And Cube") != std::string_view::npos)
+    {
+        return false;
+    }
+    auto secondId = cue::scene::ObjectId::parse("20000000-0000-4000-8000-000000000002", a_assertContext);
+    auto sceneId = cue::scene::SceneAssetId::parse(k_sceneId, a_assertContext);
+    if (!secondId || !sceneId)
+    {
+        return false;
+    }
+    const cue::scene::SceneComponent &sharedComponent = scene.try_value()->objects()[0].components()[0];
+    std::vector<cue::scene::RuntimeSceneObjectData> duplicateObjects;
+    duplicateObjects.push_back({*objectId.try_value(), std::nullopt, true, cue::math::Transform{},
+                                {sharedComponent}});
+    duplicateObjects.push_back({*secondId.try_value(), std::nullopt, true, cue::math::Transform{},
+                                {sharedComponent}});
+    auto duplicateSnapshot = cue::scene::create_runtime_scene_snapshot(*sceneId.try_value(),
+                                                                        std::move(duplicateObjects), a_assertContext);
+    if (duplicateSnapshot)
+    {
+        auto duplicate = cue::package::publish_minimal_runtime_data(*descriptor.try_value(),
+                                                                     *duplicateSnapshot.try_value(), a_assertContext);
+        if (!has_package_error(duplicate, cue::package::PackageError::UnsupportedRuntimeSceneData))
+        {
+            return false;
+        }
+    }
+    auto fovId = cue::schema::FieldId::create(2U, a_assertContext);
+    auto invalidFov = cue::scene::FieldValue::floating_point(200.0, a_assertContext);
+    if (!fovId || !invalidFov || !scene.try_value()->set_component_field(
+            *objectId.try_value(), *cameraId.try_value(), *fovId.try_value(), std::move(*invalidFov.try_value())))
+    {
+        return false;
+    }
+    auto invalidSnapshot = cue::scene::create_scene_snapshot(*scene.try_value(), a_assertContext);
+    if (!invalidSnapshot)
+    {
+        return false;
+    }
+    auto invalid = cue::package::publish_minimal_runtime_data(*descriptor.try_value(),
+                                                               *invalidSnapshot.try_value(), a_assertContext);
+    return has_package_error(invalid, cue::package::PackageError::UnsupportedRuntimeSceneData);
 }
 
 /// @brief 緩い生成Toleranceを通過した非単位QuaternionをPublisher境界で拒否するか検証する
@@ -488,6 +596,7 @@ int main()
     cue::AssertContext assertContext(logger, fatalHandler);
     return test_sha256_vector() && test_deterministic_empty_scene(assertContext) &&
                    test_runtime_object_projection(assertContext) && test_shortest_float_serialization(assertContext) &&
+                   test_renderer_scene_v2(assertContext) &&
                    test_runtime_rotation_revalidated(assertContext) && test_known_component_rejected(assertContext) &&
                    test_asset_reference_rejected(assertContext) && test_opaque_component_rejected(assertContext) &&
                    test_startup_scene_contract(assertContext)

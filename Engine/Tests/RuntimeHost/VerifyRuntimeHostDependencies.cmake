@@ -13,13 +13,14 @@ foreach(
     IN ITEMS
         "CueRuntimeHost LINK_LIBRARIES: Cue.RuntimeHost.Core;Cue.RuntimeHost.Dynamic.Windows"
         "Cue.RuntimeHost.Core LINK_LIBRARIES: Cue.Foundation;Cue.GameCore;Cue.GameModule.Abi;Cue.Input.Windows;Cue.Platform.Windows;Cue.RHI.D3D12.Windows;Cue.Runtime;Cue.Scene;Cue.Schema;Cue.Platform.Windows.TestSupport"
-        "Cue.RuntimeHost.Static LINK_LIBRARIES: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package"
-        "Cue.RuntimeHost.Dynamic.Windows LINK_LIBRARIES: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package"
+        "Cue.RuntimeHost.Static LINK_LIBRARIES: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package;Cue.Renderer"
+        "Cue.RuntimeHost.Dynamic.Windows LINK_LIBRARIES: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package;Cue.Renderer"
         "Core must not link: Cue.RuntimeHost.Dynamic.Windows;Cue.IO.Windows;Cue.Package"
-        "Static package loader dependencies: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package"
+        "Static package loader dependencies: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package;Cue.Renderer"
         "Process implementation target: Cue.RuntimeHost.Core"
         "Testing-only Core dependency: Cue.Platform.Windows.TestSupport"
-        "Forbidden source dependencies: D3D12NativeTypes;Renderer;Editor;ProjectFiles;ECS"
+        "Forbidden source dependencies: D3D12NativeTypes;Editor;ProjectFiles;ECS"
+        "Renderer source dependency allowed only in RuntimePackage.cpp"
 )
     cue_require_report_line(
         dependencyReportLines
@@ -59,9 +60,14 @@ file(
 
 foreach(runtimeHostSource IN LISTS runtimeHostSources)
     file(READ "${runtimeHostSource}" sourceContents)
+    set(forbiddenPattern "WideCharToMultiByte|MultiByteToWideChar|d3d12\\.h|dxgi[0-9_]*\\.h|ID3D12|IDXGI|D3D12_|DXGI_|DirectX|Editor|ProjectFiles|Cue/ECS")
+    get_filename_component(runtimeHostName "${runtimeHostSource}" NAME)
+    if(NOT runtimeHostName STREQUAL "RuntimePackage.cpp")
+        string(APPEND forbiddenPattern "|Renderer")
+    endif()
     string(
         REGEX MATCH
-        "WideCharToMultiByte|MultiByteToWideChar|d3d12\\.h|dxgi[0-9_]*\\.h|ID3D12|IDXGI|D3D12_|DXGI_|DirectX|Renderer|Editor|ProjectFiles|Cue/ECS"
+        "${forbiddenPattern}"
         forbiddenDependency
         "${sourceContents}"
     )

@@ -136,12 +136,12 @@ SceneSnapshot::SceneSnapshot(SceneAssetId a_sceneAssetId,
 {
 }
 
-/// @brief 検証済みRuntime入力をComponentなしScene Objectへ変換する
+/// @brief 検証済みRuntime入力を所有Scene Objectへ変換する
 SceneObject SceneSnapshot::make_runtime_object(RuntimeSceneObjectData a_object) noexcept
 {
     const IdentityText name = a_object.id.canonical_text();
     return SceneObject(std::move(a_object.id), std::string(name.data(), name.size()), a_object.isActive,
-                       std::move(a_object.parentId), std::move(a_object.transform), {});
+                       std::move(a_object.parentId), std::move(a_object.transform), std::move(a_object.components));
 }
 
 /// @brief Snapshotが表す永続Scene Identityを返す
@@ -216,6 +216,43 @@ Result<SceneSnapshot> create_runtime_scene_snapshot(
                     a_assertContext, SceneError::DuplicateObjectId,
                     "Runtime Scene object identities must be unique"));
             }
+        }
+
+        std::vector<ComponentInstanceId> componentIds;
+        for (const RuntimeSceneObjectData &object : a_objects)
+        {
+            if (object.components.size() > k_maximumSceneComponentsPerObject)
+            {
+                return Result<SceneSnapshot>::failure(make_scene_error(
+                    a_assertContext, SceneError::ResourceLimitExceeded,
+                    "Runtime Scene component count exceeds the 4096 element limit"));
+            }
+            const ComponentInstanceId *previousId = nullptr;
+            for (const SceneComponent &component : object.components)
+            {
+                if (!component.is_valid())
+                {
+                    return Result<SceneSnapshot>::failure(make_scene_error(
+                        a_assertContext, SceneError::InvalidComponentData,
+                        "Runtime Scene contains moved-from component data"));
+                }
+                const ComponentInstanceId &componentId = component.instance_id();
+                if (previousId != nullptr && !(*previousId < componentId))
+                {
+                    return Result<SceneSnapshot>::failure(make_scene_error(
+                        a_assertContext, SceneError::DuplicateComponentId,
+                        "Runtime Scene component identities must be stable ordered"));
+                }
+                componentIds.push_back(componentId);
+                previousId = &componentId;
+            }
+        }
+        std::sort(componentIds.begin(), componentIds.end());
+        if (std::adjacent_find(componentIds.begin(), componentIds.end()) != componentIds.end())
+        {
+            return Result<SceneSnapshot>::failure(make_scene_error(
+                a_assertContext, SceneError::DuplicateComponentId,
+                "Runtime Scene component identities must be unique across objects"));
         }
 
         constexpr std::size_t k_noParent = std::numeric_limits<std::size_t>::max();

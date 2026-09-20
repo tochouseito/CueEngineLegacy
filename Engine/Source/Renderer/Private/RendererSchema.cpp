@@ -2,9 +2,13 @@
 
 #include <Cue/EngineAssets/BuiltInMesh.h>
 #include <Cue/Foundation/Assert.h>
+#include <Cue/Math/Scalar.h>
+#include <Cue/Renderer/Camera.h>
+#include <Cue/Renderer/Error.h>
 #include <Cue/Schema/Descriptor.h>
 #include <Cue/Schema/Registry.h>
 
+#include <cmath>
 #include <exception>
 #include <initializer_list>
 #include <new>
@@ -256,6 +260,58 @@ Result<std::vector<scene::ComponentValueSchema>> make_renderer_value_schemas(
         a_assertContext.fatal_handler().terminate("Cue.Renderer value schema creation caught an unexpected exception");
     }
     std::terminate();
+}
+
+Result<void> validate_runtime_scene_component(const scene::SceneComponent &a_component,
+                                              const AssertContext &a_assertContext) noexcept
+{
+    const scene::KnownComponentData *known = a_component.try_known();
+    if (!a_component.is_valid() || known == nullptr || known->schema_version().value() != 1U ||
+        !known->unknown_fields().empty())
+    {
+        return Result<void>::failure(make_renderer_error(a_assertContext, RendererError::InvalidRuntimeBinding,
+                                                          "Runtime Scene requires a complete known v1 component"));
+    }
+    auto ids = make_renderer_schema_type_ids(a_assertContext);
+    if (!ids)
+    {
+        return Result<void>::failure(std::move(*ids.try_error()));
+    }
+    const auto fields = known->known_fields();
+    if (known->type_id() == ids.try_value()->camera)
+    {
+        if (fields.size() != 4U || fields[0].id().value() != 1U || fields[1].id().value() != 2U ||
+            fields[2].id().value() != 3U || fields[3].id().value() != 4U ||
+            fields[0].value().try_boolean() == nullptr || fields[1].value().try_floating_point() == nullptr ||
+            fields[2].value().try_floating_point() == nullptr || fields[3].value().try_floating_point() == nullptr)
+        {
+            return Result<void>::failure(make_renderer_error(a_assertContext, RendererError::InvalidCamera,
+                                                              "Runtime Scene camera fields are incomplete"));
+        }
+        const double fov = *fields[1].value().try_floating_point();
+        const double nearPlane = *fields[2].value().try_floating_point();
+        const double farPlane = *fields[3].value().try_floating_point();
+        if (!std::isfinite(fov) || !std::isfinite(nearPlane) || !std::isfinite(farPlane) ||
+            !(fov > 0.0 && fov < 180.0 && nearPlane > 0.0 && nearPlane < farPlane) ||
+            !is_valid(PerspectiveCamera{math::Transform{},
+                                        math::to_radians(math::Degrees(static_cast<float>(fov))).value,
+                                        static_cast<float>(nearPlane), static_cast<float>(farPlane)}))
+        {
+            return Result<void>::failure(make_renderer_error(a_assertContext, RendererError::InvalidCamera,
+                                                              "Runtime Scene camera projection is invalid"));
+        }
+        return Result<void>::success();
+    }
+    if (known->type_id() == ids.try_value()->mesh && fields.size() == 1U && fields[0].id().value() == 1U)
+    {
+        const scene::AssetReferenceValue *asset = fields[0].value().try_asset_reference();
+        if (asset != nullptr && asset->token() == engine_assets::k_cubeMeshAssetId)
+        {
+            return Result<void>::success();
+        }
+    }
+    return Result<void>::failure(make_renderer_error(a_assertContext, RendererError::UnsupportedMesh,
+                                                      "Runtime Scene supports only the built-in Cube Mesh"));
 }
 
 Result<scene::SceneComponent> make_camera_component(scene::ComponentInstanceId a_instanceId, bool a_isMain,

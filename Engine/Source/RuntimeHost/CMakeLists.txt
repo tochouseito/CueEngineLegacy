@@ -82,6 +82,7 @@ target_link_libraries(
     PRIVATE
         Cue.IO.Windows
         Cue.Package
+        Cue.Renderer
 )
 target_compile_definitions(Cue.RuntimeHost.Static PRIVATE CUE_RUNTIME_PACKAGE_STATIC=1)
 cue_configure_runtime_host_library(Cue.RuntimeHost.Static)
@@ -108,6 +109,7 @@ if(CUE_RUNTIME_HOST_BUILD_DYNAMIC)
         PRIVATE
             Cue.IO.Windows
             Cue.Package
+            Cue.Renderer
     )
     target_compile_definitions(Cue.RuntimeHost.Dynamic.Windows PRIVATE CUE_RUNTIME_PACKAGE_DYNAMIC=1)
     cue_configure_runtime_host_library(Cue.RuntimeHost.Dynamic.Windows)

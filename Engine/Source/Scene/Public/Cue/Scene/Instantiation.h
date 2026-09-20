@@ -24,12 +24,14 @@ namespace cue::scene
 inline constexpr std::size_t k_maximumRuntimeSceneObjectCount = 1'000'000U;
 
 /// @brief Authoring固有Dataを含まないRuntime Scene ObjectのSnapshot構築入力
+/// @details Componentは所有値であり、一時Schema RegistryやAuthoring Documentへの参照を保持しない
 struct RuntimeSceneObjectData final
 {
     ObjectId id;
     std::optional<ObjectId> parentId;
     bool isActive;
     math::Transform transform;
+    std::vector<SceneComponent> components;
 };
 
 /// @brief Mutable SceneDocumentから切り離したRuntime実体化用の不変所有Snapshot
@@ -65,7 +67,7 @@ class SceneSnapshot final
     /// @brief 検証済みScene IdentityとObject集合を所有するSnapshotを構築する
     SceneSnapshot(SceneAssetId a_sceneAssetId,
                   std::vector<SceneObject> a_objects) noexcept;
-    /// @brief 検証済みRuntime入力をComponentなしScene Objectへ変換する
+    /// @brief 検証済みRuntime入力を所有Scene Objectへ変換する
     [[nodiscard]] static SceneObject make_runtime_object(RuntimeSceneObjectData a_object) noexcept;
 
     SceneAssetId m_sceneAssetId;

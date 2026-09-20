@@ -14,6 +14,7 @@
 #include <Cue/Package/Manifest.h>
 #include <Cue/Package/RuntimeData.h>
 #include <Cue/Project/Descriptor.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Runtime/Error.h>
 #include <Cue/Runtime/RuntimeSchema.h>
 #include <Cue/RuntimeHost/GameModuleQueryProvider.h>
@@ -37,6 +38,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -348,8 +350,8 @@ class JsonCursor final
         return converted.ec == std::errc{} && converted.ptr == m_input.data() + m_offset;
     }
 
-    /// @brief JSON有限floatを完全変換する
-    [[nodiscard]] bool floating(float &a_output) noexcept
+    /// @brief JSON有限浮動小数を対象精度へ完全変換する
+    template <typename Value> [[nodiscard]] bool floating(Value &a_output) noexcept
     {
         skip_whitespace();
         const std::size_t begin = m_offset;
@@ -599,7 +601,133 @@ template <std::size_t Size>
     return a_cursor.consume(']');
 }
 
-/// @brief Runtime Scene v1のCore ObjectをScene Snapshotへ復元する
+/// @brief Runtime Scene v2の一Componentを一時Registryで検証して所有Dataへ変換する
+[[nodiscard]] cue::Result<cue::scene::SceneComponent> read_runtime_component(
+    JsonCursor &a_cursor, const cue::schema::SchemaRegistry &a_registry,
+    const cue::scene::ComponentValueSchemaRegistry &a_valueRegistry,
+    const cue::renderer::RendererSchemaTypeIds &a_typeIds,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    std::string instanceText;
+    std::string typeText;
+    std::uint32_t versionValue = 0U;
+    if (!a_cursor.consume('{') || !a_cursor.member("instanceId") || !a_cursor.string(instanceText) ||
+        !a_cursor.consume(',') || !a_cursor.member("typeId") || !a_cursor.string(typeText) ||
+        !a_cursor.consume(',') || !a_cursor.member("schemaVersion") ||
+        !a_cursor.unsigned_number(versionValue) || versionValue != 1U || !a_cursor.consume(',') ||
+        !a_cursor.member("fields") || !a_cursor.consume('['))
+    {
+        return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+            a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+            "Runtime Scene v2 component identity or version is invalid"));
+    }
+    auto instanceId = cue::scene::ComponentInstanceId::parse(instanceText, a_assertContext);
+    auto typeId = cue::schema::TypeId::parse(typeText, a_assertContext);
+    auto version = cue::schema::SchemaVersion::create(versionValue, a_assertContext);
+    if (!instanceId || !typeId || !version ||
+        (*typeId.try_value() != a_typeIds.camera && *typeId.try_value() != a_typeIds.mesh))
+    {
+        return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+            a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+            "Runtime Scene v2 contains an unsupported component type"));
+    }
+    const bool isCamera = *typeId.try_value() == a_typeIds.camera;
+    const std::size_t fieldCount = isCamera ? 4U : 1U;
+    std::vector<cue::scene::KnownFieldData> fields;
+    fields.reserve(fieldCount);
+    for (std::size_t index = 0U; index < fieldCount; ++index)
+    {
+        std::uint32_t fieldNumber = 0U;
+        if ((index > 0U && !a_cursor.consume(',')) || !a_cursor.consume('{') ||
+            !a_cursor.member("fieldId") || !a_cursor.unsigned_number(fieldNumber) ||
+            fieldNumber != index + 1U || !a_cursor.consume(',') || !a_cursor.member("value"))
+        {
+            return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+                a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+                "Runtime Scene v2 fields are missing or unordered"));
+        }
+        auto fieldId = cue::schema::FieldId::create(fieldNumber, a_assertContext);
+        if (!fieldId)
+        {
+            return cue::Result<cue::scene::SceneComponent>::failure(std::move(*fieldId.try_error()));
+        }
+        std::optional<cue::scene::FieldValue> value;
+        cue::scene::FieldValueKind kind = cue::scene::FieldValueKind::Boolean;
+        if (isCamera && index == 0U)
+        {
+            bool parsed = false;
+            if (a_cursor.boolean(parsed))
+            {
+                value.emplace(cue::scene::FieldValue::boolean(parsed));
+            }
+        }
+        else if (isCamera)
+        {
+            double parsed = 0.0;
+            kind = cue::scene::FieldValueKind::FloatingPoint;
+            if (a_cursor.floating(parsed))
+            {
+                auto floating = cue::scene::FieldValue::floating_point(parsed, a_assertContext);
+                if (floating)
+                {
+                    value.emplace(std::move(*floating.try_value()));
+                }
+            }
+        }
+        else
+        {
+            std::string parsed;
+            kind = cue::scene::FieldValueKind::AssetReference;
+            if (a_cursor.string(parsed))
+            {
+                auto asset = cue::scene::AssetReferenceValue::create(parsed, a_assertContext);
+                if (asset)
+                {
+                    value.emplace(cue::scene::FieldValue::asset_reference(std::move(*asset.try_value())));
+                }
+            }
+        }
+        if (!value || !a_cursor.consume('}'))
+        {
+            return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+                a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+                "Runtime Scene v2 field value is invalid"));
+        }
+        auto field = cue::scene::create_known_field(*fieldId.try_value(), std::move(*value), kind,
+                                                    a_assertContext);
+        if (!field)
+        {
+            return cue::Result<cue::scene::SceneComponent>::failure(std::move(*field.try_error()));
+        }
+        fields.push_back(std::move(*field.try_value()));
+    }
+    if (!a_cursor.consume(']') || !a_cursor.consume('}'))
+    {
+        return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+            a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+            "Runtime Scene v2 component has unsupported fields or members"));
+    }
+    auto known = cue::scene::create_known_component(
+        std::move(*instanceId.try_value()), std::move(*typeId.try_value()), std::move(*version.try_value()),
+        std::move(fields), {}, a_registry, a_valueRegistry, a_assertContext);
+    if (!known)
+    {
+        return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+            a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+            "Runtime Scene v2 component does not match its registered schema"));
+    }
+    cue::scene::SceneComponent component = cue::scene::SceneComponent::known(std::move(*known.try_value()));
+    auto validated = cue::renderer::validate_runtime_scene_component(component, a_assertContext);
+    if (!validated)
+    {
+        return cue::Result<cue::scene::SceneComponent>::failure(package_error(
+            a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+            "Runtime Scene v2 component value is unsupported"));
+    }
+    return cue::Result<cue::scene::SceneComponent>::success(std::move(component));
+}
+
+/// @brief Runtime Scene v1／v2のCore ObjectをScene Snapshotへ復元する
 [[nodiscard]] cue::Result<cue::scene::SceneSnapshot> parse_runtime_scene(
     std::string_view a_bytes, std::string_view a_expectedSceneId, const cue::AssertContext &a_assertContext) noexcept
 {
@@ -609,7 +737,8 @@ template <std::size_t Size>
         std::uint32_t schemaVersion = 0U;
         std::string sceneIdText;
         if (!cursor.consume('{') || !cursor.member("schemaVersion") || !cursor.unsigned_number(schemaVersion) ||
-            schemaVersion != cue::package::k_runtimeSceneDataSchemaVersion || !cursor.consume(',') ||
+            (schemaVersion != cue::package::k_runtimeSceneDataSchemaVersion &&
+             schemaVersion != cue::package::k_runtimeSceneDataWithRendererSchemaVersion) || !cursor.consume(',') ||
             !cursor.member("sceneAssetId") || !cursor.string(sceneIdText) || sceneIdText != a_expectedSceneId ||
             !cursor.consume(',') || !cursor.member("objects") || !cursor.consume('['))
         {
@@ -617,7 +746,49 @@ template <std::size_t Size>
                 package_error(a_assertContext, cue::package::PackageError::InvalidRuntimeData,
                               "Runtime Scene identity or schema is invalid"));
         }
+        const bool hasRendererData = schemaVersion == cue::package::k_runtimeSceneDataWithRendererSchemaVersion;
+        cue::schema::SchemaRegistryIdentitySource identitySource;
+        std::unique_ptr<cue::schema::SchemaRegistry> registry;
+        std::optional<cue::scene::ComponentValueSchemaRegistry> valueRegistry;
+        auto rendererIds = cue::renderer::make_renderer_schema_type_ids(a_assertContext);
+        if (!rendererIds)
+        {
+            return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*rendererIds.try_error()));
+        }
+        if (hasRendererData)
+        {
+            cue::schema::SchemaRegistryBuilder builder(identitySource, a_assertContext);
+            auto addedCore = cue::runtime::add_runtime_schema_types(builder, a_assertContext);
+            if (!addedCore)
+            {
+                return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*addedCore.try_error()));
+            }
+            auto addedRenderer = cue::renderer::add_renderer_schema_types(builder, a_assertContext);
+            if (!addedRenderer)
+            {
+                return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*addedRenderer.try_error()));
+            }
+            auto sealed = builder.seal();
+            if (!sealed)
+            {
+                return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*sealed.try_error()));
+            }
+            registry = std::move(*sealed.try_value());
+            auto schemas = cue::renderer::make_renderer_value_schemas(*registry, a_assertContext);
+            if (!schemas)
+            {
+                return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*schemas.try_error()));
+            }
+            auto values = cue::scene::ComponentValueSchemaRegistry::create(
+                std::move(*schemas.try_value()), *registry, a_assertContext);
+            if (!values)
+            {
+                return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*values.try_error()));
+            }
+            valueRegistry.emplace(std::move(*values.try_value()));
+        }
         std::vector<cue::scene::RuntimeSceneObjectData> objects;
+        std::set<cue::scene::ComponentInstanceId> componentIds;
         while (!cursor.next_is(']'))
         {
             if (!objects.empty() && !cursor.consume(','))
@@ -626,7 +797,7 @@ template <std::size_t Size>
                     package_error(a_assertContext, cue::package::PackageError::InvalidRuntimeData,
                                   "Runtime Scene object separator is invalid"));
             }
-            if (objects.size() >= cue::scene::k_maximumRuntimeSceneObjectCount)
+            if (objects.size() >= (hasRendererData ? 4096U : cue::scene::k_maximumRuntimeSceneObjectCount))
             {
                 return cue::Result<cue::scene::SceneSnapshot>::failure(
                     package_error(a_assertContext, cue::package::PackageError::RuntimeDataResourceLimitExceeded,
@@ -667,11 +838,45 @@ template <std::size_t Size>
                     package_error(a_assertContext, cue::package::PackageError::InvalidRuntimeData,
                                   "Runtime Scene object values are invalid"));
             }
+            std::vector<cue::scene::SceneComponent> components;
+            if (hasRendererData)
+            {
+                while (!cursor.next_is(']'))
+                {
+                    if (components.size() >= 2U || (!components.empty() && !cursor.consume(',')))
+                    {
+                        return cue::Result<cue::scene::SceneSnapshot>::failure(package_error(
+                            a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+                            "Runtime Scene v2 component count or separator is invalid"));
+                    }
+                    auto component = read_runtime_component(cursor, *registry, *valueRegistry, *rendererIds.try_value(),
+                                                            a_assertContext);
+                    if (!component)
+                    {
+                        return cue::Result<cue::scene::SceneSnapshot>::failure(std::move(*component.try_error()));
+                    }
+                    if (!componentIds.insert(component.try_value()->instance_id()).second)
+                    {
+                        return cue::Result<cue::scene::SceneSnapshot>::failure(package_error(
+                            a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+                            "Runtime Scene v2 component identities must be unique across the Scene"));
+                    }
+                    if (!components.empty() &&
+                        (!(components.back().instance_id() < component.try_value()->instance_id()) ||
+                         components.back().try_known()->type_id() == component.try_value()->try_known()->type_id()))
+                    {
+                        return cue::Result<cue::scene::SceneSnapshot>::failure(package_error(
+                            a_assertContext, cue::package::PackageError::InvalidRuntimeData,
+                            "Runtime Scene v2 component order or type uniqueness is invalid"));
+                    }
+                    components.push_back(std::move(*component.try_value()));
+                }
+            }
             if (!cursor.consume(']'))
             {
                 return cue::Result<cue::scene::SceneSnapshot>::failure(
                     package_error(a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
-                                  "RuntimeHost v1 does not yet instantiate custom Scene components"));
+                                  "Runtime Scene has unsupported Component Data"));
             }
             if (!cursor.consume('}'))
             {
@@ -715,7 +920,7 @@ template <std::size_t Size>
                 parsedParent.emplace(std::move(*parentId.try_value()));
             }
             objects.push_back({std::move(*objectId.try_value()), std::move(parsedParent), isActive,
-                               std::move(*transform.try_value())});
+                               std::move(*transform.try_value()), std::move(components)});
         }
         if (!cursor.consume(']') || !cursor.consume('}') || !cursor.finished())
         {
@@ -1435,6 +1640,13 @@ class WindowsDynamicGameModuleQueryProvider final : public cue::runtime_host::Ga
 
 namespace cue::runtime_host
 {
+Result<scene::SceneSnapshot> parse_runtime_scene_data(
+    std::string_view a_bytes, std::string_view a_expectedSceneId,
+    const AssertContext &a_assertContext) noexcept
+{
+    return parse_runtime_scene(a_bytes, a_expectedSceneId, a_assertContext);
+}
+
 #if defined(CUE_RUNTIME_PACKAGE_DYNAMIC)
 Result<RuntimeHostStartup> load_runtime_package(const AssertContext &a_assertContext) noexcept
 {
@@ -1553,7 +1765,7 @@ Result<RuntimeHostStartup> load_runtime_package(const AssertContext &a_assertCon
         {
             return Result<RuntimeHostStartup>::failure(std::move(*metadata.try_error()));
         }
-        auto startupScene = parse_runtime_scene(text_view(*sceneBytes.try_value()),
+        auto startupScene = parse_runtime_scene_data(text_view(*sceneBytes.try_value()),
                                                 manifest.try_value()->startup_scene_asset_id(), a_assertContext);
         if (!startupScene)
         {
@@ -1823,7 +2035,7 @@ Result<RuntimeHostStartup> load_static_runtime_package(GameModuleQueryFunction a
                                         "Runtime Project identity differs from the Monolithic Manifest")
                         : std::move(*project.try_error()));
         }
-        auto startupScene = parse_runtime_scene(text_view(*sceneBytes.try_value()),
+        auto startupScene = parse_runtime_scene_data(text_view(*sceneBytes.try_value()),
                                                 manifest.try_value()->startup_scene_asset_id(), a_assertContext);
         if (!startupScene)
         {

@@ -5,15 +5,19 @@
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Math/Scalar.h>
 #include <Cue/Package/Error.h>
+#include <Cue/Renderer/RendererSchema.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdlib>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -150,6 +154,44 @@ void append_transform(std::string &a_output, const cue::math::Transform &a_trans
     a_output.append("]}");
 }
 
+/// @brief 検証済みRenderer Componentを固定Member順のRuntime Scene v2へ追加する
+void append_component(std::string &a_output, const cue::scene::KnownComponentData &a_component)
+{
+    a_output.append("{\"instanceId\":");
+    append_uuid(a_output, a_component.instance_id().bytes());
+    a_output.append(",\"typeId\":");
+    append_uuid(a_output, a_component.type_id().bytes());
+    a_output.append(",\"schemaVersion\":");
+    append_number(a_output, a_component.schema_version().value());
+    a_output.append(",\"fields\":[");
+    bool firstField = true;
+    for (const cue::scene::KnownFieldData &field : a_component.known_fields())
+    {
+        if (!firstField)
+        {
+            a_output.push_back(',');
+        }
+        firstField = false;
+        a_output.append("{\"fieldId\":");
+        append_number(a_output, field.id().value());
+        a_output.append(",\"value\":");
+        if (const bool *booleanValue = field.value().try_boolean(); booleanValue != nullptr)
+        {
+            a_output.append(*booleanValue ? "true" : "false");
+        }
+        else if (const double *floatingValue = field.value().try_floating_point(); floatingValue != nullptr)
+        {
+            append_number(a_output, *floatingValue);
+        }
+        else
+        {
+            append_json_string(a_output, field.value().try_asset_reference()->token());
+        }
+        a_output.push_back('}');
+    }
+    a_output.append("]}");
+}
+
 /// @brief Project DescriptorからCanonical Runtime Project Dataを生成する
 [[nodiscard]] std::string make_project_data(const cue::ProjectDescriptor &a_descriptor, std::string_view a_sceneAssetId)
 {
@@ -182,6 +224,67 @@ void append_transform(std::string &a_output, const cue::math::Transform &a_trans
 {
     try
     {
+        bool hasComponents = false;
+        std::size_t cubeCount = 0U;
+        std::set<cue::scene::ComponentInstanceId> componentIds;
+        for (const cue::scene::SceneObject &object : a_scene.objects())
+        {
+            const auto components = object.components();
+            hasComponents = hasComponents || !components.empty();
+            if (components.size() > 2U)
+            {
+                return cue::Result<std::string>::failure(cue::package::make_package_error(
+                    a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+                    "Runtime Scene v2 permits at most two components per object"));
+            }
+            for (std::size_t index = 0U; index < components.size(); ++index)
+            {
+                const cue::scene::SceneComponent &component = components[index];
+                auto validated = cue::renderer::validate_runtime_scene_component(component, a_assertContext);
+                if (!validated)
+                {
+                    return cue::Result<std::string>::failure(cue::package::make_package_error(
+                        a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+                        "Runtime Scene contains an unsupported Renderer component"));
+                }
+                if (!componentIds.insert(component.instance_id()).second)
+                {
+                    return cue::Result<std::string>::failure(cue::package::make_package_error(
+                        a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+                        "Runtime Scene component identities must be unique across the Scene"));
+                }
+                const cue::scene::KnownComponentData *known = component.try_known();
+                if (index > 0U &&
+                    (!(components[index - 1U].instance_id() < component.instance_id()) ||
+                     components[index - 1U].try_known()->type_id() == known->type_id()))
+                {
+                    return cue::Result<std::string>::failure(cue::package::make_package_error(
+                        a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
+                        "Runtime Scene components must have unique types and ordered identities"));
+                }
+                auto ids = cue::renderer::make_renderer_schema_type_ids(a_assertContext);
+                if (!ids)
+                {
+                    return cue::Result<std::string>::failure(std::move(*ids.try_error()));
+                }
+                if (known->type_id() == ids.try_value()->mesh)
+                {
+                    ++cubeCount;
+                    if (cubeCount > 4096U)
+                    {
+                        return cue::Result<std::string>::failure(cue::package::make_package_error(
+                            a_assertContext, cue::package::PackageError::RuntimeDataResourceLimitExceeded,
+                            "Runtime Scene Cube count exceeds the v2 limit"));
+                    }
+                }
+            }
+        }
+        if (hasComponents && a_scene.objects().size() > 4096U)
+        {
+            return cue::Result<std::string>::failure(cue::package::make_package_error(
+                a_assertContext, cue::package::PackageError::RuntimeDataResourceLimitExceeded,
+                "Runtime Scene v2 object count exceeds the supported limit"));
+        }
         const cue::Result<cue::math::Tolerance> runtimeTolerance =
             cue::math::Tolerance::create(a_assertContext.fatal_handler(), 0.00001F, 0.00001F);
         if (!runtimeTolerance)
@@ -194,7 +297,8 @@ void append_transform(std::string &a_output, const cue::math::Transform &a_trans
         std::string output;
         output.reserve(512U);
         output.append("{\"schemaVersion\":");
-        append_number(output, cue::package::k_runtimeSceneDataSchemaVersion);
+        append_number(output, hasComponents ? cue::package::k_runtimeSceneDataWithRendererSchemaVersion
+                                            : cue::package::k_runtimeSceneDataSchemaVersion);
         output.append(",\"sceneAssetId\":");
         append_uuid(output, a_scene.scene_asset_id().bytes());
         output.append(",\"objects\":[");
@@ -208,12 +312,6 @@ void append_transform(std::string &a_output, const cue::math::Transform &a_trans
                 return cue::Result<std::string>::failure(cue::package::make_package_error(
                     a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
                     "Runtime Transform must contain finite values and a unit rotation"));
-            }
-            if (!object.components().empty())
-            {
-                return cue::Result<std::string>::failure(cue::package::make_package_error(
-                    a_assertContext, cue::package::PackageError::UnsupportedRuntimeSceneData,
-                    "Runtime Scene v1 does not support Component Data"));
             }
             if (!firstObject)
             {
@@ -235,7 +333,18 @@ void append_transform(std::string &a_output, const cue::math::Transform &a_trans
             output.append(object.is_active() ? "true" : "false");
             output.append(",\"transform\":");
             append_transform(output, transform);
-            output.append(",\"components\":[]}");
+            output.append(",\"components\":[");
+            bool firstComponent = true;
+            for (const cue::scene::SceneComponent &component : object.components())
+            {
+                if (!firstComponent)
+                {
+                    output.push_back(',');
+                }
+                firstComponent = false;
+                append_component(output, *component.try_known());
+            }
+            output.append("]}");
             if (output.size() > cue::package::k_maximumRuntimeSceneDataBytes)
             {
                 return cue::Result<std::string>::failure(cue::package::make_package_error(
