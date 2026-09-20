@@ -45,9 +45,11 @@ v2 Component を検証する。検証済み Snapshot は Registry Pointer を保
 
 1. Runtime Scene Data v2 の Camera／Mesh 限定 Writer、Reader、Runtime Snapshot、v1 互換と改ざん拒否 Test
 2. RuntimeHost の Renderer Schema／System／Builder、`RenderSnapshotStore`、Dynamic／Static Composition
-3. RHI D3D12 の最小 Scene Frame、Build 時 Shader、Cube GPU Resource、Depth／Cull、Resize／Removal／Fence Test
-4. Dynamic／Static Package の Startup Scene 描画、Hardware／WARP Process Test、Shipping Trust／Import 回帰
-5. M24 Completion Gate：3 構成 Build／CTest、実 Window 確認、未実行検証と Risk の Evidence
+3. RHI D3D12 の最小 Scene Frame 入力と Build 時 Shader、Cube GPU Resource、基本描画 Test
+4. RHI D3D12 Scene Pass の Depth／裏面 Cull、Resize／Removal／Fence 寿命と Fault Test
+5. RuntimeHost の Snapshot→Scene Frame 変換と Startup Scene 描画 Loop
+6. Dynamic／Static Package の Hardware／WARP Process Test、Shipping Trust／Import 回帰
+7. M24 Completion Gate：3 構成 Build／CTest、実 Window 確認、未実行検証と Risk の Evidence
 
 各 Issue は前段の成果に依存する。特に Scene Data v2 を Reader の受理拡大だけで
 先に有効化せず、Publisher、Canonical 再検証、Trust Test を同じ Issue で閉じる。
