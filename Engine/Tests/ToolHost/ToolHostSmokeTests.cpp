@@ -1,8 +1,10 @@
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
+#include <Cue/Platform/Windows/WindowsWindowInterop.h>
 #include <Cue/ToolHost/WindowsD3D12/ToolHost.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -11,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include <Windows.h>
 #include <imgui.h>
 
 namespace
@@ -41,10 +44,10 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
     /// @brief Smoke Client Stateの複製を禁止する
     SmokeClient &operator=(const SmokeClient &) = delete;
     /// @brief 描画可能なCameraとCube Snapshotを所有してFrame Counterを0から開始する
-    explicit SmokeClient(cue::EmergencyHandler &a_emergencyHandler) noexcept
+    explicit SmokeClient(const cue::AssertContext &a_assertContext) noexcept : m_assertContext(&a_assertContext)
     {
         cue::Result<cue::renderer::DebugCamera> debugCamera =
-            cue::renderer::DebugCamera::create_default(a_emergencyHandler);
+            cue::renderer::DebugCamera::create_default(a_assertContext.fatal_handler());
         if (!debugCamera)
         {
             std::_Exit(77);
@@ -77,6 +80,10 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
         {
             m_requests[0U] = {256U, 144U, true};
             m_requests[1U] = {300U, 180U, true};
+            m_inputInjectionWasValid = m_inputInjectionWasValid &&
+                                       PostMessageW(m_nativeWindow, WM_MOUSEMOVE, 0U, MAKELPARAM(13, 25)) != FALSE &&
+                                       PostMessageW(m_nativeWindow, WM_KEYUP, 'A', 0) != FALSE &&
+                                       PostMessageW(m_nativeWindow, WM_RBUTTONUP, 0U, MAKELPARAM(13, 25)) != FALSE;
         }
         else if (m_drawCount == 2U)
         {
@@ -85,9 +92,56 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
     }
 
     /// @brief 初期化済みWindowが最初のFrame前に通知されたことを記録する
-    void window_ready(cue::Window &) noexcept override
+    void window_ready(cue::Window &a_window) noexcept override
     {
         m_windowWasReady = m_drawCount == 0U;
+        cue::Result<cue::NativeWindowView> nativeView = cue::get_native_window_view(a_window, *m_assertContext);
+        if (!nativeView)
+        {
+            m_inputInjectionWasValid = false;
+            return;
+        }
+        m_nativeWindow = static_cast<HWND>(const_cast<void *>(nativeView.try_value()->value()));
+        m_inputInjectionWasValid =
+            m_nativeWindow != nullptr && PostMessageW(m_nativeWindow, WM_MOUSEMOVE, 0U, MAKELPARAM(10, 20)) != FALSE &&
+            PostMessageW(m_nativeWindow, WM_KEYDOWN, 'A', 0) != FALSE &&
+            PostMessageW(m_nativeWindow, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(10, 20)) != FALSE;
+    }
+
+    /// @brief Portable Input Event順とFrame Snapshotの押下、解放、一時値Resetを検証する
+    void input_frame(cue::tool_host::ToolHostInputFrameView a_input) noexcept override
+    {
+        ++m_inputFrameCount;
+        if (m_inputFrameCount == 1U)
+        {
+            const auto contains = [&a_input](cue::InputEventType a_type)
+            {
+                return std::ranges::any_of(a_input.events,
+                                           [a_type](const cue::InputEvent &a_event) { return a_event.type == a_type; });
+            };
+            const cue::InputPoint position = a_input.snapshot.mouse_position();
+            m_firstInputFrameWasValid =
+                contains(cue::InputEventType::MouseMove) && contains(cue::InputEventType::KeyDown) &&
+                contains(cue::InputEventType::MouseButtonDown) && a_input.snapshot.is_key_down(cue::InputKey::A) &&
+                a_input.snapshot.was_key_pressed(cue::InputKey::A) &&
+                a_input.snapshot.is_mouse_button_down(cue::InputMouseButton::Right) &&
+                a_input.snapshot.was_mouse_button_pressed(cue::InputMouseButton::Right) &&
+                a_input.snapshot.has_mouse_position() && position.x == 10 && position.y == 20;
+        }
+        else if (m_inputFrameCount == 2U)
+        {
+            m_secondInputFrameWasValid = !a_input.snapshot.is_key_down(cue::InputKey::A) &&
+                                         a_input.snapshot.was_key_released(cue::InputKey::A) &&
+                                         !a_input.snapshot.is_mouse_button_down(cue::InputMouseButton::Right) &&
+                                         a_input.snapshot.was_mouse_button_released(cue::InputMouseButton::Right);
+        }
+        else if (m_inputFrameCount == 3U)
+        {
+            m_thirdInputFrameWasValid = !a_input.snapshot.was_key_pressed(cue::InputKey::A) &&
+                                        !a_input.snapshot.was_key_released(cue::InputKey::A) &&
+                                        !a_input.snapshot.was_mouse_button_pressed(cue::InputMouseButton::Right) &&
+                                        !a_input.snapshot.was_mouse_button_released(cue::InputMouseButton::Right);
+        }
     }
 
     /// @brief 現在FrameのSurface要求を返す
@@ -155,23 +209,52 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
         return m_surfaceWasValid && m_resizeWasValid && m_hiddenWasValid;
     }
 
+    /// @brief Native Message注入と3 FrameのPortable Input契約を最初に満たさない固定Exit Codeで返す
+    [[nodiscard]] int input_lifecycle_exit_code() const noexcept
+    {
+        if (!m_inputInjectionWasValid)
+        {
+            return 5;
+        }
+        if (m_inputFrameCount != 3U)
+        {
+            return 6;
+        }
+        if (!m_firstInputFrameWasValid)
+        {
+            return 7;
+        }
+        if (!m_secondInputFrameWasValid)
+        {
+            return 8;
+        }
+        return m_thirdInputFrameWasValid ? 0 : 9;
+    }
+
   private:
+    const cue::AssertContext *m_assertContext;
+    HWND m_nativeWindow = nullptr;
     cue::tool_host::ToolHostRenderSurfaceRequests m_requests{{{320U, 180U, true}, {200U, 120U, true}}};
     cue::tool_host::ToolHostRenderSurfaceViews m_surfaces;
     std::optional<cue::renderer::DebugCamera> m_debugCamera;
     cue::renderer::RenderSnapshot m_snapshot;
     std::uint32_t m_drawCount = 0;
+    std::uint32_t m_inputFrameCount = 0;
     bool m_windowWasReady = false;
     bool m_surfaceWasValid = false;
     bool m_resizeWasValid = false;
     bool m_hiddenWasValid = false;
+    bool m_inputInjectionWasValid = false;
+    bool m_firstInputFrameWasValid = false;
+    bool m_secondInputFrameWasValid = false;
+    bool m_thirdInputFrameWasValid = false;
 };
 
 /// @brief 指定Adapter方針でTool Host Surface Lifecycleを実Frame検証する
 [[nodiscard]] int run_smoke(cue::tool_host::ToolHostAdapterPreference a_preference,
                             const cue::AssertContext &a_context) noexcept
 {
-    SmokeClient client(a_context.fatal_handler());
+    SmokeClient client(a_context);
     const cue::tool_host::ToolHostDescriptor descriptor{"Cue Tool Host Smoke", {640U, 360U}, 3U, 0U, a_preference};
     cue::Result<void> result = cue::tool_host::run_windows_d3d12_tool_host(descriptor, client, a_context);
     if (!result)
@@ -186,7 +269,11 @@ class SmokeClient final : public cue::tool_host::ToolHostClient
     {
         return 3;
     }
-    return client.surface_lifecycle_was_valid() ? 0 : 4;
+    if (!client.surface_lifecycle_was_valid())
+    {
+        return 4;
+    }
+    return client.input_lifecycle_exit_code();
 }
 } // namespace
 

@@ -4,6 +4,9 @@
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Error.h>
 #include <Cue/Foundation/Fatal.h>
+#include <Cue/Input/InputEventQueue.h>
+#include <Cue/Input/InputState.h>
+#include <Cue/Input/Windows/WindowsInputMessageSink.h>
 #include <Cue/Platform/Window.h>
 #include <Cue/Platform/WindowSystem.h>
 #include <Cue/Platform/Windows/WindowsMessageSink.h>
@@ -522,7 +525,8 @@ class WindowsD3d12ToolHost final
 {
   public:
     /// @brief 診断ContextをHost全寿命へ非所有で関連付ける
-    explicit WindowsD3d12ToolHost(const cue::AssertContext &a_context) noexcept : m_assertContext(&a_context)
+    explicit WindowsD3d12ToolHost(const cue::AssertContext &a_context) noexcept
+        : m_assertContext(&a_context), m_messageSink(m_inputEvents, &m_imguiMessageSink)
     {
     }
     /// @brief Native Resource所有権の複製を禁止する
@@ -600,7 +604,12 @@ class WindowsD3d12ToolHost final
     void cleanup(cue::Error *a_secondaryDiagnostics = nullptr) noexcept;
 
     const cue::AssertContext *m_assertContext;
-    ImGuiWindowsMessageSink m_messageSink;
+    cue::InputEventQueue m_inputEvents;
+    cue::InputState m_inputState;
+    std::array<cue::InputEvent, cue::InputEventQueue::k_capacity> m_frameInputEvents;
+    std::size_t m_frameInputEventCount = 0U;
+    ImGuiWindowsMessageSink m_imguiMessageSink;
+    cue::WindowsInputMessageSink m_messageSink;
     std::unique_ptr<cue::WindowSystem> m_windowSystem;
     std::unique_ptr<cue::Window> m_window;
     ComPtr<IDXGIFactory6> m_factory;
@@ -1698,6 +1707,19 @@ cue::Result<void> WindowsD3d12ToolHost::render_frame(cue::tool_host::ToolHostCli
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+    m_inputState.begin_frame({});
+    m_frameInputEventCount = 0U;
+    cue::InputEvent inputEvent;
+    while (m_inputEvents.try_pop(inputEvent))
+    {
+        m_frameInputEvents[m_frameInputEventCount] = inputEvent;
+        ++m_frameInputEventCount;
+        m_inputState.apply_event(inputEvent);
+    }
+    const ImGuiIO &io = ImGui::GetIO();
+    a_client.input_frame({std::span<const cue::InputEvent>(m_frameInputEvents.data(), m_frameInputEventCount),
+                          m_inputState.snapshot(),
+                          {io.WantCaptureKeyboard, io.WantCaptureMouse}});
     a_client.render_surfaces_ready(render_surface_views());
     a_client.draw_frame();
     ImGui::Render();
