@@ -18,12 +18,12 @@ void require(bool a_condition, int a_exitCode) noexcept
 }
 
 /// @brief 固定Editor DockspaceとGame Viewの一Frameを構築する
-[[nodiscard]] cue::editor::GameViewRequest draw_frame() noexcept
+[[nodiscard]] cue::editor::GameViewRequest draw_frame(cue::editor::GameViewSurface a_surface = {}) noexcept
 {
     ImGui::NewFrame();
     static_cast<void>(cue::editor::begin_editor_dockspace_host());
     cue::editor::end_editor_dockspace_host();
-    const cue::editor::GameViewRequest request = cue::editor::draw_game_view({});
+    const cue::editor::GameViewRequest request = cue::editor::draw_game_view(a_surface);
     ImGui::Render();
     return request;
 }
@@ -44,6 +44,20 @@ int main()
     const ImGuiWindow *gameView = ImGui::FindWindowByName("Game View");
     require(gameView != nullptr && gameView->DockId != 0U, 2);
     require(visible.isVisible && visible.width != 0U && visible.height != 0U, 3);
+
+    const cue::editor::GameViewSurface surface{1U, 640U, 360U};
+    const ImVec2 viewportCenter{(gameView->InnerRect.Min.x + gameView->InnerRect.Max.x) * 0.5F,
+                                (gameView->InnerRect.Min.y + gameView->InnerRect.Max.y) * 0.5F};
+    input.AddMousePosEvent(viewportCenter.x, viewportCenter.y);
+    static_cast<void>(draw_frame(surface));
+    const cue::editor::GameViewRequest hovered = draw_frame(surface);
+    require(hovered.isViewportHovered && !hovered.isViewportActive, 4);
+
+    input.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    const cue::editor::GameViewRequest active = draw_frame(surface);
+    require(active.isViewportHovered && active.isViewportActive && active.isWindowFocused, 5);
+    input.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    static_cast<void>(draw_frame(surface));
     ImGui::DestroyContext();
     return 0;
 }

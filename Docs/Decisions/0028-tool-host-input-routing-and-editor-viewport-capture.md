@@ -85,6 +85,10 @@ Editor Composition Rootは、Portable EventとCapture情報を次の優先順位
 4. 操作中のGameViewはGame入力としてPlay Runtimeへ配送できる
 5. どのViewportも占有しない未Capture入力だけをPlay Runtimeへ配送する
 
+GameView内の描画領域がHoverまたは操作中なら、一般UI向けのMouse CaptureよりGameViewを優先する。GameView WindowがFocusされている間は一般UI向けKeyboard CaptureよりGameViewを優先する。ただしModalとText Inputは常に優先してRuntime入力を遮断する。DebugViewのMouse占有はGameViewより優先する。Focus復帰に必要な`FocusGained`も、Focus喪失とResetと同様にCaptureに関係なく配送する。
+
+Play開始FrameにTool Hostへ到着していたEventは、新しく生成したRuntime Sessionへ引き継がない。Play停止中のEventはFrame末尾で破棄し、再開時にはSession-local Input Stateを新規生成する。Runtime Frameには配送Eventだけでなく合成した`InputCapture`も渡し、UIへ占有が移ったときに既存押下を解放する。
+
 M23の最初の実装はTool HostからPortable Input Frameを通知するところまでとする。DebugCamera更新とPlay Runtime Routingは別Issueで追加する。
 
 ### Debug Camera Input

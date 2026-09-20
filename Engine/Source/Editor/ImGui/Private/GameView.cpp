@@ -33,13 +33,23 @@ GameViewRequest draw_game_view(GameViewSurface a_surface) noexcept
     const bool contentsVisible = ImGui::Begin("Game View");
     if (contentsVisible)
     {
+        request.isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         const ImVec2 available = ImGui::GetContentRegionAvail();
         request.width = surface_dimension(available.x);
         request.height = surface_dimension(available.y);
         request.isVisible = request.width != 0U && request.height != 0U;
         if (request.isVisible && a_surface.textureId != 0U)
         {
-            ImGui::Image(ImTextureRef(static_cast<ImTextureID>(a_surface.textureId)), available);
+            const ImVec2 minimum = ImGui::GetCursorScreenPos();
+            static_cast<void>(ImGui::InvisibleButton("##GameViewViewport", available,
+                                                     ImGuiButtonFlags_MouseButtonLeft |
+                                                         ImGuiButtonFlags_MouseButtonRight |
+                                                         ImGuiButtonFlags_MouseButtonMiddle));
+            request.isViewportHovered = ImGui::IsItemHovered();
+            request.isViewportActive = ImGui::IsItemActive();
+            const ImVec2 maximum{minimum.x + available.x, minimum.y + available.y};
+            ImGui::GetWindowDrawList()->AddImage(ImTextureRef(static_cast<ImTextureID>(a_surface.textureId)), minimum,
+                                                 maximum);
         }
         else if (request.isVisible)
         {

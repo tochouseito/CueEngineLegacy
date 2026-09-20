@@ -7,6 +7,7 @@
 #include <Cue/GameCore/Clock.h>
 #include <Cue/GameCore/RuntimeSystem.h>
 #include <Cue/GameCore/World.h>
+#include <Cue/Input/FrameInputSnapshot.h>
 #include <Cue/Math/Transform.h>
 #include <Cue/Project/Descriptor.h>
 #include <Cue/Runtime/Error.h>
@@ -156,6 +157,75 @@ class RetryStopSystemFactory final : public cue::runtime::RuntimeSystemFactory
     StopRetryProbe *m_probe;
 };
 
+struct InputFrameProbe final
+{
+    std::array<bool, 3U> keyDown = {};
+    std::array<bool, 3U> keyReleased = {};
+    std::array<bool, 3U> keyboardCaptured = {};
+    std::size_t frameCount = 0U;
+};
+
+class InputProbeSystem final : public cue::game_core::RuntimeSystem
+{
+  public:
+    /// @brief Sessionを跨ぐ入力状態を観測するTest Systemを生成する
+    explicit InputProbeSystem(InputFrameProbe &a_probe) noexcept : m_probe(&a_probe)
+    {
+    }
+
+    /// @brief 入力観測前に副作用なしで開始する
+    [[nodiscard]] cue::Result<void> start(cue::game_core::RuntimeSystemContext &) noexcept override
+    {
+        return cue::Result<void>::success();
+    }
+
+    /// @brief Runtime Systemが実際に受け取ったFrame Inputを値で記録する
+    [[nodiscard]] cue::Result<void> update(
+        const cue::game_core::RuntimeSystemUpdateContext &a_context) noexcept override
+    {
+        if (m_probe->frameCount < m_probe->keyDown.size())
+        {
+            const std::size_t index = m_probe->frameCount;
+            m_probe->keyDown[index] = a_context.input.is_key_down(cue::InputKey::A);
+            m_probe->keyReleased[index] = a_context.input.was_key_released(cue::InputKey::A);
+            m_probe->keyboardCaptured[index] = a_context.input.is_keyboard_captured();
+        }
+        ++m_probe->frameCount;
+        return cue::Result<void>::success();
+    }
+
+    /// @brief 入力観測後に副作用なしで停止する
+    [[nodiscard]] cue::Result<void> stop(cue::game_core::RuntimeSystemContext &) noexcept override
+    {
+        return cue::Result<void>::success();
+    }
+
+  private:
+    InputFrameProbe *m_probe;
+};
+
+class InputProbeSystemFactory final : public cue::runtime::RuntimeSystemFactory
+{
+  public:
+    /// @brief Play世代ごとに独立Systemを生成するProbeを保持する
+    explicit InputProbeSystemFactory(InputFrameProbe &a_probe) noexcept : m_probe(&a_probe)
+    {
+    }
+
+    /// @brief Input観測SystemをRuntimeへ登録する
+    [[nodiscard]] cue::Result<cue::runtime::RuntimeSystemRegistration> create_system(
+        const cue::AssertContext &) const noexcept override
+    {
+        cue::runtime::RuntimeSystemRegistration registration{
+            {"Editor.Play.InputProbe", cue::game_core::RuntimeUpdatePhase::Update, 0, {}},
+            std::make_unique<InputProbeSystem>(*m_probe)};
+        return cue::Result<cue::runtime::RuntimeSystemRegistration>::success(std::move(registration));
+    }
+
+  private:
+    InputFrameProbe *m_probe;
+};
+
 /// @brief 条件が偽ならEditor Play Session Testを失敗終了する
 void require(bool a_condition, std::source_location a_location = std::source_location::current()) noexcept
 {
@@ -242,6 +312,36 @@ template <typename T> [[nodiscard]] T take_value(cue::Result<T> &&a_result) noex
         a_workspaceSession, a_worldIdentitySource, a_clock, a_schemaRegistry, a_systemFactories,
         make_type_id(k_transformTypeId, a_assertContext), make_type_id(k_sceneObjectStateTypeId, a_assertContext),
         a_firstGeneration, 100'000'000, a_assertContext));
+}
+
+/// @brief Capture解放とPlay再開始後のSession-local Input初期化をSystem入力で検証する
+void test_input_capture_and_replay(const cue::schema::SchemaRegistry &a_schemaRegistry,
+                                   cue::game_core::WorldIdentitySource &a_worldIdentitySource,
+                                   const cue::AssertContext &a_assertContext) noexcept
+{
+    TestClock clock;
+    auto editor = cue::editor_core::EditorController::create(make_project_descriptor(a_assertContext), a_assertContext);
+    cue::RelativePath locator = take_value(cue::RelativePath::parse("Scenes/InputReplay.cuescene", a_assertContext));
+    const cue::editor_core::EditorDocumentId documentId =
+        take_value(editor->open_document(make_scene_document(a_assertContext), std::move(locator), true));
+    InputFrameProbe probe;
+    InputProbeSystemFactory factory(probe);
+    const std::array<const cue::runtime::RuntimeSystemFactory *, 1U> factories{&factory};
+    auto play = make_play_controller(editor->session(), a_worldIdentitySource, clock, a_schemaRegistry, 500U,
+                                     a_assertContext, factories);
+
+    require(play->start(documentId));
+    require(take_value(play->push_input_event({cue::InputEventType::KeyDown, cue::InputKey::A})));
+    require(play->advance_frame({}));
+    require(probe.frameCount == 1U && probe.keyDown[0] && !probe.keyboardCaptured[0]);
+    require(play->advance_frame({true, false}));
+    require(probe.frameCount == 2U && !probe.keyDown[1] && probe.keyReleased[1] && probe.keyboardCaptured[1]);
+    require(play->stop());
+
+    require(play->start(documentId));
+    require(play->advance_frame({}));
+    require(probe.frameCount == 3U && !probe.keyDown[2] && !probe.keyReleased[2] && !probe.keyboardCaptured[2]);
+    require(play->stop());
 }
 
 /// @brief Dirty Authoring状態を変えず12回のPlay／Stopで独立Worldを生成できることを検証する
@@ -458,6 +558,7 @@ int main()
     cue::game_core::WorldIdentitySource worldIdentitySource;
 
     test_dirty_document_repeated_play(*registry, worldIdentitySource, assertContext);
+    test_input_capture_and_replay(*registry, worldIdentitySource, assertContext);
     test_start_failure_replay(*registry, worldIdentitySource, assertContext);
     test_document_close_isolation(*registry, worldIdentitySource, assertContext);
     test_cleanup_failure_retry(*registry, worldIdentitySource, assertContext);
