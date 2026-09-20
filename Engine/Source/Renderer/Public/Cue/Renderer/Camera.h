@@ -14,6 +14,16 @@ struct PerspectiveCamera final
     float farPlane = 1000.0F;
 };
 
+/// @brief Editor入力から独立したDebug Cameraの一Frame移動量
+struct DebugCameraMotion final
+{
+    float yawDeltaRadians = 0.0F;
+    float pitchDeltaRadians = 0.0F;
+    float rightTranslation = 0.0F;
+    float upTranslation = 0.0F;
+    float forwardTranslation = 0.0F;
+};
+
 /// @brief Editor専用CameraのPoseとProjectionをScene永続化から分離して所有する値
 class DebugCamera final
 {
@@ -23,12 +33,18 @@ class DebugCamera final
 
     /// @brief 現在のPortable Camera値を返す
     [[nodiscard]] const PerspectiveCamera &camera() const noexcept;
+    /// @brief 有限な回転とLocal移動を適用し、失敗時は現在Poseを保持する
+    [[nodiscard]] Result<void> apply_motion(EmergencyHandler &a_emergencyHandler, DebugCameraMotion a_motion) noexcept;
 
   private:
     /// @brief 検証済みCamera値を保持する
-    explicit DebugCamera(PerspectiveCamera a_camera) noexcept;
+    explicit DebugCamera(PerspectiveCamera a_camera, math::Tolerance a_tolerance, float a_yawRadians,
+                         float a_pitchRadians) noexcept;
 
     PerspectiveCamera m_camera;
+    math::Tolerance m_tolerance;
+    float m_yawRadians;
+    float m_pitchRadians;
 };
 
 /// @brief 行Vector規約のTransformからWorld Matrixを生成する

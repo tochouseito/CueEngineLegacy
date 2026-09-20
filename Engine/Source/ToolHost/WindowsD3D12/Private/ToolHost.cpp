@@ -951,7 +951,8 @@ cue::Result<void> WindowsD3d12ToolHost::initialize_scene_renderer() noexcept
     pipeline.SampleMask = UINT_MAX;
     pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pipeline.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-    pipeline.RasterizerState.FrontCounterClockwise = TRUE;
+    // World 空間で外向き CCW の Cube は Viewport の Y 反転後に CW となる
+    pipeline.RasterizerState.FrontCounterClockwise = FALSE;
     pipeline.RasterizerState.DepthClipEnable = TRUE;
     pipeline.DepthStencilState.DepthEnable = TRUE;
     pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;

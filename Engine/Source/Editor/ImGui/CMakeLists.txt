@@ -32,6 +32,7 @@ target_link_libraries(
     PUBLIC
         Cue.Build
         Cue.EditorCore
+        Cue.Input
         Cue.Package
     PRIVATE
         Cue.ImGui.Core
