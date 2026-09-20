@@ -541,12 +541,14 @@ void test_runtime_scene_snapshot_boundary() noexcept
     cue::schema::SchemaRegistryIdentitySource registryIdentitySource;
     std::unique_ptr<cue::schema::SchemaRegistry> registry = make_registry(registryIdentitySource, assertContext);
     cue::scene::ComponentValueSchemaRegistry valueRegistry = make_value_registry(*registry, assertContext);
+    /// @brief 検証ケースごとに一意なRuntime Object Identityを割り当てる
     const auto makeObject = [&](std::vector<cue::scene::SceneComponent> a_components)
     {
         return cue::scene::RuntimeSceneObjectData{
             take_value(cue::scene::ObjectId::generate(identitySource, assertContext)), std::nullopt, true,
             cue::math::Transform{}, std::move(a_components)};
     };
+    /// @brief 各負例を独立したScene Asset IdentityでSnapshot構築へ投入する
     const auto snapshotFrom = [&](std::vector<cue::scene::RuntimeSceneObjectData> a_objects)
     {
         return cue::scene::create_runtime_scene_snapshot(
