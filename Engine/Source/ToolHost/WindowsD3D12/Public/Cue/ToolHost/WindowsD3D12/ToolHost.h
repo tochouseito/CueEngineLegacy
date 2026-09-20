@@ -1,11 +1,14 @@
 #pragma once
 
 #include <Cue/Foundation/Result.h>
+#include <Cue/Input/FrameInputSnapshot.h>
+#include <Cue/Input/InputEvent.h>
 #include <Cue/Platform/WindowEvent.h>
 #include <Cue/Renderer/RenderSnapshot.h>
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace cue
@@ -82,6 +85,16 @@ struct ToolHostRenderFrameView final
     const renderer::PerspectiveCamera *debugCamera = nullptr;
 };
 
+/// @brief Tool Hostが一Frameで受理したPortable Event、状態、UI Captureの借用View
+///
+/// eventsとsnapshotは次回通知またはHost終了までだけ有効であり、別Threadまたは次Frameへ保持しない
+struct ToolHostInputFrameView final
+{
+    std::span<const InputEvent> events;
+    const FrameInputSnapshot &snapshot;
+    InputCapture uiCapture;
+};
+
 /// @brief Tool Host Windowと自動Smoke終了条件を指定する
 struct ToolHostDescriptor final
 {
@@ -123,6 +136,11 @@ class ToolHostClient
     /// @brief 現在FrameでImGui Imageへ使用できる非所有Texture Viewをdraw_frame直前に通知する
     /// @details Viewは次回通知またはHost終了までだけ有効で、textureIdはImGui以外へ使用しない
     virtual void render_surfaces_ready(ToolHostRenderSurfaceViews) noexcept
+    {
+    }
+
+    /// @brief Message Pump後に構築したPortable Inputを現在FrameのUI構築前に通知する
+    virtual void input_frame(ToolHostInputFrameView) noexcept
     {
     }
 
