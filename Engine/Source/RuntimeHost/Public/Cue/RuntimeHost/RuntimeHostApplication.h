@@ -13,6 +13,11 @@ class AssertContext;
 class Window;
 } // namespace cue
 
+namespace cue::renderer
+{
+class RenderSnapshot;
+} // namespace cue::renderer
+
 namespace cue::runtime_host
 {
 /// @brief Standalone Host固有のProcess ScopeとPortable Runtime Sessionを明示所有するComposition
@@ -84,6 +89,9 @@ class RuntimeHostApplication final
     [[nodiscard]] std::uint64_t world_id() const noexcept;
     /// @brief Clockが確定したRuntime Frame数を返す
     [[nodiscard]] std::uint64_t frame_count() const noexcept;
+    /// @brief 次のFrame更新または停止まで有効なWorld Pointer非保持の描画Snapshotを借用する
+    /// @details Owner Threadだけで呼び出し、advance_frame、stop、Application破棄後の参照を保持しない
+    [[nodiscard]] const renderer::RenderSnapshot &render_snapshot() const noexcept;
     /// @brief Runtimeが記録した最初の停止理由を返す
     [[nodiscard]] runtime::RuntimeApplicationStopReason stop_reason() const noexcept;
 

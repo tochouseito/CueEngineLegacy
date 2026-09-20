@@ -5,7 +5,9 @@
 #include <Cue/GameCore/CommandBuffer.h>
 #include <Cue/GameCore/World.h>
 #include <Cue/Input/FrameInputSnapshot.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Runtime/Error.h>
+#include <Cue/Runtime/RuntimeSchema.h>
 #include <Cue/RuntimeHost/GameModuleQueryProvider.h>
 #include <Cue/RuntimeHost/StaticRuntimePackage.h>
 #include <Cue/Schema/Registry.h>
@@ -316,6 +318,10 @@ void run_lifecycle(cue::runtime_host::GameModuleQueryProvider &a_provider,
         a_provider, k_projectId, std::make_unique<cue::schema::SchemaRegistryIdentitySource>(),
         a_assertContext));
     const cue::schema::SchemaRegistry &registry = prepared.schema_registry();
+    const cue::renderer::RendererSchemaTypeIds rendererIds =
+        take_value(cue::renderer::make_renderer_schema_type_ids(a_assertContext));
+    require(registry.find(rendererIds.camera, a_assertContext).has_value());
+    require(registry.find(rendererIds.mesh, a_assertContext).has_value());
     std::vector<cue::runtime::RuntimeSystemRegistration> &systems = prepared.systems();
     cue::game_core::WorldIdentitySource worldIdentitySource;
     std::unique_ptr<cue::game_core::World> world =
@@ -344,6 +350,16 @@ void run_lifecycle(cue::runtime_host::GameModuleQueryProvider &a_provider,
         }
     }
     world.reset();
+}
+
+/// @brief CoreとRendererの重複Stable Type IDをSeal前に拒否する
+void test_renderer_schema_duplicate(const cue::AssertContext &a_assertContext)
+{
+    cue::schema::SchemaRegistryIdentitySource identitySource;
+    cue::schema::SchemaRegistryBuilder builder(identitySource, a_assertContext);
+    require(cue::runtime::add_runtime_schema_types(builder, a_assertContext).has_value());
+    require(cue::renderer::add_renderer_schema_types(builder, a_assertContext).has_value());
+    require(!cue::renderer::add_renderer_schema_types(builder, a_assertContext).has_value());
 }
 
 void test_static_provider(const cue::AssertContext &a_assertContext)
@@ -443,6 +459,7 @@ int main()
     cue::Logger logger(fatalHandler, std::move(sinks));
     cue::AssertContext assertContext(logger, fatalHandler);
     test_static_provider(assertContext);
+    test_renderer_schema_duplicate(assertContext);
     test_static_runtime_trust_policy(assertContext);
     test_dynamic_provider_and_rollback(assertContext);
     return 0;

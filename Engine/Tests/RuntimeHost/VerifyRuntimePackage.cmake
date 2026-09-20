@@ -135,8 +135,77 @@ foreach(requiredMessage IN ITEMS
     endif()
 endforeach()
 
-# v2 Reader拒否と共通Manifest Size／Hash境界をGame Module接続前に検証する
+# v2 Componentを接続したStandalone CompositionのCamera選択と再起動を実Processで検証する
 set(scenePackagePath "${packageRoot}/${sceneRelativePath}")
+set(cameraComponent
+    "{\"instanceId\":\"30000000-0000-4000-8000-000000000001\",\"typeId\":\"70000000-0000-4000-8000-000000000001\",\"schemaVersion\":1,\"fields\":[{\"fieldId\":1,\"value\":true},{\"fieldId\":2,\"value\":60},{\"fieldId\":3,\"value\":0.1},{\"fieldId\":4,\"value\":1000}]}"
+)
+set(secondCameraComponent
+    "{\"instanceId\":\"30000000-0000-4000-8000-000000000003\",\"typeId\":\"70000000-0000-4000-8000-000000000001\",\"schemaVersion\":1,\"fields\":[{\"fieldId\":1,\"value\":true},{\"fieldId\":2,\"value\":60},{\"fieldId\":3,\"value\":0.1},{\"fieldId\":4,\"value\":1000}]}"
+)
+set(meshComponent
+    "{\"instanceId\":\"30000000-0000-4000-8000-000000000002\",\"typeId\":\"70000000-0000-4000-8000-000000000002\",\"schemaVersion\":1,\"fields\":[{\"fieldId\":1,\"value\":\"cue://engine/mesh/cube\"}]}"
+)
+set(objectPrefix
+    "{\"objectId\":\"20000000-0000-4000-8000-000000000001\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":["
+)
+set(secondObject
+    "{\"objectId\":\"20000000-0000-4000-8000-000000000002\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[${secondCameraComponent}]}"
+)
+set(missingCameraScene
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${meshComponent}]}]}${runtimeLf}"
+)
+set(readyCameraScene
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${cameraComponent},${meshComponent}]}]}${runtimeLf}"
+)
+set(multipleCameraScene
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${cameraComponent},${meshComponent}]},${secondObject}]}${runtimeLf}"
+)
+function(verify_render_snapshot_scene sceneBytes expectedStatus)
+    write_runtime_data("${scenePackagePath}" "${sceneBytes}")
+    write_package_manifest("${packageRoot}" "" "")
+    execute_process(
+        COMMAND "${packageRoot}/CueRuntimeHost.exe" --package-smoke-test
+        WORKING_DIRECTORY "${workingRoot}"
+        RESULT_VARIABLE sceneResult
+        OUTPUT_VARIABLE sceneOutput
+        ERROR_VARIABLE sceneError
+        TIMEOUT 15
+    )
+    set(sceneCombined "${sceneOutput}\n${sceneError}")
+    string(FIND "${sceneCombined}" "Runtime Render Snapshot: MainCamera=${expectedStatus}, MeshCount=1"
+        snapshotPosition)
+    string(FIND "${sceneCombined}" "Runtime Application Session stopped: Reason=WindowClosed, FrameCount=1"
+        stopPosition)
+    if(NOT sceneResult EQUAL 0 OR snapshotPosition EQUAL -1 OR stopPosition EQUAL -1)
+        message(FATAL_ERROR "Runtime Scene v2 composition failed for ${expectedStatus}\n${sceneCombined}")
+    endif()
+endfunction()
+verify_render_snapshot_scene("${missingCameraScene}" "Missing")
+verify_render_snapshot_scene("${readyCameraScene}" "Ready")
+verify_render_snapshot_scene("${multipleCameraScene}" "Multiple")
+verify_render_snapshot_scene("${readyCameraScene}" "Ready")
+write_runtime_data("${scenePackagePath}" "${readyCameraScene}")
+write_package_manifest("${packageRoot}" "" "")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env CUE_RUNTIME_PACKAGE_PROBE_MODE=system-start-failure
+        "${packageRoot}/CueRuntimeHost.exe" --package-smoke-test
+    WORKING_DIRECTORY "${workingRoot}"
+    RESULT_VARIABLE failedStartResult
+    OUTPUT_VARIABLE failedStartOutput
+    ERROR_VARIABLE failedStartError
+    TIMEOUT 15
+)
+set(failedStartCombined "${failedStartOutput}\n${failedStartError}")
+string(FIND "${failedStartCombined}" "Runtime Host failed to start Runtime Application" failedStartPosition)
+if(NOT failedStartResult EQUAL 14 OR failedStartPosition EQUAL -1)
+    message(FATAL_ERROR "Renderer and Game Module start failure did not rollback safely\n${failedStartCombined}")
+endif()
+verify_render_snapshot_scene("${readyCameraScene}" "Ready")
+write_runtime_data("${scenePackagePath}" "${canonicalV1Scene}")
+write_package_manifest("${packageRoot}" "" "")
+
+# v2 Reader拒否と共通Manifest Size／Hash境界をGame Module接続前に検証する
 set(invalidV2Scene
     "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[{\"objectId\":\"20000000-0000-4000-8000-000000000001\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[{\"instanceId\":\"30000000-0000-4000-8000-000000000001\",\"typeId\":\"40000000-0000-4000-8000-000000000001\",\"schemaVersion\":1,\"fields\":[{\"fieldId\":1,\"value\":\"cue://engine/mesh/cube\"}]}]}]}${runtimeLf}")
 write_runtime_data("${scenePackagePath}" "${invalidV2Scene}")

@@ -54,6 +54,7 @@ target_link_libraries(
         Cue.Input.Windows
         Cue.Platform.Windows
         Cue.RHI.D3D12.Windows
+        Cue.Renderer
         Cue.Runtime
         Cue.Scene
         Cue.Schema

@@ -8,6 +8,7 @@
 #include <Cue/Foundation/NumberParsing.h>
 #include <Cue/Platform/WindowSystem.h>
 #include <Cue/Platform/Windows/WindowsPlatform.h>
+#include <Cue/Renderer/RenderSnapshot.h>
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
 #include <Cue/Platform/Windows/TestSupport/WindowsWindowLifecycleProbe.h>
 #endif
@@ -90,6 +91,22 @@ struct RuntimeOptions final
         return "RuntimeFailure";
     default:
         return "None";
+    }
+}
+
+/// @brief Main Cameraの選択結果をPackage起動診断へ変換する
+[[nodiscard]] std::string_view describe_main_camera_status(cue::renderer::MainCameraStatus a_status) noexcept
+{
+    switch (a_status)
+    {
+    case cue::renderer::MainCameraStatus::Ready:
+        return "Ready";
+    case cue::renderer::MainCameraStatus::Multiple:
+        return "Multiple";
+    case cue::renderer::MainCameraStatus::InvalidProjection:
+        return "InvalidProjection";
+    default:
+        return "Missing";
     }
 }
 
@@ -722,6 +739,16 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
         a_logger.log(cue::LogLevel::Info,
                      "Runtime Application Session started: Generation=" + std::to_string(application->generation()) +
                          ", WorldId=" + std::to_string(application->world_id()));
+    cue::LogResult renderSnapshotLogResult = cue::LogResult::Success;
+    if (a_options.isPackageRuntime)
+    {
+        const cue::renderer::RenderSnapshot &snapshot = application->render_snapshot();
+        renderSnapshotLogResult = a_logger.log(
+            cue::LogLevel::Info,
+            "Runtime Render Snapshot: MainCamera=" +
+                std::string(describe_main_camera_status(snapshot.main_camera_status())) +
+                ", MeshCount=" + std::to_string(snapshot.meshes().size()));
+    }
     std::optional<cue::Error> frameError;
     std::optional<cue::Error> applicationError;
     std::string_view loopErrorMessage = "Runtime Host rendering Frame failed";
@@ -1144,6 +1171,7 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
     cue::LogResult flushResult = a_logger.flush();
     return capabilityStateLogResult == cue::LogResult::Success && readyLogResult == cue::LogResult::Success &&
                    runtimeReadyLogResult == cue::LogResult::Success &&
+                   renderSnapshotLogResult == cue::LogResult::Success &&
                    runtimeShutdownLogResult == cue::LogResult::Success &&
                    resizeSmokeLogResult == cue::LogResult::Success && completionLogResult == cue::LogResult::Success &&
                    shutdownLogResult == cue::LogResult::Success && flushResult == cue::LogResult::Success
