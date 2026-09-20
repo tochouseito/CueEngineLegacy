@@ -3,7 +3,8 @@ Cue.RuntimeHost.Core LINK_LIBRARIES: @cueRuntimeHostCoreLinks@
 Cue.RuntimeHost.Static LINK_LIBRARIES: @cueRuntimeHostStaticLinks@
 Cue.RuntimeHost.Dynamic.Windows LINK_LIBRARIES: @cueRuntimeHostDynamicLinks@
 Core must not link: Cue.RuntimeHost.Dynamic.Windows;Cue.IO.Windows;Cue.Package
-Static package loader dependencies: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package
+Static package loader dependencies: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Package;Cue.Renderer
 Process implementation target: Cue.RuntimeHost.Core
 Testing-only Core dependency: Cue.Platform.Windows.TestSupport
-Forbidden source dependencies: D3D12NativeTypes;Renderer;Editor;ProjectFiles;ECS
+Forbidden source dependencies: D3D12NativeTypes;Editor;ProjectFiles;ECS
+Renderer source dependency allowed only in RuntimePackage.cpp

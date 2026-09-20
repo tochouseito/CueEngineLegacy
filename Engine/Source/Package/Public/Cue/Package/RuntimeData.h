@@ -18,6 +18,7 @@ namespace cue::package
 {
 inline constexpr std::uint32_t k_runtimeProjectDataSchemaVersion = 1U;
 inline constexpr std::uint32_t k_runtimeSceneDataSchemaVersion = 1U;
+inline constexpr std::uint32_t k_runtimeSceneDataWithRendererSchemaVersion = 2U;
 inline constexpr std::size_t k_maximumRuntimeProjectDataBytes = 1024U * 1024U;
 inline constexpr std::size_t k_maximumRuntimeSceneDataBytes = 64U * 1024U * 1024U;
 

@@ -136,12 +136,12 @@ SceneSnapshot::SceneSnapshot(SceneAssetId a_sceneAssetId,
 {
 }
 
-/// @brief 検証済みRuntime入力をComponentなしScene Objectへ変換する
+/// @brief 検証済みRuntime入力を所有Scene Objectへ変換する
 SceneObject SceneSnapshot::make_runtime_object(RuntimeSceneObjectData a_object) noexcept
 {
     const IdentityText name = a_object.id.canonical_text();
     return SceneObject(std::move(a_object.id), std::string(name.data(), name.size()), a_object.isActive,
-                       std::move(a_object.parentId), std::move(a_object.transform), {});
+                       std::move(a_object.parentId), std::move(a_object.transform), std::move(a_object.components));
 }
 
 /// @brief Snapshotが表す永続Scene Identityを返す

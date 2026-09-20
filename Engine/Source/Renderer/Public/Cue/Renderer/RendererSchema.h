@@ -54,6 +54,9 @@ struct MeshFieldIds final
 /// @brief Renderer ComponentのField Kind Schemaを生成する
 [[nodiscard]] Result<std::vector<scene::ComponentValueSchema>> make_renderer_value_schemas(
     const schema::SchemaRegistry &a_schemaRegistry, const AssertContext &a_assertContext) noexcept;
+/// @brief Package用Camera／Built-in Cubeの完全なv1 Field集合と投影値を検証する
+[[nodiscard]] Result<void> validate_runtime_scene_component(
+    const scene::SceneComponent &a_component, const AssertContext &a_assertContext) noexcept;
 /// @brief 既定Perspective値を持つCamera Authoring Componentを生成する
 [[nodiscard]] Result<scene::SceneComponent> make_camera_component(
     scene::ComponentInstanceId a_instanceId, bool a_isMain, const schema::SchemaRegistry &a_schemaRegistry,

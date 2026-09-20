@@ -1,5 +1,5 @@
 add_executable(CuePackageRuntimeDataTests RuntimeDataTests.cpp)
-target_link_libraries(CuePackageRuntimeDataTests PRIVATE Cue.Package Cue.Schema)
+target_link_libraries(CuePackageRuntimeDataTests PRIVATE Cue.Package Cue.Renderer Cue.Runtime Cue.Schema)
 target_compile_features(CuePackageRuntimeDataTests PRIVATE cxx_std_20)
 target_include_directories(
     CuePackageRuntimeDataTests

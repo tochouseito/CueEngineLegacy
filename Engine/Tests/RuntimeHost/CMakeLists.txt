@@ -180,7 +180,18 @@ add_custom_target(
         CueRuntimeHostModuleIdentityTests
         CueRuntimeHostPathTests
         CueRuntimeHostRhiOwnershipCompile
+        CueRuntimeSceneDataTests
 )
+
+add_executable(CueRuntimeSceneDataTests RuntimeSceneDataTests.cpp)
+target_link_libraries(CueRuntimeSceneDataTests PRIVATE Cue.RuntimeHost.Static Cue.Package Cue.Project)
+target_include_directories(CueRuntimeSceneDataTests PRIVATE ${PROJECT_SOURCE_DIR}/Engine/Source/RuntimeHost)
+target_compile_features(CueRuntimeSceneDataTests PRIVATE cxx_std_20)
+set_target_properties(CueRuntimeSceneDataTests PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(CueRuntimeSceneDataTests PRIVATE /W4 /WX /permissive- /Zc:__cplusplus /utf-8)
+endif()
+add_test(NAME Cue.RuntimeHost.SceneData COMMAND CueRuntimeSceneDataTests)
 
 add_test(NAME Cue.RuntimeHost.PathUtf8 COMMAND CueRuntimeHostPathTests)
 add_test(NAME Cue.RuntimeHost.GameModuleQueryProvider COMMAND CueRuntimeHostGameModuleQueryProviderTests)

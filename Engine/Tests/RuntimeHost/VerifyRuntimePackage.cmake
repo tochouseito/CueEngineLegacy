@@ -41,8 +41,9 @@ file(COPY_FILE "${DEPENDENCY_LIBRARY}" "${stagingRoot}/Runtime/ProbeDependency.d
 
 write_runtime_data("${projectPath}"
     "{\"schemaVersion\":1,\"projectId\":\"${projectId}\",\"engineCompatibility\":{\"minimum\":\"1.0.0\",\"maximumExclusive\":\"2.0.0\"},\"requiredCapabilities\":[],\"startupSceneAssetId\":\"${sceneId}\"}${runtimeLf}")
-write_runtime_data("${scenePath}"
+set(canonicalV1Scene
     "{\"schemaVersion\":1,\"sceneAssetId\":\"${sceneId}\",\"objects\":[]}${runtimeLf}")
+write_runtime_data("${scenePath}" "${canonicalV1Scene}")
 
 if(CONFIGURATION STREQUAL "Debug")
     set(runtimeLibrary "DebugDll")
@@ -133,6 +134,42 @@ foreach(requiredMessage IN ITEMS
         message(FATAL_ERROR "Relocated Runtime Package output is missing: ${requiredMessage}\n${combinedOutput}")
     endif()
 endforeach()
+
+# v2 Reader拒否と共通Manifest Size／Hash境界をGame Module接続前に検証する
+set(scenePackagePath "${packageRoot}/${sceneRelativePath}")
+set(invalidV2Scene
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[{\"objectId\":\"20000000-0000-4000-8000-000000000001\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[{\"instanceId\":\"30000000-0000-4000-8000-000000000001\",\"typeId\":\"40000000-0000-4000-8000-000000000001\",\"schemaVersion\":1,\"fields\":[{\"fieldId\":1,\"value\":\"cue://engine/mesh/cube\"}]}]}]}${runtimeLf}")
+write_runtime_data("${scenePackagePath}" "${invalidV2Scene}")
+write_package_manifest("${packageRoot}" "" "")
+execute_process(
+    COMMAND "${packageRoot}/CueRuntimeHost.exe" --package-smoke-test
+    WORKING_DIRECTORY "${workingRoot}"
+    RESULT_VARIABLE invalidV2Result
+    OUTPUT_VARIABLE invalidV2Output
+    ERROR_VARIABLE invalidV2Error
+    TIMEOUT 15
+)
+set(invalidV2Combined "${invalidV2Output}\n${invalidV2Error}")
+string(FIND "${invalidV2Combined}" "unsupported component type" invalidV2Position)
+if(invalidV2Result EQUAL 0 OR invalidV2Position EQUAL -1)
+    message(FATAL_ERROR "Unknown Runtime Scene v2 component was not rejected before Game Module startup\n${invalidV2Combined}")
+endif()
+file(APPEND "${scenePackagePath}" "x")
+execute_process(
+    COMMAND "${packageRoot}/CueRuntimeHost.exe" --package-smoke-test
+    WORKING_DIRECTORY "${workingRoot}"
+    RESULT_VARIABLE tamperedV2Result
+    OUTPUT_VARIABLE tamperedV2Output
+    ERROR_VARIABLE tamperedV2Error
+    TIMEOUT 15
+)
+set(tamperedV2Combined "${tamperedV2Output}\n${tamperedV2Error}")
+string(FIND "${tamperedV2Combined}" "Package file size or SHA-256 differs" tamperedV2Position)
+if(tamperedV2Result EQUAL 0 OR tamperedV2Position EQUAL -1)
+    message(FATAL_ERROR "Runtime Scene v2 size or hash tamper was not rejected\n${tamperedV2Combined}")
+endif()
+write_runtime_data("${scenePackagePath}" "${canonicalV1Scene}")
+write_package_manifest("${packageRoot}" "" "")
 
 set(unicodePackageRoot "${TEST_ROOT}/RelocatedPackage-日本語-😀")
 file(RENAME "${packageRoot}" "${unicodePackageRoot}")
