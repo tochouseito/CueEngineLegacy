@@ -238,12 +238,12 @@ void PlaySessionPresenter::process_shortcuts() noexcept
     }
 }
 
-void PlaySessionPresenter::advance_runtime() noexcept
+void PlaySessionPresenter::advance_runtime(InputCapture a_capture) noexcept
 {
     const editor_core::EditorPlaySessionSnapshot snapshot = m_controller->state_snapshot();
     if (snapshot.state == editor_core::EditorPlaySessionState::Running)
     {
-        Result<void> advanced = m_controller->advance_frame({});
+        Result<void> advanced = m_controller->advance_frame(a_capture);
         if (!advanced)
         {
             report_runtime_error(std::move(*advanced.try_error()), "Editor Play frame update failed");

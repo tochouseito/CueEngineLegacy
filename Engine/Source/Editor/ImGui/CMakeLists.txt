@@ -10,6 +10,7 @@ target_sources(
         Private/DebugView.cpp
         Private/GameView.cpp
         Private/PackagePresenter.cpp
+        Private/PlayInputRouting.cpp
         Private/PlaySessionPresenter.cpp
         Private/SessionLog.cpp
     PUBLIC
@@ -23,6 +24,7 @@ target_sources(
             Public/Cue/Editor/ImGui/DebugView.h
             Public/Cue/Editor/ImGui/GameView.h
             Public/Cue/Editor/ImGui/PackagePresenter.h
+            Public/Cue/Editor/ImGui/PlayInputRouting.h
             Public/Cue/Editor/ImGui/PlaySessionPresenter.h
             Public/Cue/Editor/ImGui/SessionLog.h
 )

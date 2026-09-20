@@ -10,6 +10,7 @@
 #include <Cue/Editor/ImGui/FilesPresenter.h>
 #include <Cue/Editor/ImGui/GameView.h>
 #include <Cue/Editor/ImGui/PackagePresenter.h>
+#include <Cue/Editor/ImGui/PlayInputRouting.h>
 #include <Cue/Editor/ImGui/PlaySessionPresenter.h>
 #include <Cue/Editor/ImGui/SessionLog.h>
 #include <Cue/Editor/Windows/EditorSession.h>
@@ -28,6 +29,7 @@
 #include <Cue/GameCore/World.h>
 #include <Cue/IO/RelativePath.h>
 #include <Cue/IO/Windows/WindowsFilesystem.h>
+#include <Cue/Input/InputEventQueue.h>
 #include <Cue/Package/Workflow.h>
 #include <Cue/Platform/Windows/WindowsProcess.h>
 #include <Cue/Project/Compatibility.h>
@@ -902,6 +904,15 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
     void input_frame(cue::tool_host::ToolHostInputFrameView a_input) noexcept override
     {
         m_inputSnapshot = a_input.snapshot;
+        m_uiInputCapture = a_input.uiCapture;
+        m_inputPlayGeneration = m_playController->state_snapshot().generation;
+        m_inputEventCount = (std::min)(a_input.events.size(), m_inputEvents.size());
+        std::copy_n(a_input.events.begin(), m_inputEventCount, m_inputEvents.begin());
+        if (a_input.events.size() > m_inputEvents.size())
+        {
+            m_inputEvents[0] = {cue::InputEventType::DeviceReset};
+            m_inputEventCount = 1U;
+        }
     }
 
     /// @brief Game Viewが前Frameで計測した描画領域をTool Host要求へ変換する
@@ -1590,7 +1601,6 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             {
                 request_project_close();
             }
-            m_playPresenter->advance_runtime();
             if (m_presenter != nullptr)
             {
                 m_presenter->draw();
@@ -1644,6 +1654,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             draw_close_dialog();
             draw_overwrite_dialog();
             draw_uncertain_save_dialog();
+            route_and_advance_runtime();
             autosave_recovery_if_needed();
         }
         catch (...)
@@ -1852,6 +1863,43 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         m_presenter = cue::editor::EditorPresenter::create(m_session->controller(), *m_session->active_document_id(),
                                                            m_session->identity_source(), m_session->schema_registry(),
                                                            std::move(componentTemplates), *m_assertContext);
+    }
+
+    /// @brief Editor UI確定後にPortable EventをPlay SessionへFIFO順に配送して一Frame進める
+    void route_and_advance_runtime() noexcept
+    {
+        const cue::editor_core::EditorPlaySessionSnapshot playState = m_playPresenter->state_snapshot();
+        if (playState.state != cue::editor_core::EditorPlaySessionState::Running)
+        {
+            m_inputEventCount = 0U;
+            m_playPresenter->advance_runtime();
+            return;
+        }
+
+        const cue::editor::PlayInputRoutingContext context{m_uiInputCapture,
+                                                           ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId),
+                                                           ImGui::GetIO().WantTextInput,
+                                                           m_gameViewRequest.isWindowFocused,
+                                                           m_gameViewRequest.isViewportHovered,
+                                                           m_gameViewRequest.isViewportActive,
+                                                           m_debugViewRequest.isViewportHovered,
+                                                           m_debugViewRequest.isViewportActive};
+        const cue::editor::PlayInputRoutingResult routing = cue::editor::route_play_input_events(
+            std::span<cue::InputEvent>(m_inputEvents.data(), m_inputEventCount), context);
+        if (playState.generation == m_inputPlayGeneration)
+        {
+            for (std::size_t index = 0U; index < routing.eventCount; ++index)
+            {
+                cue::Result<bool> pushed = m_playController->push_input_event(m_inputEvents[index]);
+                if (!pushed)
+                {
+                    report_error(*pushed.try_error());
+                    break;
+                }
+            }
+        }
+        m_inputEventCount = 0U;
+        m_playPresenter->advance_runtime(routing.capture);
     }
 
     /// @brief Debug Viewが占有したMouse入力だけをEditor専用Cameraへ適用する
@@ -2737,6 +2785,10 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
     cue::editor::DebugViewSurface m_debugViewSurface;
     cue::editor::DebugViewCameraInput m_debugCameraInput;
     cue::FrameInputSnapshot m_inputSnapshot;
+    std::array<cue::InputEvent, cue::InputEventQueue::k_capacity> m_inputEvents = {};
+    std::size_t m_inputEventCount = 0U;
+    cue::InputCapture m_uiInputCapture;
+    std::uint64_t m_inputPlayGeneration = 0U;
     std::vector<cue::editor_core::RecoveryCandidateInspection> m_recoveryCandidates;
     std::array<char, 512> m_sceneLocator{};
     std::string m_message;

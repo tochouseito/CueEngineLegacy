@@ -18,6 +18,9 @@ struct GameViewRequest final
     std::uint32_t width = 0U;
     std::uint32_t height = 0U;
     bool isVisible = false;
+    bool isViewportHovered = false;
+    bool isViewportActive = false;
+    bool isWindowFocused = false;
 };
 
 /// @brief Docking可能なGame ViewへSurfaceを表示し次Frame要求を返す

@@ -7,6 +7,7 @@
 #include <Cue/Editor/ImGui/FilesPresenter.h>
 #include <Cue/Editor/ImGui/GameView.h>
 #include <Cue/Editor/ImGui/PackagePresenter.h>
+#include <Cue/Editor/ImGui/PlayInputRouting.h>
 #include <Cue/Editor/ImGui/PlaySessionPresenter.h>
 #include <Cue/Editor/ImGui/SessionLog.h>
 

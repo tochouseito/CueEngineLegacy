@@ -88,7 +88,7 @@ class PlaySessionPresenter final
     /// @brief ImGui FrameのPlay／Stop ShortcutをRuntime更新前に意味Commandへ変換する
     void process_shortcuts() noexcept;
     /// @brief Running Sessionを一Frame進め、StopRequestedなら安全な停止を完了する
-    void advance_runtime() noexcept;
+    void advance_runtime(InputCapture a_capture = {}) noexcept;
     /// @brief Play／Stop Toolbar、Session状態、Error、Console、終了確認を描画する
     void draw() noexcept;
 
