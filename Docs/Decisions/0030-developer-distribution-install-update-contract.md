@@ -142,7 +142,9 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
   Versions/v<MAJOR>.<MINOR>.<PATCH>--<uuid>/
   State/InstalledVersions.json
   Operations/
-    Workers/<worker-id>/CueEngineInstallWorker.exe
+    Workers/<worker-id>/
+      CueEngineInstallWorker.exe
+      CueEngineInstallWorker.complete.json
   Dependencies/<dependency-root-id>/
   Logs/
 ```
@@ -162,6 +164,12 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
 - Process起動前に選択VersionのManifestとEntry Point Inventoryを再検証する
 - Install RootごとにProcess間Control Lockを一つ、VersionごとにExecution Lease Fileを一つ持つ。
   Registry WriterはControl Lockの排他Lease、起動側は短時間の共有Control Leaseを使用する
+- `CueEngineInstallWorker.complete.json`は`schemaVersion: 1`、Worker ID、Bundle ID、Engine Source Revision、
+  Publisher Build Identity Digest、`installWorker`のCanonical Role／Path／Size／SHA-256／PE Architectureを
+  必須MemberとするCanonical JSONである。MarkerはWorker executableの検証後にStagingへ最後に耐久書込みし、
+  Directoryと一体でAtomic Publishする。Readerは固定File名とWorker ID Directoryを照合し、対応外Schema、
+  未知／欠落Member、非Canonical表現、Identity／Inventory／Digest不一致をFail-closedで拒否する。
+  Marker Schemaの意味変更は専用Issueで新Schemaと明示Migrationを定義し、旧Readerによる暗黙Upgradeや上書きを行わない
 - Project Hubは選択Version Rootを`--engine-install-root`とDistribution IdentityでEditorへ渡す。
   EditorとBuild ServiceはManifest検証済みRootから`Engine/Source`、`CMake`、Templateを実行時解決し、
   Build時に埋め込まれたRepository絶対PathをInstalled Modeで使用しない。Build Tree、生成物、vcpkg出力は
@@ -207,7 +215,9 @@ Cleanup、Journal削除後にRegistryを再読込し、そのGeneration ID／Rev
 Manifest検証済みVersion Rootの読取とRelease Tool自己診断だけを行い、RegistryやProject状態を変更しない。
 
 Install、Update、Rollback、Uninstall、Registry RecoveryはProcess間Control Lockの排他Leaseを
-操作開始から最終Registry Publishまで保持する。通常操作はLease取得後にRegistryを再読込し、
+操作開始から最終Stageの耐久化、共有状態の再読込検証、Operation固有Staging／QuarantineのCleanup、
+Journal削除がすべて完了するまで保持する。最終Registry PublishだけではLeaseを解放しない。
+通常操作はLease取得後にRegistryを再読込し、
 `generationId`と単調増加する`revision`の組を期待値と照合してから変更する。別Processが更新済みなら
 古いSnapshotを上書きせず再試行またはConflict Errorとする。Registry Recoveryは破損または不在のRegistryに
 比較可能なRevisionがないため、この期待値照合から除外し、後述のSource Evidence照合を使用する。
