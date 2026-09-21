@@ -188,8 +188,12 @@ Cleanup、Journal削除後にRegistryを再読込し、そのGeneration ID／Rev
 6. 公開済みVersion DirectoryのRelease Toolを専用Install Probe Modeで起動し、失敗時はRegistryへ追加せず隔離する
 7. Probe成功後、Bundle IDとManifest Digestを持つProbe成功Markerを耐久書込みする
 8. Manifestの`installWorker` RoleをOperation固有Worker StagingへCopyし、Worker Identity、PE Architecture、Size、
-   SHA-256を再検証して完了Markerを耐久書込みする
-9. Worker Stagingを`Operations/Workers/<worker-version>`へ同一Volume RenameでAtomic Publishする。既存Workerは
+   SHA-256を再検証して完了Markerを耐久書込みする。Worker IDはBundle ID、Engine Source Revision、
+   Publisher Build Identity、`installWorker`のCanonical Role／Path／Size／SHA-256／PE Architectureを長さ付きで
+   Canonical結合したByte列のSHA-256とし、64文字lowercase hexへ固定する
+9. Worker Stagingを`Operations/Workers/<worker-id>`へ同一Volume RenameでAtomic Publishする。Worker IDは
+   区切り文字、`.`、`..`を受理せず、Path結合後のCanonical Pathが`Workers`直下の単一要素であることを再検証する。
+   既存Workerは
    IdentityとInventoryの完全一致時だけImmutable再利用し、不一致なら上書きしない
 10. Probe成功Markerと公開済みWorkerを再検証した後にだけInstalled Version RegistryをAtomic Replaceし、
     VersionをSelectableにする
@@ -232,8 +236,10 @@ Objectとする。
 `blockedOperations`のCanonical配列としてRecovery Journalへ耐久記録し、その対象Versionを候補から除外する。
 未完了`rollback`はDirectory Evidenceだけでは選択状態を一意に復元できないためRecovery自体をFail-closedで停止する。
 `candidatesValidated`以降は、検証済み候補をVersion Identity、Bundle Identity、Manifest Digest、Payload完了Marker
-Digest、Probe成功Marker DigestのCanonical配列としてJournalへ耐久記録する。Recovery再開時は候補配列、
-`blockedOperations`、現行Payload／Marker／Journalを全件再検証し、一致しない場合は再構築を進めない。
+Digest、Probe成功Marker Digest、導出Worker ID、Worker executable Digest、Worker完了Marker DigestのCanonical配列として
+Journalへ耐久記録する。Recovery再開時は候補配列、`blockedOperations`、現行Payload／Marker／Journal、
+`Operations/Workers/<worker-id>`のCanonical Path、Worker本体、完了Markerを全件再検証し、一致しない場合は
+候補から除外して再構築を進めない。
 Registry Publish直前にも排他Lease下で
 現行Registryを再読込し、`kind: corrupt`では退避前ByteのSize／SHA-256、`kind: missing`では不在が
 `sourceRegistryEvidence`と一致する場合だけ続行する。Valid Registryへの置換、別の破損Byte、File出現を検出したら
@@ -280,6 +286,8 @@ Journal削除だけを再実行する。
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
 - `workerPublished` StageとWorker完了MarkerがJournalのWorker Identity／Digestに一致しないVersionはSelectableにせず、
   そのWorkerへRollback／Uninstallを委譲しない
+- Worker IDはManifestの検証済みIdentity／Inventoryから導出する64文字lowercase SHA-256 hexだけを許可し、
+  `Operations/Workers`外または直下の単一Path要素でない公開先を拒否する
 - Project、Source Asset、Recent Registry、Editor Preference、Build／Package成果物は削除しない
 - Crash後はOperation Journalと完了Markerから、未公開Stagingの回収またはRegistry再構築を行う
 

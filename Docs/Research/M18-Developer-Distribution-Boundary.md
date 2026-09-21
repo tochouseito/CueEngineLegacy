@@ -96,6 +96,9 @@ Publishしてから通常Installを開始する。
 Install／UpdateはProbe成功後、Manifestの`installWorker`をOperation固有Stagingで再検証し、Version外Workerを
 Atomic Publishした`workerPublished` Stageを経てからRegistryを公開する。Crash後はWorker Identity／Digestと完了Markerを
 再検証し、欠落または不一致Workerを持つVersionをSelectableにしない。
+Worker IDは検証済みBundle／Source／Publisher／Worker InventoryのCanonical結合から導出する64文字lowercase
+SHA-256 hexとし、`Operations/Workers`直下の単一Path要素へ固定する。Registry Recovery候補にもWorker ID、
+executable Digest、完了Marker Digestを含め、Journal削除後のRecoveryでも欠落Workerを持つVersionを除外する。
 未知Schema／Member、列挙外Stage、不正遷移、旧Worker不一致、破損はFail-closedでEvidenceへ隔離し、Migrationは
 専用Issueで明示する。
 
@@ -120,6 +123,7 @@ Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混�
 - 新Schema Registryを旧Writerが上書きせず、破損RecoveryがProbe成功Markerまで再検証する
 - Registry Recoveryが未完了Uninstallの`pendingRemoval`対象を候補へ戻さず、Blocked Journalを保持する
 - Worker Copy／Publish中のCrashで欠落Workerを持つVersionをSelectableにしない
+- Worker IDによるPath逸脱と、Journal削除後のWorker欠落Version復活を拒否する
 - CLIとProject Hubの並行Install／UninstallでRegistry Updateを失わない
 - 起動検証とUninstallの間にTOCTOUでVersion Directoryを回収しない
 - 対象Version自身のProcessから自己Uninstallして実行中Fileを削除しない
