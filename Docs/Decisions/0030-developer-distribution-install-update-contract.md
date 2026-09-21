@@ -142,7 +142,7 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
   Versions/v<MAJOR>.<MINOR>.<PATCH>--<uuid>/
   State/InstalledVersions.json
   Operations/
-    Workers/<worker-version>/CueEngineInstallWorker.exe
+    Workers/<worker-id>/CueEngineInstallWorker.exe
   Dependencies/<dependency-root-id>/
   Logs/
 ```
@@ -256,7 +256,7 @@ Journal v1のStageは「最後に完了した耐久副作用」を表し、次�
 | `install`／`update` | `prepared` → `payloadStaged` → `versionPublished` → `probeSucceeded` → `workerPublished` → `registryPublished` | Journal作成 → Staging完了Marker → Version Rename → Probe成功Marker → Version外Worker Atomic Publish → Selectable Registry Publish |
 | `rollback` | `prepared` → `selectionPublished` | Journal作成 → 既存Version選択のRegistry Publish |
 | `uninstall` | `prepared` → `removalBlocked` → `versionQuarantined` → `registryEntryRemoved` | Journal作成 → `pendingRemoval` Registry Publish → Version Quarantine Rename → Registry Entry削除Publish |
-| `registryRecovery` | `prepared` → `candidatesValidated` → `registryPublished` | Source Evidence記録済みJournal作成 → 未完了Journal列挙／除外とManifest／Payload／Probe Marker候補配列検証 → Registry再構築Publish |
+| `registryRecovery` | `prepared` → `candidatesValidated` → `registryPublished` | Source Evidence記録済みJournal作成 → 未完了Journal列挙／除外とManifest／Payload／Probe Marker／Worker ID／Worker executable Digest／Worker完了Marker Digest候補配列検証 → Registry再構築Publish |
 
 Writerは副作用を耐久化して再読込検証した後だけ次StageをAtomic Replaceする。副作用後かつStage更新前にCrashした
 場合、Recoveryは現在Stageの直後に期待されるFile／Marker／RegistryだけをOperation IdentityとDigestで照合し、
@@ -353,6 +353,8 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Install、同一Bundle再実行、Side-by-side Update、Rollback、Uninstall、Crash RecoveryをProcess Testする
 - 排他Control Lease中の専用Probeが完了し、通常起動経路が同じ状態では待機することをProcess Testする
 - Probe前Crashから未Probe VersionをSelectableへ復活させず、Probe成功MarkerだけをRecovery対象にする
+- Worker IDのCanonical Path境界、Worker executable Digest、Worker完了Marker DigestをRecovery候補と
+  `candidatesValidated` Stageで検証し、欠落Workerを持つVersionをSelectableへ復活させない
 - Operation Journalの未知Schema／Member、Kind別v1列挙外Stage／遷移、旧Worker互換性違反、破損をFail-closedで拒否する
 - 各Journal Stage間へCrashを注入し、完全一致する直後の副作用だけを冪等再開して想定外状態を隔離する
 - 同一Dependency Root IDの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
