@@ -31,7 +31,11 @@ enum class DistributionError : std::int64_t
     SourceBlobMismatch = 14,
     SourceInventoryMismatch = 15,
     InvalidGeneratedTool = 16,
-    ResourceLimitExceeded = 17
+    ResourceLimitExceeded = 17,
+    PlatformOperationFailed = 18,
+    BuildFailed = 19,
+    PublishConflict = 20,
+    BundleValidationFailed = 21
 };
 
 /// @brief Distribution Domainの回復可能Errorを生成する

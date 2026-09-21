@@ -10,7 +10,8 @@ Game Build、Standalone Package公開、Standalone起動までを一つの制作
 ## Preconditions
 
 1. Windows x64、Visual Studio 2026、CMake 4.2.0以上、PowerShell 7を使用する。
-2. Repository Rootで`pwsh -NoProfile -File Tools/Dependencies/RestoreVcpkg.ps1`を実行済みにする。
+2. Repository Rootで`README.md`のDependency Restore手順に従い、`ToolRoot`、`InstallRoot`、
+   `GitExecutable`を明示して`Tools/Dependencies/RestoreVcpkg.ps1`を実行済みにする。
 3. `cmake --preset windows-vs2026`を実行する。
 4. `cmake --build --preset windows-vs2026-debug`を実行する。
 5. `cmake --build --preset windows-vs2026-development`を実行する。

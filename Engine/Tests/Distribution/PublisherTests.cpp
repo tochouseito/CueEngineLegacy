@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -120,11 +121,18 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
         cue::distribution::classify_distribution_source_path("Tools/Dependencies/RestoreVcpkg.ps1", a_assertContext);
     const auto buildModuleRole =
         cue::distribution::classify_distribution_source_path("Engine/Source/Build/Private/Plan.cpp", a_assertContext);
+    const auto buildPublicRole = cue::distribution::classify_distribution_source_path(
+        "Engine/Source/Build/Public/Cue/Build/Plan.h", a_assertContext);
+    const auto buildWindowsPublicRole = cue::distribution::classify_distribution_source_path(
+        "Engine/Source/Build/Windows/Public/Cue/Build/WindowsToolchain.h", a_assertContext);
     require(sourceRole.has_value() && *sourceRole.try_value() == DistributionFileRole::EngineSource);
     require(hlslRole.has_value() && *hlslRole.try_value() == DistributionFileRole::Hlsl);
     require(cmakeRole.has_value() && *cmakeRole.try_value() == DistributionFileRole::CMake);
     require(scriptRole.has_value() && *scriptRole.try_value() == DistributionFileRole::Script);
     require(buildModuleRole.has_value() && *buildModuleRole.try_value() == DistributionFileRole::EngineSource);
+    require(buildPublicRole.has_value() && *buildPublicRole.try_value() == DistributionFileRole::EngineSource);
+    require(buildWindowsPublicRole.has_value() &&
+            *buildWindowsPublicRole.try_value() == DistributionFileRole::EngineSource);
     require(cue::distribution::classify_distribution_source_path("Engine/Source/Editor/App.ico", a_assertContext)
                 .has_value());
     require(cue::distribution::classify_distribution_source_path("Engine/Source/Editor/Logo.png", a_assertContext)
@@ -155,6 +163,10 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::classify_distribution_source_path("CMake/CMakeFiles/compiler_depend.make",
                                                                   a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Tests/Foo.cpp", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Engine/Source/Build/Private/Build/Foo.cpp",
+                                                                  a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path(
+        "Engine/Source/Build/Public/Cue/Build/Generated/Build/Foo.cpp", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Tools/GameCoreBenchmark/CMakeLists.txt",
                                                                   a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Tools/Package/Injected.cmake", a_assertContext));
@@ -239,5 +251,10 @@ int main()
     require(test_allowlist(assertContext));
     require(test_repository_evidence(assertContext));
     require(test_inventory(assertContext));
+    constexpr std::array emptyBytes = {std::byte{}};
+    const auto emptyHash = cue::distribution::compute_distribution_sha256(
+        std::span<const std::byte>(emptyBytes.data(), 0U), assertContext);
+    require(emptyHash.has_value());
+    require(*emptyHash.try_value() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     return 0;
 }

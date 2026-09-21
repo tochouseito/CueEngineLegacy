@@ -51,6 +51,9 @@ namespace
     const std::string lower = ascii_lower(a_path);
     constexpr std::string_view engineSourcePrefix = "engine/source/";
     constexpr std::string_view engineBuildPrefix = "engine/source/build/";
+    constexpr std::string_view engineBuildPublicNamespacePrefix = "engine/source/build/public/cue/";
+    constexpr std::string_view engineBuildWindowsPublicNamespacePrefix =
+        "engine/source/build/windows/public/cue/";
     const std::string_view lowerView = lower;
     std::size_t start = 0U;
     while (start <= lower.size())
@@ -58,12 +61,17 @@ namespace
         const std::size_t end = lower.find('/', start);
         const std::string_view segment =
             lowerView.substr(start, end == std::string::npos ? lower.size() - start : end - start);
+        const bool allowedEngineBuildSegment =
+            segment == "build" &&
+            ((start == engineSourcePrefix.size() && lower.starts_with(engineBuildPrefix)) ||
+             (start == engineBuildPublicNamespacePrefix.size() &&
+              lower.starts_with(engineBuildPublicNamespacePrefix)) ||
+             (start == engineBuildWindowsPublicNamespacePrefix.size() &&
+              lower.starts_with(engineBuildWindowsPublicNamespacePrefix)));
         if (segment == ".git" || segment == ".codex" || segment == ".github" || segment == ".vs" ||
             segment == "tests" || segment == "test" || segment == "out" || segment == "cache" ||
             segment == "vcpkg_installed" || segment == ".tools" ||
-            ((segment == "build" || segment == "builds") &&
-             !(segment == "build" && start == engineSourcePrefix.size() &&
-               lower.starts_with(engineBuildPrefix))))
+            ((segment == "build" || segment == "builds") && !allowedEngineBuildSegment))
         {
             return true;
         }
@@ -199,6 +207,32 @@ constexpr std::array k_expectedTools = {
 
 namespace cue::distribution
 {
+Result<std::string> compute_distribution_sha256(std::span<const std::byte> a_bytes,
+                                                const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        constexpr char hexadecimal[] = "0123456789abcdef";
+        const distribution_private::Sha256Digest digest = distribution_private::compute_sha256(a_bytes);
+        std::string result;
+        result.reserve(digest.size() * 2U);
+        for (const std::uint8_t value : digest)
+        {
+            result.push_back(hexadecimal[value >> 4U]);
+            result.push_back(hexadecimal[value & 0x0fU]);
+        }
+        return Result<std::string>::success(std::move(result));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
 Result<DistributionFileRole> classify_distribution_source_path(std::string_view a_relativePath,
                                                                const AssertContext &a_assertContext) noexcept
 {

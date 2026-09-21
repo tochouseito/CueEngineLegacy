@@ -73,11 +73,18 @@ git branch --show-current
 新規Checkoutでは、Configureより先にPin済みvcpkg Toolと承認済み第三者Libraryを復元します。
 
 ```powershell
-pwsh -NoProfile -File Tools/Dependencies/RestoreVcpkg.ps1
+$toolRoot = Join-Path $PWD "ThirdParty/.tools/vcpkg"
+$installRoot = Join-Path $PWD "ThirdParty/vcpkg_installed"
+$gitExecutable = (Get-Command git).Source
+pwsh -NoProfile -File Tools/Dependencies/RestoreVcpkg.ps1 `
+    -ToolRoot $toolRoot `
+    -InstallRoot $installRoot `
+    -GitExecutable $gitExecutable
 ```
 
 このScriptは`ThirdParty/vcpkg-tool.json`と`ThirdParty/vcpkg-configuration.json`で固定したvcpkg Tool、Registry、
-Package Versionを検証し、Git管理対象外の`ThirdParty/.tools`と`ThirdParty/vcpkg_installed`へ生成物を配置します。
+Package Versionを検証し、明示したGit管理対象外のTool RootとInstall Rootへ生成物を配置します。Installed Source SDK
+から使用する場合は`-InstalledVersionRoot`も渡し、両Rootが不変Version Directory外であることを検証します。
 
 ## Configure
 
@@ -112,6 +119,29 @@ out/build/windows-vs2026/bin/Release/CueBuildProbe.exe
 
 `Development` は最適化とデバッグ情報を有効にし、`NDEBUG` を定義しません。
 First-party MSVC Target は `/utf-8` を使用し、Source と Execution Character Set を UTF-8 に固定します。
+
+## Developer Source SDK Publish
+
+Release PublisherはcleanなRepositoryの固定CommitからSourceとRelease Toolを隔離Buildし、Repository外の
+Destinationへ検証済みBundleだけをAtomic Publishします。Destination、Operation、Dependencyの各Rootは事前に作成し、
+Repository配下へ置かないでください。
+
+```powershell
+$externalRoot = Join-Path (Split-Path $PWD -Parent) "CueEngine-Distribution"
+$destination = New-Item -ItemType Directory -Force -Path (Join-Path $externalRoot "Bundles")
+$operations = New-Item -ItemType Directory -Force -Path (Join-Path $externalRoot "Operations")
+$dependencies = New-Item -ItemType Directory -Force -Path (Join-Path $externalRoot "Dependencies")
+$bundleId = [Guid]::NewGuid().ToString()
+
+& out/build/windows-vs2026/bin/Release/CueEngineDistributionPublisherTool.exe `
+    --destination-parent $destination.FullName `
+    --operations-root $operations.FullName `
+    --dependencies-parent $dependencies.FullName `
+    --bundle-id $bundleId
+```
+
+同じBundle Identityの再実行では公開済みManifest、全FileのSize／SHA-256、Release Toolのx64 PEを再検証して
+既存Bundleを再利用します。異なるIdentityや破損Bundleが同じDestination名に存在する場合は上書きしません。
 
 ## Test
 
