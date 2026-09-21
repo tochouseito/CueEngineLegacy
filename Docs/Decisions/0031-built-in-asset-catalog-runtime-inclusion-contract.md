@@ -22,8 +22,10 @@ Source Fileを持たず、Engine Versionとともに提供される。M19でFile
 ### Reserved Namespace and Typed Identity
 
 - `cue://engine/`をEngine所有Assetの予約Namespaceとする
-- IDはlowercase ASCIIの`cue://engine/<kind>/<name>`とし、Query、Fragment、`.`、`..`、
-  Percent Encoding、末尾Slash、Unicode別表現を許可しない
+- IDはlowercase ASCIIの`cue://engine/<kind>/<name>`とし、Prefixに続くSegmentを`kind`と
+  `name`の正確に2個へ固定する。各Segmentは1～64文字、先頭を`[a-z]`、2文字目以降を
+  `[a-z0-9-]`とし、末尾`-`を許可しない。空Segment、追加Slash、Backslash、Colon、空白、
+  制御文字、Query、Fragment、`.`、`..`、Percent Encoding、末尾Slash、Unicode別表現を許可しない
 - Project Asset、Import済みAsset、Pluginは`cue://engine/`を発行またはOverrideできない
 - Asset IDはFile Pathではなく、Engine Version内で安定した意味を表す
 - 一つの万能Asset基底型を導入せず、`BuiltInMeshDescriptor`等のKind別の値型と解決APIを使用する
@@ -57,10 +59,14 @@ Revision 1のVertexはPositionとNormalだけを持つ。UV、Tangent、Material
 
 ### Revision and Compatibility
 
-- 公開済みStable IDとGeometry Revisionの頂点位置、Normal、Index、Bounds、Windingを同じRevisionで変更しない
-- Geometry RevisionはAsset Referenceへ毎回保存しない。Runtime Packageが記録するEngine Versionと
-  Schema Versionが解決可能なRevision集合を固定する
-- 同じEngine Compatibility範囲で形状を変更する必要がある場合は新しいStable IDを追加する
+- 公開済みStable IDが表すGeometryの形状、頂点Attribute、Triangle集合、Bounds、Windingと
+  Geometry RevisionはEngine VersionやCompatibility範囲を越えて変更しない。変更が必要な場合は
+  `cube-v2`等の新しいStable IDを追加し、旧IDとPayloadを互換読込みのため維持する
+- Geometry RevisionはAsset Referenceへ毎回保存しない。Stable IDとRevisionの対応を不変にすることで、
+  既存Authoring SceneのIDだけから常に同じRevisionを解決できる。Runtime PackageのEngine Versionと
+  Schema Versionは利用可能なID集合と実装互換を追加で固定する
+- 頂点配列、Face配列、Index配列の順序は、同じPosition／Normalを持つ頂点と同じ外向きTriangle集合を
+  保つ限りRevision内の実装詳細とする。Index列のByte一致を永続形式またはABIとして要求しない
 - M28 Asset DatabaseはBuilt-in DescriptorをRead-only Virtual Assetとして同じIDで列挙し、
   Project Meta FileやImport Sourceを生成しない
 - Asset Database Cacheを削除してもBuilt-in IdentityとRevisionは変化しない
@@ -118,7 +124,8 @@ Compression、Streaming、Patch単位、Platform別Cook要件と同時に行う�
 ## Verification
 
 - Catalog IDのCanonical性、予約Namespace、重複、Kind不一致、未知IDをTestする
-- Cube Revision 1の既存頂点／Index／Bounds／Windingを回帰固定する
+- Cube Revision 1の頂点数、Index数、Position／Normal、Triangle集合、Bounds／Windingを回帰固定する。
+  Face順、頂点順、Index列のByte一致は固定しない
 - Plane／Sphereの頂点数、Index数、範囲、非縮退、Bounds、Normal、Windingを検証する
 - Editor Create／Save／Reload／Undo／RedoとRuntime Scene v1／v2互換、v3 Canonical Round-tripを検証する
 - GameView、DebugView、Dynamic RuntimeHost、Static Productで各Primitiveを描画する

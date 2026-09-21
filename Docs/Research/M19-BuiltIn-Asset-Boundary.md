@@ -18,8 +18,10 @@
 | Product | Cube DataをStatic Libraryから最終ConsumerへLinkする | Built-in Reference Closure、未使用Payload除外Evidence |
 | Asset Pipeline | 未実装 | M28でVirtual Asset／Cook Graphへ接続する移行条件 |
 
-Cubeの既存ID、Geometry Revision、Windingは変更しない。旧CueEngineや外部EngineはPrimitiveの
-機能比較に限り、Source、Mesh Data、Format、生成Algorithmをコピー／移植しない。
+Cubeの既存ID、Geometry Revision、形状、Triangle集合、Bounds、Windingは将来のEngine Versionでも
+変更しない。変更が必要なら旧IDを維持して新IDを追加する。IDは正確に2 SegmentのCanonical文法で
+検証する。旧CueEngineや外部EngineはPrimitiveの機能比較に限り、Source、Mesh Data、Format、
+生成Algorithmをコピー／移植しない。
 
 ## Selected Primitive and Resolution Model
 
@@ -62,7 +64,7 @@ Runtime Scene v3とRHI Primitive入力は先行Issueの契約に従って段階�
 ## Risks to Verify
 
 - 既存Cube SceneとRuntime Scene v2のByte互換を壊さない
-- Geometry Revisionを上げずに形状、Winding、Boundsを変更しない
+- 公開済みStable IDの形状、Winding、Bounds、Revisionを変更しない
 - Project AssetがEngine予約NamespaceをOverrideしない
 - Editorの診断FallbackをSceneまたはPackageへ保存しない
 - Catalog列挙がShipping Productの全Payload強参照にならない
