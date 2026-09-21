@@ -21,6 +21,22 @@ constexpr std::array k_meshDescriptors = {
         BuiltInMeshBounds{{-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F}},
         BuiltInMeshCapability::PositionNormal,
     },
+    BuiltInMeshDescriptor{
+        k_planeMeshAssetId,
+        BuiltInAssetKind::Mesh,
+        k_planeMeshRevision,
+        "Plane",
+        BuiltInMeshBounds{{-0.5F, 0.0F, -0.5F}, {0.5F, 0.0F, 0.5F}},
+        BuiltInMeshCapability::PositionNormal,
+    },
+    BuiltInMeshDescriptor{
+        k_sphereMeshAssetId,
+        BuiltInAssetKind::Mesh,
+        k_sphereMeshRevision,
+        "Sphere",
+        BuiltInMeshBounds{{-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F}},
+        BuiltInMeshCapability::PositionNormal,
+    },
 };
 
 struct AssetIdParts final
@@ -197,6 +213,14 @@ Result<MeshView> resolve_builtin_mesh(std::string_view a_assetId, const AssertCo
     if ((*descriptor.try_value())->assetId == k_cubeMeshAssetId)
     {
         return Result<MeshView>::success(built_in_cube_mesh());
+    }
+    if ((*descriptor.try_value())->assetId == k_planeMeshAssetId)
+    {
+        return Result<MeshView>::success(built_in_plane_mesh());
+    }
+    if ((*descriptor.try_value())->assetId == k_sphereMeshAssetId)
+    {
+        return Result<MeshView>::success(built_in_sphere_mesh());
     }
 
     return Result<MeshView>::failure(make_engine_assets_error(a_assertContext, EngineAssetsError::PayloadUnavailable,

@@ -12,6 +12,14 @@ namespace cue::engine_assets
 inline constexpr std::string_view k_cubeMeshAssetId = "cue://engine/mesh/cube";
 /// Built-in Cube Geometryの互換Revision
 inline constexpr std::uint32_t k_cubeMeshRevision = 1U;
+/// Built-in Plane MeshをProject File Pathから独立して識別するStable Asset ID
+inline constexpr std::string_view k_planeMeshAssetId = "cue://engine/mesh/plane";
+/// Built-in Plane Geometryの互換Revision
+inline constexpr std::uint32_t k_planeMeshRevision = 1U;
+/// Built-in Sphere MeshをProject File Pathから独立して識別するStable Asset ID
+inline constexpr std::string_view k_sphereMeshAssetId = "cue://engine/mesh/sphere";
+/// Built-in Sphere Geometryの互換Revision
+inline constexpr std::uint32_t k_sphereMeshRevision = 1U;
 
 /// @brief CPU側のBuilt-in Meshが保持する最小Vertex Data
 struct MeshVertex final
@@ -39,4 +47,10 @@ struct MeshView final
 
 /// @brief 原点中心で一辺1mのEngine所有Cube GeometryをAllocationなしで返す
 [[nodiscard]] MeshView built_in_cube_mesh() noexcept;
+
+/// @brief 原点中心で一辺1m、+Yを表とするEngine所有XZ Plane GeometryをAllocationなしで返す
+[[nodiscard]] MeshView built_in_plane_mesh() noexcept;
+
+/// @brief 原点中心で直径1m、16 Slice／8 StackのEngine所有Sphere GeometryをAllocationなしで返す
+[[nodiscard]] MeshView built_in_sphere_mesh() noexcept;
 } // namespace cue::engine_assets
