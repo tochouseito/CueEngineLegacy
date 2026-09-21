@@ -2,11 +2,13 @@
 
 #include <Cue/Editor/ImGui/EditorDockspace.h>
 
+#include <Cue/EngineAssets/BuiltInMesh.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
 #include <Cue/IO/RelativePath.h>
 #include <Cue/Project/Descriptor.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Scene/SceneDocument.h>
 #include <Cue/Schema/Descriptor.h>
 
@@ -142,6 +144,7 @@ template <typename T> T take_value(cue::Result<T> a_result) noexcept
         std::move(fields), std::move(reserved), a_assertContext));
     cue::schema::SchemaRegistryBuilder builder(a_identitySource, a_assertContext);
     require(builder.add_type(std::move(descriptor)).has_value());
+    require(cue::renderer::add_renderer_schema_types(builder, a_assertContext).has_value());
     return take_value(builder.seal());
 }
 
@@ -153,7 +156,8 @@ template <typename T> T take_value(cue::Result<T> a_result) noexcept
         {make_field_id(a_assertContext), cue::scene::FieldValueKind::SignedInteger},
         {make_string_field_id(a_assertContext), cue::scene::FieldValueKind::String},
         {make_asset_field_id(a_assertContext), cue::scene::FieldValueKind::AssetReference}};
-    std::vector<cue::scene::ComponentValueSchema> schemas;
+    std::vector<cue::scene::ComponentValueSchema> schemas =
+        take_value(cue::renderer::make_renderer_value_schemas(a_registry, a_assertContext));
     schemas.push_back(take_value(cue::scene::create_component_value_schema(
         make_component_type_id(a_assertContext), make_schema_version(a_assertContext), std::move(bindings), a_registry,
         a_assertContext)));
@@ -267,18 +271,22 @@ void test_hierarchy_inspector_intents() noexcept
     std::vector<cue::editor_core::EditorPrimitiveTemplate> primitiveTemplates;
     primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
         "Cube",
-        "cue://engine/mesh/cube",
-        make_primitive_component(*registry, valueRegistry, assertContext, "cue://engine/mesh/cube"),
+        std::string(cue::engine_assets::k_cubeMeshAssetId),
+        take_value(cue::renderer::make_cube_mesh_component(
+            take_value(cue::scene::ComponentInstanceId::parse("20000000-0000-4000-8000-000000000002", assertContext)),
+            *registry, valueRegistry, assertContext)),
         {},
         true});
     primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
-        "Plane", "cue://engine/mesh/plane",
-        make_primitive_component(*registry, valueRegistry, assertContext, "cue://engine/mesh/plane"), "Renderer未対応",
-        false});
+        "Plane", std::string(cue::engine_assets::k_planeMeshAssetId),
+        take_value(cue::renderer::make_builtin_mesh_component(
+            take_value(cue::scene::ComponentInstanceId::parse("20000000-0000-4000-8000-000000000003", assertContext)),
+            cue::engine_assets::k_planeMeshAssetId, *registry, valueRegistry, assertContext)),
+        "Renderer未対応", false});
     primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
         "Broken",
-        "cue://engine/mesh/cube",
-        make_primitive_component(*registry, valueRegistry, assertContext, "cue://engine/mesh/plane"),
+        std::string(cue::engine_assets::k_cubeMeshAssetId),
+        make_primitive_component(*registry, valueRegistry, assertContext, cue::engine_assets::k_cubeMeshAssetId),
         {},
         true});
     std::unique_ptr<cue::editor::EditorPresenter> presenter =

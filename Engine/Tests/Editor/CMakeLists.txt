@@ -1,5 +1,5 @@
 add_executable(CueEditorImGuiTests EditorImGuiTests.cpp)
-target_link_libraries(CueEditorImGuiTests PRIVATE Cue.Editor.ImGui Cue.ImGui.Core)
+target_link_libraries(CueEditorImGuiTests PRIVATE Cue.Editor.ImGui Cue.EngineAssets Cue.ImGui.Core Cue.Renderer)
 target_compile_features(CueEditorImGuiTests PRIVATE cxx_std_20)
 
 add_executable(CueEditorImGuiPublicHeaderTest PublicHeaderCompile.cpp)

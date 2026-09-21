@@ -1,6 +1,7 @@
 #include <Cue/EditorCore/EditorController.h>
 #include <Cue/EditorCore/EditorIntent.h>
 #include <Cue/EditorCore/Error.h>
+#include <Cue/EngineAssets/BuiltInMesh.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
@@ -8,6 +9,7 @@
 #include <Cue/IO/Filesystem.h>
 #include <Cue/Math/Transform.h>
 #include <Cue/Project/Descriptor.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Scene/Error.h>
 #include <Cue/Scene/Identity.h>
 #include <Cue/Scene/SceneDocument.h>
@@ -518,6 +520,7 @@ std::unique_ptr<cue::schema::SchemaRegistry> make_component_registry(
         make_component_version(a_assertContext), std::move(fields), std::move(reserved), a_assertContext));
     cue::schema::SchemaRegistryBuilder builder(a_identitySource, a_assertContext);
     require(builder.add_type(std::move(descriptor)).has_value());
+    require(cue::renderer::add_renderer_schema_types(builder, a_assertContext).has_value());
     return take_value(builder.seal());
 }
 
@@ -528,7 +531,8 @@ cue::scene::ComponentValueSchemaRegistry make_component_value_registry(
     std::vector<cue::scene::FieldKindBinding> bindings{
         {make_health_field_id(a_assertContext), cue::scene::FieldValueKind::SignedInteger},
         {make_asset_field_id(a_assertContext), cue::scene::FieldValueKind::AssetReference}};
-    std::vector<cue::scene::ComponentValueSchema> schemas;
+    std::vector<cue::scene::ComponentValueSchema> schemas =
+        take_value(cue::renderer::make_renderer_value_schemas(a_registry, a_assertContext));
     schemas.push_back(take_value(cue::scene::create_component_value_schema(
         make_component_type_id(a_assertContext), make_component_version(a_assertContext), std::move(bindings),
         a_registry, a_assertContext)));
@@ -597,10 +601,8 @@ std::string_view component_asset_token(const cue::scene::SceneObject &a_object,
         require(known != nullptr);
         for (const cue::scene::KnownFieldData &field : known->known_fields())
         {
-            if (field.id().value() == 2U)
+            if (const cue::scene::AssetReferenceValue *value = field.value().try_asset_reference(); value != nullptr)
             {
-                const cue::scene::AssetReferenceValue *value = field.value().try_asset_reference();
-                require(value != nullptr);
                 return value->token();
             }
         }
@@ -1184,11 +1186,35 @@ void test_scene_persistence_workflow() noexcept
     std::vector<cue::editor_core::EditorPrimitiveTemplate> primitiveTemplates;
     primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
         "Cube",
-        "cue://engine/mesh/cube",
-        make_health_component(make_component_id("00000000-0000-4000-8000-000000000713", assertContext), 25, *registry,
-                              valueRegistry, assertContext, "cue://engine/mesh/cube"),
+        std::string(cue::engine_assets::k_cubeMeshAssetId),
+        take_value(cue::renderer::make_cube_mesh_component(
+            make_component_id("00000000-0000-4000-8000-000000000713", assertContext), *registry, valueRegistry,
+            assertContext)),
         {},
         true});
+    primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+        "Unknown",
+        "cue://engine/mesh/unknown",
+        take_value(cue::renderer::make_cube_mesh_component(
+            make_component_id("00000000-0000-4000-8000-000000000714", assertContext), *registry, valueRegistry,
+            assertContext)),
+        {},
+        true});
+    primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+        "Wrong Type",
+        std::string(cue::engine_assets::k_cubeMeshAssetId),
+        make_health_component(make_component_id("00000000-0000-4000-8000-000000000715", assertContext), 25, *registry,
+                              valueRegistry, assertContext, cue::engine_assets::k_cubeMeshAssetId),
+        {},
+        true});
+    require(!controller
+                 ->execute_intent(documentId, cue::editor_core::CreatePrimitiveIntent{std::nullopt, 1U}, identitySource,
+                                  {}, primitiveTemplates)
+                 .has_value());
+    require(!controller
+                 ->execute_intent(documentId, cue::editor_core::CreatePrimitiveIntent{std::nullopt, 2U}, identitySource,
+                                  {}, primitiveTemplates)
+                 .has_value());
     require(controller
                 ->execute_intent(documentId, cue::editor_core::CreatePrimitiveIntent{std::nullopt, 0U}, identitySource,
                                  {}, primitiveTemplates)

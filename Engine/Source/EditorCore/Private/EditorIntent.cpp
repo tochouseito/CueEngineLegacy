@@ -1,6 +1,8 @@
 #include <Cue/EditorCore/EditorController.h>
 
 #include <Cue/EditorCore/Error.h>
+#include <Cue/EngineAssets/BuiltInAssetCatalog.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Scene/Error.h>
 
 #include <algorithm>
@@ -161,7 +163,8 @@ struct GeneratedDuplicate final
 }
 
 /// @brief Primitive Templateの表示Identityと永続Asset Referenceが一意に一致するか検証する
-[[nodiscard]] bool primitive_template_matches(const EditorPrimitiveTemplate &a_template) noexcept
+[[nodiscard]] bool primitive_template_matches(const EditorPrimitiveTemplate &a_template,
+                                              const AssertContext &a_assertContext) noexcept
 {
     const scene::KnownComponentData *known = a_template.meshPrototype.try_known();
     if (a_template.displayName.empty() || a_template.assetId.empty() || known == nullptr ||
@@ -170,19 +173,21 @@ struct GeneratedDuplicate final
         return false;
     }
 
-    std::size_t assetReferenceCount = 0U;
-    bool hasSelectedAsset = false;
-    for (const scene::KnownFieldData &field : known->known_fields())
+    Result<const engine_assets::BuiltInMeshDescriptor *> descriptor =
+        engine_assets::resolve_builtin_mesh_descriptor(a_template.assetId, a_assertContext);
+    Result<renderer::RendererSchemaTypeIds> typeIds = renderer::make_renderer_schema_type_ids(a_assertContext);
+    Result<renderer::MeshFieldIds> fieldIds = renderer::make_mesh_field_ids(a_assertContext);
+    Result<void> rendererComponent =
+        renderer::validate_runtime_scene_component(a_template.meshPrototype, a_assertContext);
+    if (!descriptor || !typeIds || !fieldIds || !rendererComponent || known->type_id() != typeIds.try_value()->mesh ||
+        known->known_fields().size() != 1U || known->known_fields()[0].id() != fieldIds.try_value()->asset ||
+        !known->unknown_fields().empty())
     {
-        const scene::AssetReferenceValue *asset = field.value().try_asset_reference();
-        if (asset == nullptr)
-        {
-            continue;
-        }
-        ++assetReferenceCount;
-        hasSelectedAsset = asset->token() == a_template.assetId;
+        return false;
     }
-    return assetReferenceCount == 1U && hasSelectedAsset;
+
+    const scene::AssetReferenceValue *asset = known->known_fields()[0].value().try_asset_reference();
+    return asset != nullptr && asset->token() == a_template.assetId;
 }
 } // namespace
 
@@ -250,7 +255,7 @@ Result<void> EditorController::execute_intent(EditorDocumentId a_documentId, Edi
                         scene::make_scene_error(*m_assertContext, scene::SceneError::UnknownSchemaType,
                                                 "Editor primitive is not supported by the current renderer"));
                 }
-                if (!primitive_template_matches(primitiveTemplate))
+                if (!primitive_template_matches(primitiveTemplate, *m_assertContext))
                 {
                     return Result<void>::failure(scene::make_scene_error(*m_assertContext,
                                                                          scene::SceneError::UnknownSchemaType,
