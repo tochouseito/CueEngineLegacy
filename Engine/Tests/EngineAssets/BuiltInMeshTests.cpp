@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -42,6 +43,180 @@ void require(bool a_condition) noexcept
     {
         std::abort();
     }
+}
+
+/// @brief 浮動小数値が指定Tolerance内で一致する場合にtrueを返す
+[[nodiscard]] bool nearly_equal(float a_left, float a_right, float a_tolerance = 0.00001F) noexcept
+{
+    return std::abs(a_left - a_right) <= a_tolerance;
+}
+
+/// @brief Triangle Index列で指定した非向きEdgeが使用される回数を返す
+[[nodiscard]] std::size_t count_edge_uses(const cue::engine_assets::MeshView &a_mesh, std::uint16_t a_first,
+                                          std::uint16_t a_second) noexcept
+{
+    std::size_t count = 0U;
+    for (std::size_t index = 0U; index < a_mesh.indices.size(); index += 3U)
+    {
+        const std::array triangle = {
+            a_mesh.indices[index],
+            a_mesh.indices[index + 1U],
+            a_mesh.indices[index + 2U],
+        };
+        for (std::size_t edgeIndex = 0U; edgeIndex < triangle.size(); ++edgeIndex)
+        {
+            const std::uint16_t edgeFirst = triangle[edgeIndex];
+            const std::uint16_t edgeSecond = triangle[(edgeIndex + 1U) % triangle.size()];
+            if ((edgeFirst == a_first && edgeSecond == a_second) ||
+                (edgeFirst == a_second && edgeSecond == a_first))
+            {
+                ++count;
+            }
+        }
+    }
+
+    return count;
+}
+
+using MeshVertexSignature = std::array<float, 6U>;
+using MeshTriangleSignature = std::array<MeshVertexSignature, 3U>;
+
+/// @brief Mesh Vertexを配列Indexに依存しない値Signatureへ変換する
+[[nodiscard]] MeshVertexSignature make_mesh_vertex_signature(const cue::engine_assets::MeshVertex &a_vertex) noexcept
+{
+    return {
+        a_vertex.position.x,
+        a_vertex.position.y,
+        a_vertex.position.z,
+        a_vertex.normal.x,
+        a_vertex.normal.y,
+        a_vertex.normal.z,
+    };
+}
+
+/// @brief Triangle内のVertex順に依存しない値Signatureを作成する
+[[nodiscard]] MeshTriangleSignature make_mesh_triangle_signature(
+    const cue::engine_assets::MeshVertex &a_first, const cue::engine_assets::MeshVertex &a_second,
+    const cue::engine_assets::MeshVertex &a_third) noexcept
+{
+    MeshTriangleSignature signature = {
+        make_mesh_vertex_signature(a_first),
+        make_mesh_vertex_signature(a_second),
+        make_mesh_vertex_signature(a_third),
+    };
+    std::ranges::sort(signature);
+    return signature;
+}
+
+/// @brief Sphere Revision 1の配列順に依存しない期待Vertex値を作成する
+[[nodiscard]] std::array<cue::engine_assets::MeshVertex, 114U> make_expected_sphere_vertices() noexcept
+{
+    constexpr std::size_t sliceCount = 16U;
+    constexpr std::size_t stackCount = 8U;
+    constexpr double stepCos = 0.9238795325112867;
+    constexpr double stepSin = 0.3826834323650898;
+    std::array<cue::engine_assets::MeshVertex, 114U> vertices{};
+    vertices.front() = {{0.0F, 0.5F, 0.0F}, {0.0F, 1.0F, 0.0F}};
+
+    std::size_t vertexIndex = 1U;
+    double stackSin = 0.0;
+    double stackCos = 1.0;
+    for (std::size_t stackIndex = 1U; stackIndex < stackCount; ++stackIndex)
+    {
+        const double nextStackSin = stackSin * stepCos + stackCos * stepSin;
+        const double nextStackCos = stackCos * stepCos - stackSin * stepSin;
+        stackSin = nextStackSin;
+        stackCos = nextStackCos;
+
+        double sliceSin = 0.0;
+        double sliceCos = 1.0;
+        for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+        {
+            const float normalX = static_cast<float>(stackSin * sliceCos);
+            const float normalY = static_cast<float>(stackCos);
+            const float normalZ = static_cast<float>(stackSin * sliceSin);
+            vertices[vertexIndex++] = {
+                {normalX * 0.5F, normalY * 0.5F, normalZ * 0.5F},
+                {normalX, normalY, normalZ},
+            };
+
+            const double nextSliceSin = sliceSin * stepCos + sliceCos * stepSin;
+            const double nextSliceCos = sliceCos * stepCos - sliceSin * stepSin;
+            sliceSin = nextSliceSin;
+            sliceCos = nextSliceCos;
+        }
+    }
+
+    vertices.back() = {{0.0F, -0.5F, 0.0F}, {0.0F, -1.0F, 0.0F}};
+    return vertices;
+}
+
+/// @brief Vertex値から配列順に依存せず一意なMesh Indexを返す
+[[nodiscard]] std::uint16_t find_unique_vertex_index(
+    const cue::engine_assets::MeshView &a_mesh, const cue::engine_assets::MeshVertex &a_expected) noexcept
+{
+    const MeshVertexSignature expected = make_mesh_vertex_signature(a_expected);
+    std::size_t matchCount = 0U;
+    std::uint16_t matchIndex = 0U;
+    for (std::size_t vertexIndex = 0U; vertexIndex < a_mesh.vertices.size(); ++vertexIndex)
+    {
+        if (make_mesh_vertex_signature(a_mesh.vertices[vertexIndex]) == expected)
+        {
+            ++matchCount;
+            matchIndex = static_cast<std::uint16_t>(vertexIndex);
+        }
+    }
+
+    require(matchCount == 1U);
+    return matchIndex;
+}
+
+/// @brief Sphere Revision 1の順序非依存Triangle集合を作成する
+[[nodiscard]] std::array<MeshTriangleSignature, 224U> make_expected_sphere_triangle_set() noexcept
+{
+    constexpr std::size_t sliceCount = 16U;
+    constexpr std::size_t ringCount = 7U;
+    constexpr std::uint16_t bottomIndex = 113U;
+    const auto vertices = make_expected_sphere_vertices();
+    std::array<MeshTriangleSignature, 224U> triangles{};
+    std::size_t triangleIndex = 0U;
+
+    for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+    {
+        const std::uint16_t current = static_cast<std::uint16_t>(1U + sliceIndex);
+        const std::uint16_t next = static_cast<std::uint16_t>(1U + (sliceIndex + 1U) % sliceCount);
+        triangles[triangleIndex++] =
+            make_mesh_triangle_signature(vertices[0U], vertices[current], vertices[next]);
+    }
+
+    for (std::size_t ringIndex = 0U; ringIndex + 1U < ringCount; ++ringIndex)
+    {
+        const std::size_t upperStart = 1U + ringIndex * sliceCount;
+        const std::size_t lowerStart = upperStart + sliceCount;
+        for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+        {
+            const std::size_t nextSlice = (sliceIndex + 1U) % sliceCount;
+            const std::uint16_t upperCurrent = static_cast<std::uint16_t>(upperStart + sliceIndex);
+            const std::uint16_t upperNext = static_cast<std::uint16_t>(upperStart + nextSlice);
+            const std::uint16_t lowerCurrent = static_cast<std::uint16_t>(lowerStart + sliceIndex);
+            const std::uint16_t lowerNext = static_cast<std::uint16_t>(lowerStart + nextSlice);
+            triangles[triangleIndex++] = make_mesh_triangle_signature(
+                vertices[upperCurrent], vertices[lowerNext], vertices[lowerCurrent]);
+            triangles[triangleIndex++] = make_mesh_triangle_signature(
+                vertices[upperCurrent], vertices[upperNext], vertices[lowerNext]);
+        }
+    }
+
+    const std::size_t lastRingStart = 1U + (ringCount - 1U) * sliceCount;
+    for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+    {
+        const std::uint16_t current = static_cast<std::uint16_t>(lastRingStart + sliceIndex);
+        const std::uint16_t next = static_cast<std::uint16_t>(lastRingStart + (sliceIndex + 1U) % sliceCount);
+        triangles[triangleIndex++] =
+            make_mesh_triangle_signature(vertices[current], vertices[next], vertices[bottomIndex]);
+    }
+
+    return triangles;
 }
 
 /// @brief Cube Corner Positionを配列順に依存しない3-bit値へ変換する
@@ -215,6 +390,186 @@ void test_cube_mesh() noexcept
     require(triangleSet == expectedTriangleSet);
 }
 
+/// @brief PlaneのIdentity、Geometry、Bounds、Winding Contractを検証する
+void test_plane_mesh() noexcept
+{
+    const auto plane = cue::engine_assets::built_in_plane_mesh();
+    const auto secondView = cue::engine_assets::built_in_plane_mesh();
+
+    require(plane.assetId == cue::engine_assets::k_planeMeshAssetId);
+    require(plane.revision == cue::engine_assets::k_planeMeshRevision);
+    require(plane.vertices.size() == 4U);
+    require(plane.indices.size() == 6U);
+    require(plane.vertices.data() == secondView.vertices.data());
+    require(plane.indices.data() == secondView.indices.data());
+
+    using PlanePosition = std::array<float, 3U>;
+    std::array<PlanePosition, 4U> positions{};
+    std::size_t vertexIndex = 0U;
+    for (const auto &vertex : plane.vertices)
+    {
+        require(vertex.position.y == 0.0F);
+        require(vertex.normal == cue::math::Vector3{0.0F, 1.0F, 0.0F});
+        positions[vertexIndex++] = {vertex.position.x, vertex.position.y, vertex.position.z};
+    }
+
+    std::array<PlanePosition, 4U> expectedPositions = {
+        PlanePosition{-0.5F, 0.0F, -0.5F},
+        PlanePosition{-0.5F, 0.0F, 0.5F},
+        PlanePosition{0.5F, 0.0F, 0.5F},
+        PlanePosition{0.5F, 0.0F, -0.5F},
+    };
+    std::ranges::sort(positions);
+    std::ranges::sort(expectedPositions);
+    require(positions == expectedPositions);
+
+    std::array<MeshTriangleSignature, 2U> triangleSet{};
+    std::size_t triangleIndex = 0U;
+    for (std::size_t index = 0U; index < plane.indices.size(); index += 3U)
+    {
+        const auto firstIndex = plane.indices[index];
+        const auto secondIndex = plane.indices[index + 1U];
+        const auto thirdIndex = plane.indices[index + 2U];
+        require(firstIndex < plane.vertices.size());
+        require(secondIndex < plane.vertices.size());
+        require(thirdIndex < plane.vertices.size());
+
+        const auto edgeA = plane.vertices[secondIndex].position - plane.vertices[firstIndex].position;
+        const auto edgeB = plane.vertices[thirdIndex].position - plane.vertices[firstIndex].position;
+        const auto triangleNormal = cue::math::cross(edgeA, edgeB);
+        require(cue::math::dot(triangleNormal, triangleNormal) > 0.0F);
+        require(cue::math::dot(triangleNormal, cue::math::Vector3{0.0F, 1.0F, 0.0F}) > 0.0F);
+        triangleSet[triangleIndex++] =
+            make_mesh_triangle_signature(plane.vertices[firstIndex], plane.vertices[secondIndex],
+                                         plane.vertices[thirdIndex]);
+    }
+
+    constexpr cue::engine_assets::MeshVertex expectedFirst{{-0.5F, 0.0F, -0.5F}, {0.0F, 1.0F, 0.0F}};
+    constexpr cue::engine_assets::MeshVertex expectedSecond{{-0.5F, 0.0F, 0.5F}, {0.0F, 1.0F, 0.0F}};
+    constexpr cue::engine_assets::MeshVertex expectedThird{{0.5F, 0.0F, 0.5F}, {0.0F, 1.0F, 0.0F}};
+    constexpr cue::engine_assets::MeshVertex expectedFourth{{0.5F, 0.0F, -0.5F}, {0.0F, 1.0F, 0.0F}};
+    std::array<MeshTriangleSignature, 2U> expectedTriangleSet = {
+        make_mesh_triangle_signature(expectedFirst, expectedSecond, expectedThird),
+        make_mesh_triangle_signature(expectedFirst, expectedThird, expectedFourth),
+    };
+    std::ranges::sort(triangleSet);
+    std::ranges::sort(expectedTriangleSet);
+    require(triangleSet == expectedTriangleSet);
+}
+
+/// @brief SphereのTessellation、Bounds、Normal、Winding、Seam／Pole Contractを検証する
+void test_sphere_mesh() noexcept
+{
+    constexpr std::size_t sliceCount = 16U;
+    constexpr std::size_t ringCount = 7U;
+    const auto sphere = cue::engine_assets::built_in_sphere_mesh();
+    const auto secondView = cue::engine_assets::built_in_sphere_mesh();
+
+    require(sphere.assetId == cue::engine_assets::k_sphereMeshAssetId);
+    require(sphere.revision == cue::engine_assets::k_sphereMeshRevision);
+    require(sphere.vertices.size() == 114U);
+    require(sphere.indices.size() == 672U);
+    require(sphere.vertices.data() == secondView.vertices.data());
+    require(sphere.indices.data() == secondView.indices.data());
+
+    cue::math::Vector3 minimum{
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+    };
+    cue::math::Vector3 maximum{
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+    };
+    for (const auto &vertex : sphere.vertices)
+    {
+        minimum.x = (std::min)(minimum.x, vertex.position.x);
+        minimum.y = (std::min)(minimum.y, vertex.position.y);
+        minimum.z = (std::min)(minimum.z, vertex.position.z);
+        maximum.x = (std::max)(maximum.x, vertex.position.x);
+        maximum.y = (std::max)(maximum.y, vertex.position.y);
+        maximum.z = (std::max)(maximum.z, vertex.position.z);
+
+        require(nearly_equal(cue::math::dot(vertex.normal, vertex.normal), 1.0F));
+        require(nearly_equal(vertex.position.x * 2.0F, vertex.normal.x));
+        require(nearly_equal(vertex.position.y * 2.0F, vertex.normal.y));
+        require(nearly_equal(vertex.position.z * 2.0F, vertex.normal.z));
+    }
+    require(nearly_equal(minimum.x, -0.5F));
+    require(nearly_equal(minimum.y, -0.5F));
+    require(nearly_equal(minimum.z, -0.5F));
+    require(nearly_equal(maximum.x, 0.5F));
+    require(nearly_equal(maximum.y, 0.5F));
+    require(nearly_equal(maximum.z, 0.5F));
+
+    const auto expectedVertices = make_expected_sphere_vertices();
+    const std::uint16_t topIndex = find_unique_vertex_index(sphere, expectedVertices.front());
+    const std::uint16_t bottomIndex = find_unique_vertex_index(sphere, expectedVertices.back());
+
+    std::size_t topTriangleCount = 0U;
+    std::size_t bottomTriangleCount = 0U;
+    std::array<MeshTriangleSignature, 224U> triangleSet{};
+    std::size_t triangleIndex = 0U;
+    for (std::size_t index = 0U; index < sphere.indices.size(); index += 3U)
+    {
+        const auto firstIndex = sphere.indices[index];
+        const auto secondIndex = sphere.indices[index + 1U];
+        const auto thirdIndex = sphere.indices[index + 2U];
+        require(firstIndex < sphere.vertices.size());
+        require(secondIndex < sphere.vertices.size());
+        require(thirdIndex < sphere.vertices.size());
+        require(firstIndex != secondIndex && secondIndex != thirdIndex && firstIndex != thirdIndex);
+
+        const auto &first = sphere.vertices[firstIndex];
+        const auto &second = sphere.vertices[secondIndex];
+        const auto &third = sphere.vertices[thirdIndex];
+        const auto triangleNormal =
+            cue::math::cross(second.position - first.position, third.position - first.position);
+        const cue::math::Vector3 centroid{
+            first.position.x + second.position.x + third.position.x,
+            first.position.y + second.position.y + third.position.y,
+            first.position.z + second.position.z + third.position.z,
+        };
+        require(cue::math::dot(triangleNormal, triangleNormal) > 0.0000001F);
+        require(cue::math::dot(triangleNormal, centroid) > 0.0F);
+        triangleSet[triangleIndex++] = make_mesh_triangle_signature(first, second, third);
+
+        if (firstIndex == topIndex || secondIndex == topIndex || thirdIndex == topIndex)
+        {
+            ++topTriangleCount;
+        }
+        if (firstIndex == bottomIndex || secondIndex == bottomIndex || thirdIndex == bottomIndex)
+        {
+            ++bottomTriangleCount;
+        }
+    }
+    require(topTriangleCount == sliceCount);
+    require(bottomTriangleCount == sliceCount);
+
+    auto expectedTriangleSet = make_expected_sphere_triangle_set();
+    std::ranges::sort(triangleSet);
+    std::ranges::sort(expectedTriangleSet);
+    require(triangleSet == expectedTriangleSet);
+
+    for (std::size_t ringIndex = 0U; ringIndex < ringCount; ++ringIndex)
+    {
+        const std::size_t expectedRingStart = 1U + ringIndex * sliceCount;
+        std::array<std::uint16_t, sliceCount> ringIndices{};
+        for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+        {
+            ringIndices[sliceIndex] =
+                find_unique_vertex_index(sphere, expectedVertices[expectedRingStart + sliceIndex]);
+        }
+
+        const std::uint16_t ringStart = ringIndices.front();
+        const std::uint16_t ringEnd = ringIndices.back();
+        require(count_edge_uses(sphere, ringEnd, ringStart) == 2U);
+        std::ranges::sort(ringIndices);
+        require(std::ranges::adjacent_find(ringIndices) == ringIndices.end());
+    }
+}
+
 /// @brief Canonical Mesh CatalogのDescriptor、Typed Resolution、Error分類を検証する
 void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
 {
@@ -223,7 +578,9 @@ void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
     using cue::engine_assets::EngineAssetsError;
 
     const auto catalog = cue::engine_assets::built_in_mesh_catalog();
-    require(catalog.size() == 1U);
+    const auto authoringProviders = cue::engine_assets::built_in_authoring_mesh_providers();
+    require(catalog.size() == 3U);
+    require(authoringProviders.size() == 3U);
     require(catalog.front().assetId == cue::engine_assets::k_cubeMeshAssetId);
     require(catalog.front().kind == BuiltInAssetKind::Mesh);
     require(catalog.front().revision == cue::engine_assets::k_cubeMeshRevision);
@@ -235,11 +592,45 @@ void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
 
     auto descriptor =
         cue::engine_assets::resolve_builtin_mesh_descriptor(cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
-    auto mesh = cue::engine_assets::resolve_builtin_mesh(cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
+    auto mesh = cue::engine_assets::resolve_builtin_mesh(authoringProviders,
+                                                         cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
     require(descriptor.has_value() && *descriptor.try_value() == &catalog.front());
     require(mesh.has_value());
     require(mesh.try_value()->vertices.data() == cue::engine_assets::built_in_cube_mesh().vertices.data());
     require(mesh.try_value()->indices.data() == cue::engine_assets::built_in_cube_mesh().indices.data());
+
+    auto planeDescriptor =
+        cue::engine_assets::resolve_builtin_mesh_descriptor(cue::engine_assets::k_planeMeshAssetId, a_assertContext);
+    auto sphereDescriptor =
+        cue::engine_assets::resolve_builtin_mesh_descriptor(cue::engine_assets::k_sphereMeshAssetId, a_assertContext);
+    auto plane = cue::engine_assets::resolve_builtin_mesh(
+        authoringProviders, cue::engine_assets::k_planeMeshAssetId, a_assertContext);
+    auto sphere = cue::engine_assets::resolve_builtin_mesh(
+        authoringProviders, cue::engine_assets::k_sphereMeshAssetId, a_assertContext);
+    require(planeDescriptor.has_value());
+    require((*planeDescriptor.try_value())->revision == cue::engine_assets::k_planeMeshRevision);
+    require((*planeDescriptor.try_value())->displayName == "Plane");
+    require((*planeDescriptor.try_value())->bounds.minimum == cue::math::Vector3{-0.5F, 0.0F, -0.5F});
+    require((*planeDescriptor.try_value())->bounds.maximum == cue::math::Vector3{0.5F, 0.0F, 0.5F});
+    require((*planeDescriptor.try_value())->capability == BuiltInMeshCapability::PositionNormal);
+    require(sphereDescriptor.has_value());
+    require((*sphereDescriptor.try_value())->revision == cue::engine_assets::k_sphereMeshRevision);
+    require((*sphereDescriptor.try_value())->displayName == "Sphere");
+    require((*sphereDescriptor.try_value())->bounds.minimum == cue::math::Vector3{-0.5F, -0.5F, -0.5F});
+    require((*sphereDescriptor.try_value())->bounds.maximum == cue::math::Vector3{0.5F, 0.5F, 0.5F});
+    require((*sphereDescriptor.try_value())->capability == BuiltInMeshCapability::PositionNormal);
+    require(plane.has_value());
+    require(sphere.has_value());
+    require(plane.try_value()->vertices.data() == cue::engine_assets::built_in_plane_mesh().vertices.data());
+    require(sphere.try_value()->vertices.data() == cue::engine_assets::built_in_sphere_mesh().vertices.data());
+
+    const std::array cubeOnlyProviders = {cue::engine_assets::built_in_cube_mesh_provider()};
+    auto selectedCube = cue::engine_assets::resolve_builtin_mesh(
+        cubeOnlyProviders, cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
+    auto unselectedPlane = cue::engine_assets::resolve_builtin_mesh(
+        cubeOnlyProviders, cue::engine_assets::k_planeMeshAssetId, a_assertContext);
+    require(selectedCube.has_value());
+    require(has_engine_assets_error(unselectedPlane, EngineAssetsError::PayloadUnavailable));
 
     auto unknown = cue::engine_assets::resolve_builtin_mesh_descriptor("cue://engine/mesh/unknown", a_assertContext);
     auto kindMismatch =
@@ -304,6 +695,8 @@ int main()
     cue::AssertContext assertContext(logger, fatalHandler);
 
     test_cube_mesh();
+    test_plane_mesh();
+    test_sphere_mesh();
     test_mesh_catalog(assertContext);
     test_catalog_rejection(assertContext);
     return 0;

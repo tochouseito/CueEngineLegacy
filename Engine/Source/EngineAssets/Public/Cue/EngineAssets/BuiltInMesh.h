@@ -12,6 +12,14 @@ namespace cue::engine_assets
 inline constexpr std::string_view k_cubeMeshAssetId = "cue://engine/mesh/cube";
 /// Built-in Cube Geometryの互換Revision
 inline constexpr std::uint32_t k_cubeMeshRevision = 1U;
+/// Built-in Plane MeshをProject File Pathから独立して識別するStable Asset ID
+inline constexpr std::string_view k_planeMeshAssetId = "cue://engine/mesh/plane";
+/// Built-in Plane Geometryの互換Revision
+inline constexpr std::uint32_t k_planeMeshRevision = 1U;
+/// Built-in Sphere MeshをProject File Pathから独立して識別するStable Asset ID
+inline constexpr std::string_view k_sphereMeshAssetId = "cue://engine/mesh/sphere";
+/// Built-in Sphere Geometryの互換Revision
+inline constexpr std::uint32_t k_sphereMeshRevision = 1U;
 
 /// @brief CPU側のBuilt-in Meshが保持する最小Vertex Data
 struct MeshVertex final
@@ -37,6 +45,32 @@ struct MeshView final
     std::span<const std::uint16_t> indices;
 };
 
+/// @brief Product Buildが明示選択したBuilt-in Mesh Payloadへの非所有Provider
+struct BuiltInMeshProvider final
+{
+    /// Providerが解決するStable Asset ID
+    std::string_view assetId;
+    /// Stable IDへ不変に対応するGeometry Revision
+    std::uint32_t revision;
+    /// Process寿命の不変Mesh Viewを返すFunction
+    MeshView (*load)() noexcept;
+};
+
 /// @brief 原点中心で一辺1mのEngine所有Cube GeometryをAllocationなしで返す
 [[nodiscard]] MeshView built_in_cube_mesh() noexcept;
+
+/// @brief CubeだけをLink Closureへ追加できるPayload Providerを返す
+[[nodiscard]] BuiltInMeshProvider built_in_cube_mesh_provider() noexcept;
+
+/// @brief 原点中心で一辺1m、+Yを表とするEngine所有XZ Plane GeometryをAllocationなしで返す
+[[nodiscard]] MeshView built_in_plane_mesh() noexcept;
+
+/// @brief PlaneだけをLink Closureへ追加できるPayload Providerを返す
+[[nodiscard]] BuiltInMeshProvider built_in_plane_mesh_provider() noexcept;
+
+/// @brief 原点中心で直径1m、16 Slice／8 StackのEngine所有Sphere GeometryをAllocationなしで返す
+[[nodiscard]] MeshView built_in_sphere_mesh() noexcept;
+
+/// @brief SphereだけをLink Closureへ追加できるPayload Providerを返す
+[[nodiscard]] BuiltInMeshProvider built_in_sphere_mesh_provider() noexcept;
 } // namespace cue::engine_assets
