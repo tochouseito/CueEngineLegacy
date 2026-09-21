@@ -213,6 +213,12 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
         require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
     }
 
+    require(!cue::distribution::is_canonical_distribution_path("Engine/Source/Foo/\xc3\x89.cpp"));
+    require(!cue::distribution::is_canonical_distribution_path("Engine/Source/Foo/\xc3\xa9.cpp"));
+    require(!cue::distribution::is_canonical_distribution_path("Engine/Source/Foo/COM\xc2\xb9.txt"));
+    require(!cue::distribution::is_canonical_distribution_path("Engine/Source/Foo/LPT\xc2\xb2.txt"));
+    require(!cue::distribution::is_canonical_distribution_path("Engine/Source/Foo/LPT\xc2\xb3.txt"));
+
     manifest = make_manifest();
     manifest.files.push_back(
         {cue::distribution::DistributionFileRole::EngineSource, "engine/source/foundation/foo.cpp", 1U, hash('8')});

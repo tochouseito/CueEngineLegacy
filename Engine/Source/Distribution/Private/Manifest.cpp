@@ -24,6 +24,12 @@ constexpr std::size_t k_maximumPathBytes = 1024U;
 constexpr std::size_t k_maximumSegmentBytes = 255U;
 constexpr std::size_t k_maximumJsonStringBytes = 4096U;
 
+/// @brief M18の配布Pathとして使用できるportable printable ASCIIか返す
+[[nodiscard]] bool is_portable_path_character(unsigned char a_value) noexcept
+{
+    return a_value >= 0x20U && a_value <= 0x7eU;
+}
+
 /// @brief Allocation失敗をDistribution Fatalへ変換する
 [[noreturn]] void terminate_allocation(const cue::AssertContext &a_assertContext) noexcept
 {
@@ -572,8 +578,8 @@ bool is_canonical_distribution_path(std::string_view a_path) noexcept
         if (index < a_path.size())
         {
             const char value = a_path[index];
-            if (value == '\\' || value == ':' || value == '"' || value == '<' || value == '>' || value == '|' ||
-                value == '?' || value == '*')
+            if (!is_portable_path_character(static_cast<unsigned char>(value)) || value == '\\' || value == ':' ||
+                value == '"' || value == '<' || value == '>' || value == '|' || value == '?' || value == '*')
             {
                 return false;
             }

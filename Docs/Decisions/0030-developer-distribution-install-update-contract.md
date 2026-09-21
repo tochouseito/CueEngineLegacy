@@ -124,6 +124,10 @@ Top-level Memberは`schemaVersion`、`distributionKind`、`bundleId`、`engineVe
 `minimumToolchain`、`entryPoints`、`files`の順とする。Readerは順序違い、Whitespace、未知／欠落Member、未知Role、
 対応外Version、非Canonical数値、末尾Dataを拒否し、読み取った値をWriterで再生成したByte列と入力を一致検証する。
 
+Manifest v1のPayload Pathは、WindowsのUnicode case aliasと予約Device名をPlatform非依存Readerで一意に扱うため、
+portable printable ASCIIに限定する。Unicode Path対応はNormalization／case folding／各Host予約名の契約を定義する
+新Schemaまで延期し、旧Readerが曖昧なPathをMaterializeしないようFail-closedで拒否する。
+
 Source Inventory Hashは固定Commit BlobごとのRole、Bundle相対Path、Size、SHA-256、Git Blob IDをPath順に
 長さ付きで結合したByte列のSHA-256とする。Source管理PayloadのAllowlistは次に固定する。
 
