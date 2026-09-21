@@ -20,7 +20,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-$global:LASTEXITCODE = 0
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $thirdPartyRoot = Join-Path $repositoryRoot "ThirdParty"
@@ -223,6 +222,55 @@ function Invoke-CheckedProcess
     }
 }
 
+function Invoke-CapturedProcess
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $ArgumentList)
+    {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try
+    {
+        if (-not $process.Start())
+        {
+            throw "Process could not be started: $FilePath"
+        }
+        $standardOutput = $process.StandardOutput.ReadToEndAsync()
+        $standardError = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $outputText = $standardOutput.GetAwaiter().GetResult()
+        $errorText = $standardError.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0)
+        {
+            throw "Process failed with exit code $($process.ExitCode): $FilePath $($ArgumentList -join ' '); $errorText"
+        }
+        return $outputText
+    }
+    finally
+    {
+        $process.Dispose()
+    }
+}
+
 function Test-VcpkgExecutable
 {
     $executablePath = Join-Path $toolRoot "vcpkg.exe"
@@ -237,8 +285,16 @@ function Test-VcpkgExecutable
         return $false
     }
 
-    $versionText = (& $executablePath version | Out-String)
-    return $LASTEXITCODE -eq 0 -and $versionText.Contains($configuration.windowsX64Version)
+    try
+    {
+        $versionText = Invoke-CapturedProcess -FilePath $executablePath -ArgumentList @("version") `
+            -WorkingDirectory $toolRoot
+        return $versionText.Contains($configuration.windowsX64Version)
+    }
+    catch
+    {
+        return $false
+    }
 }
 
 function Test-CompletedDependencyRoot
@@ -285,24 +341,28 @@ function Invoke-VcpkgRestore
         ) -WorkingDirectory $toolRoot
     }
 
-    $trackedChanges = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no |
-        Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $trackedChanges.Length -ne 0)
+    $trackedChanges = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList @(
+        "-c", "core.longpaths=true", "-c", "safe.directory=$toolRoot", "-C", $toolRoot,
+        "status", "--porcelain", "--untracked-files=no"
+    ) -WorkingDirectory $repositoryRoot).Trim()
+    if ($trackedChanges.Length -ne 0)
     {
         throw "Managed vcpkg checkout contains tracked changes."
     }
 
-    $actualRepository = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
-    if ($LASTEXITCODE -ne 0 -or $actualRepository -cne $configuration.repository)
+    $actualRepository = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList @(
+        "-c", "core.longpaths=true", "-c", "safe.directory=$toolRoot", "-C", $toolRoot,
+        "remote", "get-url", "origin"
+    ) -WorkingDirectory $repositoryRoot).Trim()
+    if ($actualRepository -cne $configuration.repository)
     {
         throw "Managed vcpkg checkout origin does not match the pinned repository."
     }
 
-    $actualCommit = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw "Managed vcpkg checkout commit could not be read."
-    }
+    $actualCommit = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList @(
+        "-c", "core.longpaths=true", "-c", "safe.directory=$toolRoot", "-C", $toolRoot,
+        "rev-parse", "HEAD"
+    ) -WorkingDirectory $repositoryRoot).Trim()
     if ($actualCommit -cne $configuration.commit)
     {
         Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
@@ -330,8 +390,11 @@ function Invoke-VcpkgRestore
         ) -WorkingDirectory $repositoryRoot
     }
 
-    $actualCommit = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $configuration.commit)
+    $actualCommit = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList @(
+        "-c", "core.longpaths=true", "-c", "safe.directory=$toolRoot", "-C", $toolRoot,
+        "rev-parse", "HEAD"
+    ) -WorkingDirectory $repositoryRoot).Trim()
+    if ($actualCommit -cne $configuration.commit)
     {
         throw "Managed vcpkg checkout does not match the pinned commit."
     }
