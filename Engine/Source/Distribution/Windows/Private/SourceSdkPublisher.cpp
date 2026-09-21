@@ -186,7 +186,8 @@ constexpr std::array k_expectedTools = {
                                                : 0U;
                 for (const char value : a_diagnostic.substr(offset, maximumDiagnosticBytes))
                 {
-                    summary.push_back(value == '\r' || value == '\n' || value == '\t' || value == '\0' ? ' ' : value);
+                    const unsigned char byte = static_cast<unsigned char>(value);
+                    summary.push_back(byte < 0x20U || byte == 0x7fU ? ' ' : value);
                 }
             };
             appendDiagnostic("stdout", capture.standardOutput);
