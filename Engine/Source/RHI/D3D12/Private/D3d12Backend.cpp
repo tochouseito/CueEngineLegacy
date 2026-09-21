@@ -22,6 +22,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -597,6 +598,54 @@ struct D3d12ScenePixelCapture final
     std::uint32_t width = 0U;
     std::uint32_t height = 0U;
 };
+
+/// @brief Readback内のClear角画素と一つ以上の非Clear Scene画素を検証する
+[[nodiscard]] bool validate_scene_pixel_capture(const D3d12ScenePixelCapture &a_capture,
+                                                const std::array<float, 4> &a_clearColor) noexcept
+{
+    if (!a_capture.readback || a_capture.width < 5U || a_capture.height < 5U)
+    {
+        return false;
+    }
+    std::array<std::uint8_t, 4> expectedClear = {};
+    for (std::size_t channel = 0U; channel < expectedClear.size(); ++channel)
+    {
+        const float clamped = std::clamp(a_clearColor[channel], 0.0F, 1.0F);
+        expectedClear[channel] = static_cast<std::uint8_t>(std::lround(clamped * 255.0F));
+    }
+    const D3D12_RANGE readRange = {0U, static_cast<SIZE_T>(a_capture.readback->GetDesc().Width)};
+    void *mapped = nullptr;
+    if (FAILED(a_capture.readback->Map(0U, &readRange, &mapped)))
+    {
+        return false;
+    }
+    const auto *bytes = static_cast<const std::uint8_t *>(mapped) + a_capture.footprint.Offset;
+    const auto differs = [&expectedClear](const std::uint8_t *a_pixel) noexcept
+    {
+        return std::abs(static_cast<int>(a_pixel[0]) - static_cast<int>(expectedClear[0])) > 2 ||
+               std::abs(static_cast<int>(a_pixel[1]) - static_cast<int>(expectedClear[1])) > 2 ||
+               std::abs(static_cast<int>(a_pixel[2]) - static_cast<int>(expectedClear[2])) > 2;
+    };
+    const std::uint8_t *corner = bytes + 2U * a_capture.footprint.Footprint.RowPitch + 2U * 4U;
+    bool cornerIsClear = !differs(corner) &&
+                         std::abs(static_cast<int>(corner[3]) - static_cast<int>(expectedClear[3])) <= 2;
+    bool hasScenePixel = false;
+    for (std::uint32_t y = 0U; y < a_capture.height && !hasScenePixel; ++y)
+    {
+        const std::uint8_t *row = bytes + y * a_capture.footprint.Footprint.RowPitch;
+        for (std::uint32_t x = 0U; x < a_capture.width; ++x)
+        {
+            if (differs(row + x * 4U))
+            {
+                hasScenePixel = true;
+                break;
+            }
+        }
+    }
+    const D3D12_RANGE writtenRange = {0U, 0U};
+    a_capture.readback->Unmap(0U, &writtenRange);
+    return cornerIsClear && hasScenePixel;
+}
 #endif
 
 // Window 固有の Swap Chain、Back Buffer、RTV、Frame Command を所有する Presentation 実装
@@ -1407,6 +1456,29 @@ class D3d12PresentationContext final : public cue::PresentationContext
         m_sceneCaptureForProbe = a_capture;
     }
 
+    /// @brief Process Probeが所有するReadbackを作成し次回Scene Frameへ設定する
+    [[nodiscard]] bool arm_owned_scene_capture_for_probe() noexcept
+    {
+        m_ownedSceneCaptureForProbe.emplace();
+        if (!create_scene_capture_for_probe(*m_ownedSceneCaptureForProbe))
+        {
+            m_ownedSceneCaptureForProbe.reset();
+            return false;
+        }
+        m_sceneCaptureForProbe = &*m_ownedSceneCaptureForProbe;
+        return true;
+    }
+
+    /// @brief GPU完了後にProcess ProbeのReadbackを検証して所有状態を解除する
+    [[nodiscard]] bool validate_owned_scene_capture_for_probe(const std::array<float, 4> &a_clearColor) noexcept
+    {
+        m_sceneCaptureForProbe = nullptr;
+        const bool valid = m_ownedSceneCaptureForProbe.has_value() &&
+                           validate_scene_pixel_capture(*m_ownedSceneCaptureForProbe, a_clearColor);
+        m_ownedSceneCaptureForProbe.reset();
+        return valid;
+    }
+
 #endif
 
     /// @brief D3D12 Backend の Transition Frame For Probe を GPU 実行順と Resource State を守って投入する
@@ -1604,6 +1676,7 @@ class D3d12PresentationContext final : public cue::PresentationContext
     bool m_isResizePending;
 #if CUE_D3D12_TESTING
     D3d12ScenePixelCapture *m_sceneCaptureForProbe = nullptr;
+    std::optional<D3d12ScenePixelCapture> m_ownedSceneCaptureForProbe;
 #endif
 };
 
@@ -3361,4 +3434,19 @@ Result<std::unique_ptr<D3d12Backend>> create_d3d12_backend(const D3d12BackendDes
         terminate_allocation(a_assertContext);
     }
 }
+
+#if CUE_D3D12_TESTING
+bool arm_d3d12_scene_pixel_capture_for_probe(PresentationContext &a_presentation) noexcept
+{
+    auto *presentation = dynamic_cast<D3d12PresentationContext *>(&a_presentation);
+    return presentation != nullptr && presentation->arm_owned_scene_capture_for_probe();
+}
+
+bool validate_d3d12_scene_pixel_capture_for_probe(PresentationContext &a_presentation,
+                                                  const std::array<float, 4> &a_clearColor) noexcept
+{
+    auto *presentation = dynamic_cast<D3d12PresentationContext *>(&a_presentation);
+    return presentation != nullptr && presentation->validate_owned_scene_capture_for_probe(a_clearColor);
+}
+#endif
 } // namespace cue

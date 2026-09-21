@@ -129,7 +129,12 @@ endif()
 
 if(BUILD_TESTING)
     target_link_libraries(Cue.RuntimeHost.Core PRIVATE Cue.Platform.Windows.TestSupport)
-    target_compile_definitions(Cue.RuntimeHost.Core PRIVATE CUE_RUNTIME_RESIZE_SMOKE_SUPPORT=1)
+    target_compile_definitions(
+        Cue.RuntimeHost.Core
+        PRIVATE
+            CUE_RUNTIME_RESIZE_SMOKE_SUPPORT=1
+            CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT=1
+    )
 endif()
 
 target_compile_definitions(

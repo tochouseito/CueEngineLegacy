@@ -29,6 +29,35 @@ target_compile_definitions(
 )
 set_target_properties(CueRuntimePackageProbe PROPERTIES OUTPUT_NAME CueGameModule)
 
+add_library(CueRuntimePackageStaticProbe STATIC RuntimePackageProbe.cpp)
+target_link_libraries(CueRuntimePackageStaticProbe PRIVATE Cue.GameModule.Abi)
+target_compile_features(CueRuntimePackageStaticProbe PRIVATE cxx_std_20)
+target_compile_definitions(
+    CueRuntimePackageStaticProbe
+    PRIVATE
+        CUE_GAME_MODULE_STATIC=1
+        CUE_RUNTIME_PACKAGE_STATIC_PROBE=1
+        $<$<CONFIG:Debug>:CUE_TEST_BUILD_CONFIGURATION=1>
+        $<$<CONFIG:Development>:CUE_TEST_BUILD_CONFIGURATION=2>
+        $<$<CONFIG:Release>:CUE_TEST_BUILD_CONFIGURATION=3>
+)
+
+add_executable(CueRuntimeStaticSceneProduct RuntimeStaticSceneProduct.cpp)
+target_link_libraries(
+    CueRuntimeStaticSceneProduct
+    PRIVATE
+        CueRuntimePackageStaticProbe
+        Cue.RuntimeHost.Static
+)
+target_compile_features(CueRuntimeStaticSceneProduct PRIVATE cxx_std_20)
+target_compile_definitions(CueRuntimeStaticSceneProduct PRIVATE CUE_GAME_MODULE_STATIC=1)
+set_target_properties(
+    CueRuntimeStaticSceneProduct
+    PROPERTIES
+        CXX_EXTENSIONS OFF
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+)
+
 add_executable(CueRuntimeHostGameModuleQueryProviderTests GameModuleQueryProviderTests.cpp)
 target_link_libraries(CueRuntimeHostGameModuleQueryProviderTests PRIVATE Cue.RuntimeHost.Static)
 target_compile_features(CueRuntimeHostGameModuleQueryProviderTests PRIVATE cxx_std_20)
@@ -121,6 +150,28 @@ if(MSVC)
             $<$<CONFIG:Development>:/Zi>
     )
     target_compile_options(
+        CueRuntimePackageStaticProbe
+        PRIVATE
+            /W4
+            /WX
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+            $<$<CONFIG:Development>:/O2>
+            $<$<CONFIG:Development>:/Zi>
+    )
+    target_compile_options(
+        CueRuntimeStaticSceneProduct
+        PRIVATE
+            /W4
+            /WX
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+            $<$<CONFIG:Development>:/O2>
+            $<$<CONFIG:Development>:/Zi>
+    )
+    target_compile_options(
         CueRuntimeHostPathTests
         PRIVATE
             /W4
@@ -154,6 +205,7 @@ if(MSVC)
             $<$<CONFIG:Development>:/Zi>
     )
     target_link_options(CueRuntimeHostPathTests PRIVATE $<$<CONFIG:Development>:/DEBUG>)
+    target_link_options(CueRuntimeStaticSceneProduct PRIVATE $<$<CONFIG:Development>:/DEBUG>)
     target_link_options(CueRuntimeHostGameModuleQueryProviderTests PRIVATE $<$<CONFIG:Development>:/DEBUG>)
     target_link_options(CueRuntimeHostModuleIdentityTests PRIVATE $<$<CONFIG:Development>:/DEBUG>)
 endif()
@@ -177,6 +229,8 @@ add_custom_target(
         CueRuntimeHostGameModuleQueryProviderTests
         CueRuntimePackageDependencyProbe
         CueRuntimePackageProbe
+        CueRuntimePackageStaticProbe
+        CueRuntimeStaticSceneProduct
         CueRuntimeHostModuleIdentityTests
         CueRuntimeHostPathTests
         CueRuntimeHostRhiOwnershipCompile
@@ -249,6 +303,17 @@ add_test(
         -DCOMPILER_FULL_VERSION=${cueRuntimeHostCompilerFullVersion}
         -DCOMPILER_BUILD=${cueRuntimeHostCompilerBuild}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyRuntimePackage.cmake
+)
+
+add_test(
+    NAME Cue.RuntimeHost.StaticScenePackage.Process
+    COMMAND
+        ${CMAKE_COMMAND}
+        -DTEST_EXECUTABLE=$<TARGET_FILE:CueRuntimeStaticSceneProduct>
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/RuntimeStaticScenePackage/$<CONFIG>
+        -DCONFIGURATION=$<CONFIG>
+        -DDUMPBIN=${CMAKE_DUMPBIN}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyRuntimeStaticScenePackage.cmake
 )
 
 add_test(
@@ -365,6 +430,7 @@ set_tests_properties(
 
 set_tests_properties(
     Cue.RuntimeHost.Package.Process
+    Cue.RuntimeHost.StaticScenePackage.Process
     PROPERTIES
         LABELS RuntimeHost
         TIMEOUT 300

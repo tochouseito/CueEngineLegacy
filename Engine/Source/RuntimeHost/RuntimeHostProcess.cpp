@@ -13,6 +13,9 @@
 #include <Cue/Platform/Windows/TestSupport/WindowsWindowLifecycleProbe.h>
 #endif
 #include <Cue/RHI/D3D12/D3d12Backend.h>
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+#include <Cue/RHI/D3D12/TestSupport/D3d12SwapChainProbe.h>
+#endif
 #include <Cue/RHI/D3D12/Windows/D3d12WindowsPresentation.h>
 #include <Cue/RuntimeHost/RuntimeHostApplication.h>
 
@@ -55,6 +58,9 @@ constexpr int k_presentationResizeFailed = 12;
 constexpr int k_runtimeApplicationCreationFailed = 14;
 constexpr int k_runtimeApplicationFrameFailed = 15;
 constexpr int k_runtimeApplicationShutdownFailed = 16;
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+constexpr int k_scenePixelSmokeFailed = 17;
+#endif
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
 constexpr int k_resizeSmokeFailed = 13;
 constexpr std::uint32_t k_resizeSmokeCycleCount = 50;
@@ -71,6 +77,9 @@ struct RuntimeOptions final
     bool isGraphicsSmoke = false;
     bool isPresentationSmoke = false;
     bool isRenderSmoke = false;
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+    bool isPackageScenePixelSmoke = false;
+#endif
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
     bool isResizeSmoke = false;
 #endif
@@ -304,6 +313,9 @@ template <typename Value>
 
         bool isGraphicsModeArgument =
             argument == L"--graphics-smoke" || argument == L"--presentation-smoke" || argument == L"--render-smoke";
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+        isGraphicsModeArgument = isGraphicsModeArgument || argument == L"--package-scene-smoke-test";
+#endif
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
         isGraphicsModeArgument = isGraphicsModeArgument || argument == L"--resize-smoke";
 #endif
@@ -343,6 +355,14 @@ template <typename Value>
             {
                 a_options.isRenderSmoke = true;
             }
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+            else if (argument == L"--package-scene-smoke-test")
+            {
+                a_options.isPackageRuntime = true;
+                a_options.isSmokeTest = true;
+                a_options.isPackageScenePixelSmoke = true;
+            }
+#endif
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
             else
             {
@@ -406,6 +426,9 @@ void print_usage() noexcept
 {
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
     std::fputws(L"Usage: CueRuntimeHost [--smoke-test | --package | --package-smoke-test | "
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+                L"--package-scene-smoke-test <hardware|warp> | "
+#endif
                 L"--graphics-smoke <hardware|warp> | "
                 L"--presentation-smoke <hardware|warp> | --render-smoke <hardware|warp> | "
                 L"--resize-smoke <hardware|warp>] "
@@ -413,6 +436,9 @@ void print_usage() noexcept
                 stderr);
 #else
     std::fputws(L"Usage: CueRuntimeHost [--smoke-test | --package | --package-smoke-test | "
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+                L"--package-scene-smoke-test <hardware|warp> | "
+#endif
                 L"--graphics-smoke <hardware|warp> | "
                 L"--presentation-smoke <hardware|warp> | --render-smoke <hardware|warp>] "
                 L"[--title <title>] [--width <pixels>] [--height <pixels>]\n",
@@ -423,6 +449,17 @@ void print_usage() noexcept
 /// @brief Runtime Error を Logger へ記録し、呼び出し元へ対応する終了 Code を返す
 [[nodiscard]] int report_error(cue::Logger &a_logger, std::string_view a_message, cue::Error &&a_error,
                                int a_exitCode) noexcept;
+
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+/// @brief Scene Pixel Smoke失敗をRuntime Host Domainの診断可能なErrorへ変換する
+[[nodiscard]] cue::Error make_scene_pixel_smoke_error(const cue::AssertContext &a_assertContext,
+                                                      std::string_view a_summary) noexcept
+{
+    cue::ErrorCode code =
+        cue::ErrorCode::create(a_assertContext.fatal_handler(), "Cue.RuntimeHost", k_scenePixelSmokeFailed);
+    return cue::Error::create(a_assertContext.fatal_handler(), std::move(code), a_summary);
+}
+#endif
 
 /// @brief Runtime Option と Build 設定から再現可能な D3D12 Backend 生成条件を構築する
 [[nodiscard]] cue::D3d12BackendDescriptor make_backend_descriptor(const RuntimeOptions &a_options) noexcept
@@ -776,6 +813,18 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
     bool hasRuntimeFrameFailure = false;
     bool hasLoggedPresentationFrame = false;
 
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+    if (a_options.isPackageScenePixelSmoke &&
+        !cue::arm_d3d12_scene_pixel_capture_for_probe(*presentation))
+    {
+        frameError.emplace(make_scene_pixel_smoke_error(
+            a_assertContext, "Runtime Package Scene pixel capture could not be armed"));
+        loopErrorMessage = "Runtime Package Scene pixel capture setup failed";
+        loopErrorExitCode = k_scenePixelSmokeFailed;
+        isShutdownRequested = true;
+    }
+#endif
+
     while (!isShutdownRequested)
     {
 #if defined(CUE_RUNTIME_RESIZE_SMOKE_SUPPORT) && CUE_RUNTIME_RESIZE_SMOKE_SUPPORT
@@ -1088,6 +1137,28 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
         presentationShutdownError.emplace(std::move(*presentationShutdownResult.try_error()));
     }
 
+    cue::LogResult scenePixelSmokeLogResult = cue::LogResult::Success;
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+    if (a_options.isPackageScenePixelSmoke && presentationShutdownResult)
+    {
+        if (!cue::validate_d3d12_scene_pixel_capture_for_probe(*presentation, clearColor))
+        {
+            if (!frameError)
+            {
+                frameError.emplace(make_scene_pixel_smoke_error(
+                    a_assertContext, "Runtime Package Scene did not produce a clear corner and non-clear Scene pixel"));
+            }
+            loopErrorMessage = "Runtime Package Scene pixel verification failed";
+            loopErrorExitCode = k_scenePixelSmokeFailed;
+        }
+        else
+        {
+            scenePixelSmokeLogResult =
+                a_logger.log(cue::LogLevel::Info, "Runtime Package Scene Pixel Probe: Passed");
+        }
+    }
+#endif
+
     presentation.reset();
 
     // Presentation の所有物がなくなってから Device を停止し、参照先を先に破棄する順序を防ぐ
@@ -1196,6 +1267,7 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
                    renderSnapshotLogResult == cue::LogResult::Success &&
                    presentationFrameLogResult == cue::LogResult::Success &&
                    runtimeShutdownLogResult == cue::LogResult::Success &&
+                   scenePixelSmokeLogResult == cue::LogResult::Success &&
                    resizeSmokeLogResult == cue::LogResult::Success && completionLogResult == cue::LogResult::Success &&
                    shutdownLogResult == cue::LogResult::Success && flushResult == cue::LogResult::Success
                ? 0
