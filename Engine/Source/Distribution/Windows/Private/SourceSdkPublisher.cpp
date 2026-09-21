@@ -156,14 +156,6 @@ constexpr std::array k_expectedTools = {
         {
             return cue::Result<ProcessCapture>::failure(std::move(*result.try_error()));
         }
-        if (result.try_value()->outcome() != cue::ChildProcessOutcome::Exited ||
-            !result.try_value()->exit_code() || *result.try_value()->exit_code() != 0U)
-        {
-            return cue::Result<ProcessCapture>::failure(
-                make_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
-                           "Distribution child process failed"));
-        }
-
         ProcessCapture capture;
         for (const cue::ChildProcessOutputChunk &chunk : result.try_value()->output())
         {
@@ -171,6 +163,19 @@ constexpr std::array k_expectedTools = {
                                            ? capture.standardOutput
                                            : capture.standardError;
             destination.append(chunk.bytes);
+        }
+        if (result.try_value()->outcome() != cue::ChildProcessOutcome::Exited ||
+            !result.try_value()->exit_code() || *result.try_value()->exit_code() != 0U)
+        {
+            std::string summary = "Distribution child process failed: ";
+            summary.append(utf8_path(native_path(a_executable).filename()));
+            if (result.try_value()->exit_code())
+            {
+                summary.append(" (exit code ").append(std::to_string(*result.try_value()->exit_code())).push_back(')');
+            }
+            return cue::Result<ProcessCapture>::failure(
+                make_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                           summary));
         }
         return cue::Result<ProcessCapture>::success(std::move(capture));
     }
