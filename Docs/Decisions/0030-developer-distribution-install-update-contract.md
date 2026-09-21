@@ -86,15 +86,21 @@ lowercase canonical UUID v4に固定する。Version Directory名は検証済み
 `v<MAJOR>.<MINOR>.<PATCH>--<uuid>`として生成し、入力文字列をPathへ直接連結しない。生成後のPathを
 Canonical化し、`Versions`直下の単一要素であることを再検証する。
 
-Dependency Set IDは、Canonical化したvcpkg Manifest／Configuration／Tool Pinから生成する
-64文字のlowercase SHA-256 hexに固定する。検証前の値をPathへ使用せず、生成したDirectoryが
-`Dependencies`直下の単一要素であることをCanonical化後に再検証する。
+Dependency Set IDは、Canonical化したvcpkg Manifest／Configuration／Tool Pinと、検証済み
+Dependency Build Identityから生成する64文字のlowercase SHA-256 hexに固定する。Dependency Build
+IdentityはTarget Triplet、Host／Target Architecture、Compiler Vendor／Full Version／Toolset、CRT
+Linkage／Version、Windows SDK Target Versionを含むCanonical表現とする。完了Markerにも同じIdentityを
+記録し、一項目でも異なるToolchain／Compiler／CRT ABIの出力は同じRootとして再利用せず、新しいIDへ
+分離する。検証前の値をPathへ使用せず、生成したDirectoryが`Dependencies`直下の単一要素であることを
+Canonical化後に再検証する。
 
-Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし、全Inventoryを
-検証した後だけBundleを公開する。Repository Rootからの場当たり的な再帰Copyは行わない。
-PublisherはGit HEADとWorktreeを検証し、Tracked／Untracked変更があるRepositoryからのBundle生成を
-拒否する。検証済みRevision、`clean` Source State、Source Inventory HashをManifestへ記録する。
-配布物からProject SourceやUser Dataへ書き戻さない。
+Source SDK Publisherは開始時にGit HEADを固定し、Tracked／Untracked変更のないWorktreeだけを入力として
+受け付ける。固定AllowlistのPayloadはLive Worktreeの後続状態からCopyせず、記録したCommit TreeのBlobを
+Materializeして不変SnapshotをStagingへ生成する。Stagingの各Fileが同じCommit Blobと一致することを検証し、
+Inventory生成後にHEAD、Index、Tracked／Untracked状態を再読込して開始時と変化していれば公開を拒否する。
+Repository Rootからの場当たり的な再帰Copyは行わず、検証済みRevision、`clean` Source State、Source
+Inventory HashをManifestへ記録する。これによりManifestのRevisionと実際に収録したByteを同じCommitへ
+結び付ける。配布物からProject SourceやUser Dataへ書き戻さない。
 
 ### Third-Party and Toolchain
 
@@ -181,6 +187,14 @@ Registry Revisionと期待Revisionを照合してから変更する。別Process
 上書きせず再試行またはConflict Errorとする。Abandoned WriterはOperation JournalとVersion Directoryを
 再検証してからRecoveryする。Atomic ReplaceだけをProcess間排他の代用にしない。
 
+Operation Journalは`schemaVersion: 1`のCanonical JSONとし、Operation ID、Operation Kind、単調なStage、
+Expected Registry Revision、対象Version／Bundle Identity、Manifest Digest、Worker Identityを必須Memberとして
+記録する。Reader／Workerは対応外Schema、未知Member、欠落Member、非Canonical表現、後退または不正なStage
+遷移をFail-closedで拒否し、旧Writerが新Schemaを上書きしない。各Stageは耐久書込みとAtomic Replace後にだけ
+進め、Workerは自身が対応するSchemaとOperation Kindだけを再開する。破損または非互換JournalはEvidenceとして
+Quarantineし、Payload／Registryを推測で変更しない。意味変更と移行は専用Issueで新Schemaと明示Migrationを
+定義し、暗黙Upgradeしない。
+
 ### Update, Rollback, and Uninstall
 
 - Updateは既存Versionへの上書きPatchではなく、新しいImmutable VersionのSide-by-side Installとする
@@ -256,11 +270,13 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 ## Verification
 
 - Allowlist外File、Path Traversal、重複、欠落、Size／Hash、非Canonical Manifestを拒否する
-- Dirty RepositoryからのBundle生成、非Canonical Dependency Set ID、Dependencies Root外Pathを拒否する
+- Dirty Repository、Publisher実行中のHEAD／Worktree変更、Commit Blobと不一致なSnapshotからのBundle生成を拒否する
+- 非Canonical Dependency Set ID、Toolchain／Compiler／CRT ABI Identity不一致、Dependencies Root外Pathを拒否する
 - Staging失敗、Copy失敗、Hash不一致、Registry Publish失敗で旧Versionを維持する
 - Install、同一Bundle再実行、Side-by-side Update、Rollback、Uninstall、Crash RecoveryをProcess Testする
 - 排他Control Lease中の専用Probeが完了し、通常起動経路が同じ状態では待機することをProcess Testする
 - Probe前Crashから未Probe VersionをSelectableへ復活させず、Probe成功MarkerだけをRecovery対象にする
+- Operation Journalの未知Schema／Member、不正Stage遷移、旧Worker互換性違反、破損をFail-closedで拒否する
 - 同一Dependency Setの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
 - Release Tool起動、異なるWorking Directory、Unicode／Long Pathを確認する

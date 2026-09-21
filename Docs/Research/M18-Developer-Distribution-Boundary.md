@@ -25,7 +25,7 @@
 ## Selected Flow
 
 ```text
-Repository snapshot
+clean Repository + pinned commit tree
   -> fixed source/tool/license allowlist
   -> staged DeveloperSourceSdk bundle
   -> canonical manifest + size/hash inventory
@@ -70,10 +70,18 @@ VC++ Runtimeは存在検査と案内だけをM18に含める。Redistributable B
 Installed VersionはManifest Inventoryを含めて不変とする。Dependency RestoreのTool／Install Tree、
 Project Build Tree、Debug／DevelopmentのRuntimeHostはVersion外のDependency／Project Workspaceへ生成する。
 Project Hubは検証済みInstall RootをEditorへ明示的に渡し、Installed ModeでBuild時埋込みのRepository Pathを
-使用しない。Bundle Publisherはdirty Repositoryを拒否し、`.git`を含めない代わりにDistribution Manifestの
-Engine Source Revision、`clean` Source State、Source Inventory HashをShipping Provenanceとして使用する。
-Dependency Set IDはCanonical Manifest群のSHA-256へ固定し、ID単位のProcess間LeaseとStaging Publishで
-共有Rootの並行Restoreを直列化する。
+使用しない。Bundle Publisherはdirty Repositoryを拒否し、開始時のCommitを固定してAllowlist対象をCommit
+TreeからMaterializeする。公開前にHEAD／Worktreeの不変性とStaging ByteのCommit Blob一致を再検証し、
+`.git`を含めない代わりにDistribution ManifestのEngine Source Revision、`clean` Source State、Source
+Inventory HashをShipping Provenanceとして使用する。Dependency Set IDはCanonical Manifest群と、Target
+Triplet、Compiler／Toolset、CRT、Windows SDK、Host／Target Architectureを含むDependency Build Identityの
+SHA-256へ固定し、ABIが異なる出力を別Rootへ分離する。ID単位のProcess間LeaseとStaging Publishで共有Rootの
+並行Restoreを直列化する。
+
+Install／Update／Rollback／UninstallのOperation JournalはVersion付きCanonical JSONとし、Operation ID、
+Kind、単調なStage、Expected Registry Revision、Version／Bundle Identity、Manifest Digest、Worker Identityを
+必須化する。未知Schema／Member、不正遷移、旧Worker不一致、破損はFail-closedでEvidenceへ隔離し、Migrationは
+専用Issueで明示する。
 
 ## Implementation Issues to Create
 
@@ -101,6 +109,9 @@ Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混�
 - Debug／Development Game ModuleをRelease RuntimeHostへLoadしない
 - Dependency Restore、Project Build、Shipping Provenance生成でImmutable Versionを書き換えない
 - 同じDependency Setへの並行RestoreでTool／Install Treeを部分公開しない
+- Compiler／Toolset／CRT／Windows SDKが異なるDependency Binaryを同じDependency Rootで再利用しない
+- Publisherの事前`clean`確認後に変化したWorktree Byteを記録済みCommitのSnapshotとして公開しない
+- 未知または破損したOperation Journalを旧Workerが解釈してRegistryやVersionを変更しない
 - Source Allowlistの拡大でTest、Credential、Build出力を配布しない
 - Noticeの存在だけでなく、採用Versionと実Payloadが一致することを検証する
 - Unsigned Local Bundleを公開署名済みまたはPublic Distribution Readyと表示しない
