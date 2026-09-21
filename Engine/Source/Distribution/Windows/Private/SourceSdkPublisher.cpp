@@ -173,6 +173,17 @@ constexpr std::array k_expectedTools = {
             {
                 summary.append(" (exit code ").append(std::to_string(*result.try_value()->exit_code())).push_back(')');
             }
+            const std::string_view diagnostic = capture.standardError.empty() ? std::string_view(capture.standardOutput)
+                                                                              : std::string_view(capture.standardError);
+            if (!diagnostic.empty())
+            {
+                constexpr std::size_t maximumDiagnosticBytes = 2048U;
+                summary.append("; output: ");
+                for (const char value : diagnostic.substr(0U, maximumDiagnosticBytes))
+                {
+                    summary.push_back(value == '\r' || value == '\n' || value == '\t' || value == '\0' ? ' ' : value);
+                }
+            }
             return cue::Result<ProcessCapture>::failure(
                 make_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                            summary));
