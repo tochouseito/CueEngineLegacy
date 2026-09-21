@@ -459,6 +459,7 @@ struct SceneOwnerProbeReport final
     bool hasGeometry;
     bool hasConstants;
     bool wasDredEnabled;
+    bool wasDredCollectionInterfaceAvailable;
 };
 #endif
 
@@ -1352,7 +1353,7 @@ class D3d12PresentationContext final : public cue::PresentationContext
     [[nodiscard]] SceneOwnerProbeReport scene_owner_report_for_probe() const noexcept
     {
         return {m_scenePass.has_depth_dsv(), m_scenePass.has_geometry_for_probe(),
-                m_scenePass.has_constants_for_probe()};
+                m_scenePass.has_constants_for_probe(), false, false};
     }
 
     /// @brief このPresentationだけの次回Scene生成失敗をProbeから指定する
@@ -1621,7 +1622,7 @@ class D3d12BackendImpl final : public cue::D3d12Backend
           m_activePresentationCount(0), m_dredCollectionAttemptCount(0), m_lastDredOwnerReport{}
 #if CUE_D3D12_TESTING
           ,
-          m_lastDredSceneOwnerReport{}
+          m_lastDredSceneOwnerReport{}, m_isDredCollectionInterfaceAvailable(false)
 #endif
     {
     }
@@ -1867,6 +1868,7 @@ class D3d12BackendImpl final : public cue::D3d12Backend
                 a_presentationShape->hasSceneGeometry,
                 a_presentationShape->hasSceneConstants,
                 m_diagnostics.isDredEnabled,
+                m_isDredCollectionInterfaceAvailable,
 #endif
             };
         }
@@ -1877,7 +1879,14 @@ class D3d12BackendImpl final : public cue::D3d12Backend
         }
 
         ++m_dredCollectionAttemptCount;
-        return cue::collect_d3d12_device_removed_diagnostics(m_device.Get(), m_diagnostics, *m_assertContext);
+        bool isDredCollectionInterfaceAvailable = false;
+        cue::Result<void> result = cue::collect_d3d12_device_removed_diagnostics(
+            m_device.Get(), m_diagnostics, isDredCollectionInterfaceAvailable, *m_assertContext);
+#if CUE_D3D12_TESTING
+        m_isDredCollectionInterfaceAvailable = isDredCollectionInterfaceAvailable;
+        m_lastDredSceneOwnerReport.wasDredCollectionInterfaceAvailable = isDredCollectionInterfaceAvailable;
+#endif
+        return result;
     }
 
     /// @brief Presentation が Backend 診断へ使用する非所有 Assert Context を返す
@@ -2152,6 +2161,7 @@ class D3d12BackendImpl final : public cue::D3d12Backend
     cue::D3d12DredOwnerProbeReport m_lastDredOwnerReport;
 #if CUE_D3D12_TESTING
     SceneOwnerProbeReport m_lastDredSceneOwnerReport;
+    bool m_isDredCollectionInterfaceAvailable;
 #endif
 };
 } // namespace
@@ -3062,7 +3072,8 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
         D3d12PresentationProbeReport report = probe_d3d12_presentation(*presentation);
         const SceneOwnerProbeReport sceneOwners = probe_scene_owners_for_fault(*presentation);
         const SceneOwnerProbeReport dredSceneOwners = probe_dred_scene_owners_for_fault(*backend);
-        if (a_useScene && !dredSceneOwners.wasDredEnabled)
+        if (a_useScene &&
+            (!dredSceneOwners.wasDredEnabled || !dredSceneOwners.wasDredCollectionInterfaceAvailable))
         {
             g_deviceRemovalProbeUnavailable = true;
         }
@@ -3112,7 +3123,8 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
             dredOwners->hasSwapChain && dredOwners->hasRtvHeap && dredOwners->hasQueue && dredOwners->hasFence &&
             dredOwners->hasFenceEvent &&
             (!a_useScene || (dredSceneOwners.hasDepthDsv && dredSceneOwners.hasGeometry &&
-                             dredSceneOwners.hasConstants && dredSceneOwners.wasDredEnabled));
+                             dredSceneOwners.hasConstants && dredSceneOwners.wasDredEnabled &&
+                             dredSceneOwners.wasDredCollectionInterfaceAvailable));
         Result<void> presentationShutdownResult = presentation->shutdown();
         const D3d12PresentationProbeReport afterShutdown = probe_d3d12_presentation(*presentation);
         presentation.reset();
