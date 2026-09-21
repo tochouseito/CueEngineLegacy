@@ -29,6 +29,7 @@ target_compile_features(Cue.EditorCore PUBLIC cxx_std_20)
 target_link_libraries(
     Cue.EditorCore
     PUBLIC Cue.Foundation Cue.IO Cue.Project Cue.ProjectFiles Cue.Scene Cue.Schema Cue.Input Cue.Runtime
+    PRIVATE Cue.EngineAssets Cue.Renderer
 )
 target_include_directories(Cue.EditorCore PUBLIC Public)
 
@@ -57,24 +58,46 @@ endif()
 get_target_property(cueEditorCoreLinks Cue.EditorCore LINK_LIBRARIES)
 get_target_property(cueEditorCoreInterfaceLinks Cue.EditorCore INTERFACE_LINK_LIBRARIES)
 
-if(
-    NOT "${cueEditorCoreLinks}"
-        STREQUAL "Cue.Foundation;Cue.IO;Cue.Project;Cue.ProjectFiles;Cue.Scene;Cue.Schema;Cue.Input;Cue.Runtime"
+set(
+    cueEditorCoreExpectedLinks
+    Cue.Foundation
+    Cue.IO
+    Cue.Project
+    Cue.ProjectFiles
+    Cue.Scene
+    Cue.Schema
+    Cue.Input
+    Cue.Runtime
+    Cue.EngineAssets
+    Cue.Renderer
 )
+
+if(NOT "${cueEditorCoreLinks}" STREQUAL "${cueEditorCoreExpectedLinks}")
     message(
         FATAL_ERROR
-        "Cue.EditorCore must directly link only Cue.Foundation, Cue.IO, Cue.Project, Cue.ProjectFiles, Cue.Scene, Cue.Schema, Cue.Input, and Cue.Runtime: "
+        "Cue.EditorCore has unexpected direct dependencies: "
         "${cueEditorCoreLinks}"
     )
 endif()
 
-if(
-    NOT "${cueEditorCoreInterfaceLinks}"
-        STREQUAL "Cue.Foundation;Cue.IO;Cue.Project;Cue.ProjectFiles;Cue.Scene;Cue.Schema;Cue.Input;Cue.Runtime"
+set(
+    cueEditorCoreExpectedInterfaceLinks
+    Cue.Foundation
+    Cue.IO
+    Cue.Project
+    Cue.ProjectFiles
+    Cue.Scene
+    Cue.Schema
+    Cue.Input
+    Cue.Runtime
+    "$<LINK_ONLY:Cue.EngineAssets>"
+    "$<LINK_ONLY:Cue.Renderer>"
 )
+
+if(NOT "${cueEditorCoreInterfaceLinks}" STREQUAL "${cueEditorCoreExpectedInterfaceLinks}")
     message(
         FATAL_ERROR
-        "Cue.EditorCore must expose only Cue.Foundation, Cue.IO, Cue.Project, Cue.ProjectFiles, Cue.Scene, Cue.Schema, Cue.Input, and Cue.Runtime: "
+        "Cue.EditorCore has unexpected interface dependencies: "
         "${cueEditorCoreInterfaceLinks}"
     )
 endif()

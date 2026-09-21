@@ -1,6 +1,8 @@
 #include <Cue/EditorCore/EditorController.h>
 
 #include <Cue/EditorCore/Error.h>
+#include <Cue/EngineAssets/BuiltInAssetCatalog.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Scene/Error.h>
 
 #include <algorithm>
@@ -159,11 +161,40 @@ struct GeneratedDuplicate final
     const std::optional<schema::TypeId> templateTypeId = component_type_id(a_template.prototype);
     return templateTypeId.has_value() && *templateTypeId == a_typeId;
 }
+
+/// @brief Primitive Templateの表示Identityと永続Asset Referenceが一意に一致するか検証する
+[[nodiscard]] bool primitive_template_matches(const EditorPrimitiveTemplate &a_template,
+                                              const AssertContext &a_assertContext) noexcept
+{
+    const scene::KnownComponentData *known = a_template.meshPrototype.try_known();
+    if (a_template.displayName.empty() || a_template.assetId.empty() || known == nullptr ||
+        !a_template.meshPrototype.is_valid())
+    {
+        return false;
+    }
+
+    Result<const engine_assets::BuiltInMeshDescriptor *> descriptor =
+        engine_assets::resolve_builtin_mesh_descriptor(a_template.assetId, a_assertContext);
+    Result<renderer::RendererSchemaTypeIds> typeIds = renderer::make_renderer_schema_type_ids(a_assertContext);
+    Result<renderer::MeshFieldIds> fieldIds = renderer::make_mesh_field_ids(a_assertContext);
+    Result<void> rendererComponent =
+        renderer::validate_runtime_scene_component(a_template.meshPrototype, a_assertContext);
+    if (!descriptor || !typeIds || !fieldIds || !rendererComponent || known->type_id() != typeIds.try_value()->mesh ||
+        known->known_fields().size() != 1U || known->known_fields()[0].id() != fieldIds.try_value()->asset ||
+        !known->unknown_fields().empty())
+    {
+        return false;
+    }
+
+    const scene::AssetReferenceValue *asset = known->known_fields()[0].value().try_asset_reference();
+    return asset != nullptr && asset->token() == a_template.assetId;
+}
 } // namespace
 
 Result<void> EditorController::execute_intent(EditorDocumentId a_documentId, EditorIntent a_intent,
                                               scene::SceneIdentitySource &a_identitySource,
-                                              std::span<const EditorComponentTemplate> a_componentTemplates) noexcept
+                                              std::span<const EditorComponentTemplate> a_componentTemplates,
+                                              std::span<const EditorPrimitiveTemplate> a_primitiveTemplates) noexcept
 {
     assert_owner_thread();
     try
@@ -178,7 +209,7 @@ Result<void> EditorController::execute_intent(EditorDocumentId a_documentId, Edi
         const scene::SceneAssetId sceneAssetId = document->scene_document().scene_asset_id();
 
         /// @brief Intent AlternativeごとにStable IdentityだけをCommandまたはWorkflowへ変換する
-        auto dispatch = [this, document, a_documentId, &a_identitySource, a_componentTemplates,
+        auto dispatch = [this, document, a_documentId, &a_identitySource, a_componentTemplates, a_primitiveTemplates,
                          &sceneAssetId](auto &&a_typedIntent) -> Result<void>
         {
             using Intent = std::remove_cvref_t<decltype(a_typedIntent)>;
@@ -201,6 +232,63 @@ Result<void> EditorController::execute_intent(EditorDocumentId a_documentId, Edi
                                           AddObjectCommand{objectId, std::move(a_typedIntent.name), true,
                                                            std::move(a_typedIntent.parentId), math::Transform{}},
                                           "Objectを追加");
+                if (!applied)
+                {
+                    return Result<void>::failure(std::move(*applied.try_error()));
+                }
+                const std::array<scene::ObjectId, 1> selection{objectId};
+                return set_selection(a_documentId, selection, &selection[0]);
+            }
+            else if constexpr (std::is_same_v<Intent, CreatePrimitiveIntent>)
+            {
+                if (a_typedIntent.primitiveTemplateIndex >= a_primitiveTemplates.size())
+                {
+                    return Result<void>::failure(scene::make_scene_error(*m_assertContext,
+                                                                         scene::SceneError::UnknownSchemaType,
+                                                                         "Editor primitive template was not found"));
+                }
+                const EditorPrimitiveTemplate &primitiveTemplate =
+                    a_primitiveTemplates[a_typedIntent.primitiveTemplateIndex];
+                if (!primitiveTemplate.isEnabled)
+                {
+                    return Result<void>::failure(
+                        scene::make_scene_error(*m_assertContext, scene::SceneError::UnknownSchemaType,
+                                                "Editor primitive is not supported by the current renderer"));
+                }
+                if (!primitive_template_matches(primitiveTemplate, *m_assertContext))
+                {
+                    return Result<void>::failure(scene::make_scene_error(*m_assertContext,
+                                                                         scene::SceneError::UnknownSchemaType,
+                                                                         "Editor primitive template is invalid"));
+                }
+
+                Result<scene::ObjectId> generatedObject = scene::ObjectId::generate(a_identitySource, *m_assertContext);
+                if (!generatedObject)
+                {
+                    return Result<void>::failure(std::move(*generatedObject.try_error()));
+                }
+                scene::ObjectId objectId = std::move(*generatedObject.try_value());
+                Result<scene::ComponentInstanceId> generatedComponent =
+                    scene::ComponentInstanceId::generate(a_identitySource, *m_assertContext);
+                if (!generatedComponent)
+                {
+                    return Result<void>::failure(std::move(*generatedComponent.try_error()));
+                }
+                Result<scene::SceneComponent> mesh = primitiveTemplate.meshPrototype.duplicate_with_identity(
+                    std::move(*generatedComponent.try_value()), *m_assertContext);
+                if (!mesh)
+                {
+                    return Result<void>::failure(std::move(*mesh.try_error()));
+                }
+
+                EditorTransaction transaction{"Primitiveを追加", {}};
+                transaction.commands.push_back(
+                    SceneCommandRequest{a_documentId, sceneAssetId,
+                                        AddObjectCommand{objectId, primitiveTemplate.displayName, true,
+                                                         std::move(a_typedIntent.parentId), math::Transform{}}});
+                transaction.commands.push_back(SceneCommandRequest{
+                    a_documentId, sceneAssetId, AddComponentCommand{objectId, std::move(*mesh.try_value())}});
+                Result<DocumentStateId> applied = execute_transaction(std::move(transaction));
                 if (!applied)
                 {
                     return Result<void>::failure(std::move(*applied.try_error()));

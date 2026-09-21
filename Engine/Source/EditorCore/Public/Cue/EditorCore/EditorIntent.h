@@ -19,6 +19,16 @@ struct EditorComponentTemplate final
     scene::SceneComponent prototype;
 };
 
+/// @brief Create Primitiveへ公開するCatalog Identity、検証済みMesh初期値、現在の描画可否
+struct EditorPrimitiveTemplate final
+{
+    std::string displayName;
+    std::string assetId;
+    scene::SceneComponent meshPrototype;
+    std::string unavailableReason;
+    bool isEnabled = false;
+};
+
 /// @brief Stable Object Identity集合へEditor Selectionを切り替えるIntent
 struct SelectObjectsIntent final
 {
@@ -31,6 +41,13 @@ struct AddObjectIntent final
 {
     std::optional<scene::ObjectId> parentId;
     std::string name;
+};
+
+/// @brief Catalog候補IndexからMesh Component付きPrimitive Objectを一Transactionで追加するIntent
+struct CreatePrimitiveIntent final
+{
+    std::optional<scene::ObjectId> parentId;
+    std::size_t primitiveTemplateIndex;
 };
 
 /// @brief Stable Object IdentityのSubtreeを削除するIntent
@@ -92,7 +109,7 @@ struct RedoIntent final
 };
 
 /// @brief Hierarchy・Inspector操作をEditorControllerへ渡す意味Intentの閉じた集合
-using EditorIntent = std::variant<SelectObjectsIntent, AddObjectIntent, DeleteObjectIntent, DuplicateObjectIntent,
-                                  RenameObjectIntent, ReparentObjectIntent, EditTransformIntent, AddComponentIntent,
-                                  RemoveComponentIntent, UndoIntent, RedoIntent>;
+using EditorIntent = std::variant<SelectObjectsIntent, AddObjectIntent, CreatePrimitiveIntent, DeleteObjectIntent,
+                                  DuplicateObjectIntent, RenameObjectIntent, ReparentObjectIntent, EditTransformIntent,
+                                  AddComponentIntent, RemoveComponentIntent, UndoIntent, RedoIntent>;
 } // namespace cue::editor_core

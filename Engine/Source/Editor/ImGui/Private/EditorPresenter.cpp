@@ -555,6 +555,10 @@ void draw_field_value(const cue::scene::FieldValue &a_value)
             {
                 return "Objectを追加しました。";
             }
+            else if constexpr (std::is_same_v<Intent, cue::editor_core::CreatePrimitiveIntent>)
+            {
+                return "Primitiveを追加しました。";
+            }
             else if constexpr (std::is_same_v<Intent, cue::editor_core::DeleteObjectIntent>)
             {
                 return "ObjectとChildを削除しました。";
@@ -601,10 +605,12 @@ namespace cue::editor
 {
 using editor_core::AddComponentIntent;
 using editor_core::AddObjectIntent;
+using editor_core::CreatePrimitiveIntent;
 using editor_core::DeleteObjectIntent;
 using editor_core::DuplicateObjectIntent;
 using editor_core::EditorComponentTemplate;
 using editor_core::EditorIntent;
+using editor_core::EditorPrimitiveTemplate;
 using editor_core::EditTransformIntent;
 using editor_core::RedoIntent;
 using editor_core::RemoveComponentIntent;
@@ -618,10 +624,11 @@ EditorPresenter::EditorPresenter(editor_core::EditorController &a_controller,
                                  scene::SceneIdentitySource &a_identitySource,
                                  const schema::SchemaRegistry &a_schemaRegistry,
                                  std::vector<editor_core::EditorComponentTemplate> a_componentTemplates,
+                                 std::vector<editor_core::EditorPrimitiveTemplate> a_primitiveTemplates,
                                  const AssertContext &a_assertContext) noexcept
     : m_controller(&a_controller), m_identitySource(&a_identitySource), m_schemaRegistry(&a_schemaRegistry),
       m_assertContext(&a_assertContext), m_componentTemplates(std::move(a_componentTemplates)),
-      m_documentId(a_documentId)
+      m_primitiveTemplates(std::move(a_primitiveTemplates)), m_documentId(a_documentId)
 {
 }
 
@@ -629,13 +636,14 @@ std::unique_ptr<EditorPresenter> EditorPresenter::create(
     editor_core::EditorController &a_controller, editor_core::EditorDocumentId a_documentId,
     scene::SceneIdentitySource &a_identitySource, const schema::SchemaRegistry &a_schemaRegistry,
     std::vector<editor_core::EditorComponentTemplate> a_componentTemplates,
+    std::vector<editor_core::EditorPrimitiveTemplate> a_primitiveTemplates,
     const AssertContext &a_assertContext) noexcept
 {
     try
     {
         return std::unique_ptr<EditorPresenter>(new EditorPresenter(a_controller, a_documentId, a_identitySource,
                                                                     a_schemaRegistry, std::move(a_componentTemplates),
-                                                                    a_assertContext));
+                                                                    std::move(a_primitiveTemplates), a_assertContext));
     }
     catch (const std::bad_alloc &)
     {
@@ -760,8 +768,8 @@ Result<void> EditorPresenter::submit(editor_core::EditorIntent a_intent) noexcep
             appliedRotation = {rotation.x, rotation.y, rotation.z, rotation.w};
             appliedScale = {scale.x, scale.y, scale.z};
         }
-        Result<void> result =
-            m_controller->execute_intent(m_documentId, std::move(a_intent), *m_identitySource, m_componentTemplates);
+        Result<void> result = m_controller->execute_intent(m_documentId, std::move(a_intent), *m_identitySource,
+                                                           m_componentTemplates, m_primitiveTemplates);
         if (!result)
         {
             set_error(*result.try_error());
@@ -927,6 +935,40 @@ void EditorPresenter::draw_hierarchy(const editor_core::EditorDocument &a_docume
         a_pendingIntent.emplace(AddObjectIntent{parentId, "GameObject"});
     }
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::BeginCombo("Primitiveを追加", "選択してください", ImGuiComboFlags_NoPreview))
+    {
+        for (std::size_t templateIndex = 0U; templateIndex < m_primitiveTemplates.size(); ++templateIndex)
+        {
+            const EditorPrimitiveTemplate &primitiveTemplate = m_primitiveTemplates[templateIndex];
+            const bool isValid = !primitiveTemplate.displayName.empty() && !primitiveTemplate.assetId.empty() &&
+                                 primitiveTemplate.meshPrototype.try_known() != nullptr &&
+                                 primitiveTemplate.meshPrototype.is_valid();
+            const bool canCreate =
+                canAddObject && !a_pendingIntent.has_value() && primitiveTemplate.isEnabled && isValid;
+            ImGui::PushID(primitiveTemplate.assetId.data(),
+                          primitiveTemplate.assetId.data() + primitiveTemplate.assetId.size());
+            ImGui::BeginDisabled(!canCreate);
+            std::string label = display_text_label(primitiveTemplate.displayName);
+            label.append(" [");
+            label.append(display_text_label(primitiveTemplate.assetId));
+            label.push_back(']');
+            if (ImGui::Selectable(label.c_str()) && canCreate)
+            {
+                const std::optional<scene::ObjectId> parentId =
+                    primarySelection != nullptr ? std::optional<scene::ObjectId>(*primarySelection) : std::nullopt;
+                a_pendingIntent.emplace(CreatePrimitiveIntent{parentId, templateIndex});
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !canCreate &&
+                !primitiveTemplate.unavailableReason.empty())
+            {
+                ImGui::SetTooltip("%s", primitiveTemplate.unavailableReason.c_str());
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
     ImGui::SameLine();
     const scene::SceneObject *primaryObject =
         primarySelection != nullptr ? sceneDocument.find_object(*primarySelection) : nullptr;

@@ -2,11 +2,13 @@
 
 #include <Cue/Editor/ImGui/EditorDockspace.h>
 
+#include <Cue/EngineAssets/BuiltInMesh.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
 #include <Cue/IO/RelativePath.h>
 #include <Cue/Project/Descriptor.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Scene/SceneDocument.h>
 #include <Cue/Schema/Descriptor.h>
 
@@ -113,6 +115,12 @@ template <typename T> T take_value(cue::Result<T> a_result) noexcept
     return take_value(cue::schema::FieldId::create(2U, a_assertContext));
 }
 
+/// @brief Primitive Test用Asset Reference Field Identityを生成する
+[[nodiscard]] cue::schema::FieldId make_asset_field_id(const cue::AssertContext &a_assertContext) noexcept
+{
+    return take_value(cue::schema::FieldId::create(3U, a_assertContext));
+}
+
 /// @brief Test用Component Schema Versionを生成する
 [[nodiscard]] cue::schema::SchemaVersion make_schema_version(const cue::AssertContext &a_assertContext) noexcept
 {
@@ -128,12 +136,15 @@ template <typename T> T take_value(cue::Result<T> a_result) noexcept
         take_value(cue::schema::create_field_descriptor(make_field_id(a_assertContext), "value", a_assertContext)));
     fields.push_back(take_value(cue::schema::create_field_descriptor(make_string_field_id(a_assertContext),
                                                                      "status \xF0\x9F\x98\x80", a_assertContext)));
+    fields.push_back(take_value(
+        cue::schema::create_field_descriptor(make_asset_field_id(a_assertContext), "asset", a_assertContext)));
     std::vector<cue::schema::FieldId> reserved;
     cue::schema::TypeDescriptor descriptor = take_value(cue::schema::create_type_descriptor(
         make_component_type_id(a_assertContext), "Cue.Editor.TestComponent", make_schema_version(a_assertContext),
         std::move(fields), std::move(reserved), a_assertContext));
     cue::schema::SchemaRegistryBuilder builder(a_identitySource, a_assertContext);
     require(builder.add_type(std::move(descriptor)).has_value());
+    require(cue::renderer::add_renderer_schema_types(builder, a_assertContext).has_value());
     return take_value(builder.seal());
 }
 
@@ -143,8 +154,10 @@ template <typename T> T take_value(cue::Result<T> a_result) noexcept
 {
     std::vector<cue::scene::FieldKindBinding> bindings{
         {make_field_id(a_assertContext), cue::scene::FieldValueKind::SignedInteger},
-        {make_string_field_id(a_assertContext), cue::scene::FieldValueKind::String}};
-    std::vector<cue::scene::ComponentValueSchema> schemas;
+        {make_string_field_id(a_assertContext), cue::scene::FieldValueKind::String},
+        {make_asset_field_id(a_assertContext), cue::scene::FieldValueKind::AssetReference}};
+    std::vector<cue::scene::ComponentValueSchema> schemas =
+        take_value(cue::renderer::make_renderer_value_schemas(a_registry, a_assertContext));
     schemas.push_back(take_value(cue::scene::create_component_value_schema(
         make_component_type_id(a_assertContext), make_schema_version(a_assertContext), std::move(bindings), a_registry,
         a_assertContext)));
@@ -168,6 +181,26 @@ template <typename T> T take_value(cue::Result<T> a_result) noexcept
         make_string_field_id(a_assertContext),
         take_value(cue::scene::FieldValue::string("Ready \xF0\x9F\x98\x81", a_assertContext)),
         cue::scene::FieldValueKind::String, a_assertContext)));
+    std::vector<cue::scene::OpaqueFieldData> unknownFields;
+    cue::scene::KnownComponentData component = take_value(cue::scene::create_known_component(
+        std::move(componentId), make_component_type_id(a_assertContext), make_schema_version(a_assertContext),
+        std::move(fields), std::move(unknownFields), a_registry, a_valueRegistry, a_assertContext));
+    return cue::scene::SceneComponent::known(std::move(component));
+}
+
+/// @brief 選択Built-in Asset IDだけを保持するCreate Primitive用Prototypeを生成する
+[[nodiscard]] cue::scene::SceneComponent make_primitive_component(
+    const cue::schema::SchemaRegistry &a_registry, const cue::scene::ComponentValueSchemaRegistry &a_valueRegistry,
+    const cue::AssertContext &a_assertContext, std::string_view a_assetId) noexcept
+{
+    cue::scene::ComponentInstanceId componentId =
+        take_value(cue::scene::ComponentInstanceId::parse("20000000-0000-4000-8000-000000000002", a_assertContext));
+    cue::scene::AssetReferenceValue asset =
+        take_value(cue::scene::AssetReferenceValue::create(a_assetId, a_assertContext));
+    std::vector<cue::scene::KnownFieldData> fields;
+    fields.push_back(take_value(cue::scene::create_known_field(
+        make_asset_field_id(a_assertContext), cue::scene::FieldValue::asset_reference(std::move(asset)),
+        cue::scene::FieldValueKind::AssetReference, a_assertContext)));
     std::vector<cue::scene::OpaqueFieldData> unknownFields;
     cue::scene::KnownComponentData component = take_value(cue::scene::create_known_component(
         std::move(componentId), make_component_type_id(a_assertContext), make_schema_version(a_assertContext),
@@ -235,8 +268,30 @@ void test_hierarchy_inspector_intents() noexcept
         "Test Component", make_component(*registry, valueRegistry, assertContext)});
     templates.push_back(cue::editor_core::EditorComponentTemplate{
         "Test Component Alternative", make_component(*registry, valueRegistry, assertContext, 20)});
-    std::unique_ptr<cue::editor::EditorPresenter> presenter = cue::editor::EditorPresenter::create(
-        *controller, documentId, sceneIdentitySource, *registry, std::move(templates), assertContext);
+    std::vector<cue::editor_core::EditorPrimitiveTemplate> primitiveTemplates;
+    primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+        "Cube",
+        std::string(cue::engine_assets::k_cubeMeshAssetId),
+        take_value(cue::renderer::make_cube_mesh_component(
+            take_value(cue::scene::ComponentInstanceId::parse("20000000-0000-4000-8000-000000000002", assertContext)),
+            *registry, valueRegistry, assertContext)),
+        {},
+        true});
+    primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+        "Plane", std::string(cue::engine_assets::k_planeMeshAssetId),
+        take_value(cue::renderer::make_builtin_mesh_component(
+            take_value(cue::scene::ComponentInstanceId::parse("20000000-0000-4000-8000-000000000003", assertContext)),
+            cue::engine_assets::k_planeMeshAssetId, *registry, valueRegistry, assertContext)),
+        "Renderer未対応", false});
+    primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+        "Broken",
+        std::string(cue::engine_assets::k_cubeMeshAssetId),
+        make_primitive_component(*registry, valueRegistry, assertContext, cue::engine_assets::k_cubeMeshAssetId),
+        {},
+        true});
+    std::unique_ptr<cue::editor::EditorPresenter> presenter =
+        cue::editor::EditorPresenter::create(*controller, documentId, sceneIdentitySource, *registry,
+                                             std::move(templates), std::move(primitiveTemplates), assertContext);
 
     require(presenter->submit(cue::editor_core::SelectObjectsIntent{{rootId}, rootId}).has_value());
     require(presenter->submit(cue::editor_core::RenameObjectIntent{rootId, "Renamed Root"}).has_value());
@@ -308,6 +363,50 @@ void test_hierarchy_inspector_intents() noexcept
     document = controller->session().find_document(documentId);
     require(document->scene_document().object_count() == 3U);
     require(document->selection().empty());
+
+    const cue::Result<void> disabledPrimitive =
+        presenter->submit(cue::editor_core::CreatePrimitiveIntent{std::nullopt, 1U});
+    require(!disabledPrimitive.has_value());
+    require(presenter->has_error_message());
+    document = controller->session().find_document(documentId);
+    require(document->scene_document().object_count() == 3U);
+
+    const cue::Result<void> mismatchedPrimitive =
+        presenter->submit(cue::editor_core::CreatePrimitiveIntent{std::nullopt, 2U});
+    require(!mismatchedPrimitive.has_value());
+    document = controller->session().find_document(documentId);
+    require(document->scene_document().object_count() == 3U);
+
+    require(presenter->submit(cue::editor_core::CreatePrimitiveIntent{std::nullopt, 0U}).has_value());
+    document = controller->session().find_document(documentId);
+    require(document->scene_document().object_count() == 4U && document->selection().size() == 1U);
+    const cue::scene::ObjectId primitiveId = document->selection()[0];
+    const cue::scene::SceneObject *primitive = document->scene_document().find_object(primitiveId);
+    require(primitive != nullptr && primitive->name() == "Cube" && primitive->try_parent_id() == nullptr);
+    require(primitive->transform().translation() == cue::math::Vector3{});
+    require(primitive->transform().scale() == cue::math::Vector3{1.0F, 1.0F, 1.0F});
+    require(primitive->components().size() == 1U);
+    const cue::scene::ComponentInstanceId primitiveComponentId = primitive->components()[0].instance_id();
+    const cue::scene::KnownComponentData *primitiveComponent = primitive->components()[0].try_known();
+    require(primitiveComponent != nullptr && primitiveComponent->known_fields().size() == 1U);
+    const cue::scene::AssetReferenceValue *primitiveAsset =
+        primitiveComponent->known_fields()[0].value().try_asset_reference();
+    require(primitiveAsset != nullptr && primitiveAsset->token() == "cue://engine/mesh/cube");
+
+    require(presenter->submit(cue::editor_core::UndoIntent{}).has_value());
+    document = controller->session().find_document(documentId);
+    require(document->scene_document().object_count() == 3U &&
+            document->scene_document().find_object(primitiveId) == nullptr);
+    require(presenter->submit(cue::editor_core::RedoIntent{}).has_value());
+    document = controller->session().find_document(documentId);
+    primitive = document->scene_document().find_object(primitiveId);
+    require(primitive != nullptr && primitive->components().size() == 1U &&
+            primitive->components()[0].instance_id() == primitiveComponentId);
+    require(primitive->transform().translation() == cue::math::Vector3{});
+    require(primitive->transform().scale() == cue::math::Vector3{1.0F, 1.0F, 1.0F});
+    require(presenter->submit(cue::editor_core::UndoIntent{}).has_value());
+    document = controller->session().find_document(documentId);
+    require(document->scene_document().object_count() == 3U);
 
     require(presenter->submit(cue::editor_core::SelectObjectsIntent{{rootId}, rootId}).has_value());
     const std::string longName(512U, 'N');
