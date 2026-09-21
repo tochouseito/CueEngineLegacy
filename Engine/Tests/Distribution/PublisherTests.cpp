@@ -89,9 +89,11 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 {
     using cue::distribution::DistributionArchitecture;
     using cue::distribution::DistributionFileRole;
+    cue::distribution::PublisherBuildIdentity bootstrapIdentity = a_identity;
+    bootstrapIdentity.crtLinkage = "static";
     return {
         {DistributionFileRole::Bootstrap, "CueEngineBootstrap", "Bin/CueEngineBootstrap.exe", "Release",
-         a_identity.builtFromRevision, a_identity, DistributionArchitecture::X64, 10U, hash('1')},
+         a_identity.builtFromRevision, bootstrapIdentity, DistributionArchitecture::X64, 10U, hash('1')},
         {DistributionFileRole::ProjectHub, "CueProjectHubTool", "Bin/CueProjectHubTool.exe", "Release",
          a_identity.builtFromRevision, a_identity, DistributionArchitecture::X64, 10U, hash('2')},
         {DistributionFileRole::Editor, "CueEditorTool", "Bin/CueEditorTool.exe", "Release",
@@ -131,6 +133,9 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
                                                                   a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/.env", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/signing.p12", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Templates/.env", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Templates/credentials.json", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Templates/signing.p12", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Tests/Foo.cpp", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Tools/GameCoreBenchmark/CMakeLists.txt",
                                                                   a_assertContext));
@@ -182,6 +187,16 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 
     sources = make_sources();
     tools.front().configuration = "Debug";
+    require(!cue::distribution::make_distribution_publisher_inventory(sources, tools, identity.builtFromRevision,
+                                                                      identity, a_assertContext));
+
+    tools = make_tools(identity);
+    tools.front().publisherBuildIdentity.crtLinkage = "dynamic";
+    require(!cue::distribution::make_distribution_publisher_inventory(sources, tools, identity.builtFromRevision,
+                                                                      identity, a_assertContext));
+
+    tools = make_tools(identity);
+    tools[1].publisherBuildIdentity.crtLinkage = "static";
     require(!cue::distribution::make_distribution_publisher_inventory(sources, tools, identity.builtFromRevision,
                                                                       identity, a_assertContext));
 

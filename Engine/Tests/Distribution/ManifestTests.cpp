@@ -166,6 +166,10 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
+    manifest.publisherBuildIdentity.crtLinkage = "static";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
     manifest.bundleId = "12345678-1234-5abc-8def-1234567890ab";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 

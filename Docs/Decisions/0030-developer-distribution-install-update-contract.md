@@ -105,6 +105,10 @@ Publisher Build IdentityとしてManifestへ記録する。生成Binaryは期待
 Size／SHA-256を検証し、`builtFromRevision`で固定Commitへ結び付ける。Source管理Payloadと生成Binaryの検証を
 同じ規則で代用しない。
 
+Manifest v1の共通Publisher Build Identityは通常Toolの`dynamic` CRT Linkageを記録する。Bootstrap Roleだけは
+同じIdentityの`crtLinkage`を`static`へ置換した固定例外としてPublisher Evidenceで検証し、他のTool Roleへ
+`static`を許可しない。Bootstrapが`/MT`で自己完結する契約はRoleから一意に導出する。
+
 Inventory生成後にHEAD、Index、Tracked／Untracked状態を再読込して開始時と変化していれば公開を拒否する。
 Repository Rootからの場当たり的な再帰Copyは行わず、検証済みRevision、`clean` Source State、Source
 Inventory HashをManifestへ記録する。配布物からProject SourceやUser Dataへ書き戻さない。

@@ -78,15 +78,21 @@ namespace
     constexpr std::array forbiddenExtensions = {
         std::string_view(".pdb"),  std::string_view(".ilk"), std::string_view(".obj"), std::string_view(".idb"),
         std::string_view(".user"), std::string_view(".suo"), std::string_view(".pfx"), std::string_view(".pem"),
-        std::string_view(".key"),  std::string_view(".cer"), std::string_view(".exe"), std::string_view(".dll"),
-        std::string_view(".lib"),  std::string_view(".exp"),
+        std::string_view(".key"),  std::string_view(".p12"), std::string_view(".jks"), std::string_view(".keystore"),
+        std::string_view(".cer"),  std::string_view(".exe"), std::string_view(".dll"), std::string_view(".lib"),
+        std::string_view(".exp"),
     };
     if (std::ranges::any_of(forbiddenExtensions,
                             [&lower](std::string_view a_extension) noexcept { return lower.ends_with(a_extension); }))
     {
         return true;
     }
-    return lower.ends_with("cuegameproduct") || lower.ends_with("cuegameproduct.exe");
+    const std::size_t separator = lower.rfind('/');
+    const std::string_view fileName = std::string_view(lower).substr(
+        separator == std::string::npos ? 0U : separator + 1U);
+    return lower.ends_with("cuegameproduct") || lower.ends_with("cuegameproduct.exe") || fileName == ".env" ||
+           fileName == "credentials.json" || fileName == "secrets.json" || fileName == "secrets.toml" ||
+           fileName == "id_rsa" || fileName == "id_ed25519";
 }
 
 /// @brief Engine/Source配下でDeveloper Source SDKへ収録できる既知のFirst-party File種別か返す
@@ -134,6 +140,20 @@ constexpr std::array k_expectedTools = {
     ExpectedTool{cue::distribution::DistributionFileRole::InstallWorker, "CueEngineInstallWorker",
                  "Bin/CueEngineInstallWorker.exe"},
 };
+
+/// @brief Tool Role固有のCRT Linkageを含むBuild IdentityがPublisher契約と一致するか返す
+[[nodiscard]] bool has_expected_tool_build_identity(
+    cue::distribution::DistributionFileRole a_role,
+    const cue::distribution::PublisherBuildIdentity &a_toolIdentity,
+    const cue::distribution::PublisherBuildIdentity &a_publisherIdentity)
+{
+    cue::distribution::PublisherBuildIdentity expected = a_publisherIdentity;
+    if (a_role == cue::distribution::DistributionFileRole::Bootstrap)
+    {
+        expected.crtLinkage = "static";
+    }
+    return a_toolIdentity == expected;
+}
 
 /// @brief Roleに対応する期待Tool契約を返す
 [[nodiscard]] const ExpectedTool *find_expected_tool(cue::distribution::DistributionFileRole a_role) noexcept
@@ -361,7 +381,8 @@ Result<DistributionPublisherInventory> make_distribution_publisher_inventory(
             if (foundTools[expectedIndex] || tool.targetName != expected->target ||
                 tool.relativePath != expected->path || tool.configuration != "Release" ||
                 tool.builtFromRevision != a_fixedRevision ||
-                !(tool.publisherBuildIdentity == a_publisherBuildIdentity) || tool.byteSize == 0U ||
+                !has_expected_tool_build_identity(tool.role, tool.publisherBuildIdentity, a_publisherBuildIdentity) ||
+                tool.byteSize == 0U ||
                 tool.peArchitecture != DistributionArchitecture::X64 || !is_canonical_sha256(tool.sha256) ||
                 !is_canonical_distribution_path(tool.relativePath))
             {
