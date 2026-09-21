@@ -224,8 +224,7 @@ class ForeignWindow final : public cue::Window
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
     valid = valid && presentationShutdownResult && backendShutdownResult &&
-            backend->state() == cue::GraphicsBackendState::Shutdown &&
-            a_logSink.error_count() == initialErrorCount;
+            backend->state() == cue::GraphicsBackendState::Shutdown && a_logSink.error_count() == initialErrorCount;
     backend.reset();
     return valid;
 }
@@ -258,7 +257,7 @@ class ForeignWindow final : public cue::Window
     }
     std::unique_ptr<cue::PresentationContext> presentation = std::move(*presentationResult.try_value());
     constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
-                                                 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
     cue::PresentationSceneCube cube = {identity};
     cube.localToWorld[14] = 0.5F;
     const std::array cubes = {cube};
@@ -331,12 +330,18 @@ class ForeignWindow final : public cue::Window
     }
     cue::Result<std::uint32_t> beforeCount = cue::d3d12_dred_attempt_count_for_probe(*backend);
     constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
-                                                 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
     cue::PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, {}};
     cue::Result<cue::PresentationFrameStatus> frameResult = presentation->present_scene_frame(scene);
     cue::Result<std::uint32_t> afterCount = cue::d3d12_dred_attempt_count_for_probe(*backend);
     const cue::D3d12PresentationProbeReport report = cue::probe_d3d12_presentation(*presentation);
+    const cue::Error *frameError = frameResult.try_error();
+    const bool retainedSceneCause = frameError != nullptr && !frameError->causes().empty() &&
+                                    frameError->causes().front().code().domain() == "Cue.RHI.D3D12" &&
+                                    frameError->causes().front().code().value() >= 302 &&
+                                    frameError->causes().front().code().value() <= 306;
     const bool classified = removalResult && beforeCount && *beforeCount.try_value() == 0U && !frameResult &&
+                            has_error_code(frameError, 52) && retainedSceneCause &&
                             presentation->state() == cue::PresentationContextState::DeviceRemoved &&
                             backend->state() == cue::GraphicsBackendState::DeviceRemoved && afterCount &&
                             *afterCount.try_value() == 1U && report.lastSubmittedFence == 0U;
@@ -399,8 +404,7 @@ class ForeignWindow final : public cue::Window
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
     valid = valid && presentationShutdownResult && backendShutdownResult &&
-            backend->state() == cue::GraphicsBackendState::Shutdown &&
-            a_logSink.error_count() == initialErrorCount;
+            backend->state() == cue::GraphicsBackendState::Shutdown && a_logSink.error_count() == initialErrorCount;
     backend.reset();
     return valid;
 }
@@ -445,8 +449,8 @@ class ForeignWindow final : public cue::Window
     valid = valid && presentation->resize(0, 360) && presentation->is_resize_pending() &&
             presentation->width() == 640 && presentation->height() == 360;
     cue::D3d12PresentationProbeReport suspendedReport = cue::probe_d3d12_presentation(*presentation);
-    valid = valid && suspendedReport.rtvCount == 2 && suspendedReport.formatsMatch &&
-            !suspendedReport.isAcceptingFrames;
+    valid =
+        valid && suspendedReport.rtvCount == 2 && suspendedReport.formatsMatch && !suspendedReport.isAcceptingFrames;
     valid = valid && presentation->resize(640, 360) && !presentation->is_resize_pending();
 
     for (std::uint32_t iteration = 0; iteration < 50 && valid; ++iteration)
@@ -470,8 +474,7 @@ class ForeignWindow final : public cue::Window
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
     valid = valid && presentationShutdownResult && backendShutdownResult &&
-            backend->state() == cue::GraphicsBackendState::Shutdown &&
-            a_logSink.error_count() == initialErrorCount;
+            backend->state() == cue::GraphicsBackendState::Shutdown && a_logSink.error_count() == initialErrorCount;
     backend.reset();
     return valid;
 }
@@ -574,24 +577,21 @@ class ForeignWindow final : public cue::Window
     cue::Result<std::uint32_t> firstCountResult = cue::d3d12_dred_attempt_count_for_probe(*backend);
     cue::Result<void> resizeResult = presentation->resize(641, 361);
     cue::Result<std::uint32_t> resizeCountResult = cue::d3d12_dred_attempt_count_for_probe(*backend);
-    cue::Result<cue::D3d12DredOwnerProbeReport> dredOwnerResult =
-        cue::probe_d3d12_dred_owners_for_probe(*backend);
+    cue::Result<cue::D3d12DredOwnerProbeReport> dredOwnerResult = cue::probe_d3d12_dred_owners_for_probe(*backend);
     const cue::D3d12DredOwnerProbeReport *dredOwners = dredOwnerResult.try_value();
-    const bool resizeValid = removalResult && firstCountResult && *firstCountResult.try_value() == 0 &&
-                             !resizeResult && has_error_code(resizeResult.try_error(), 34) && resizeCountResult &&
-                             *resizeCountResult.try_value() == 1 &&
-                             dredOwners != nullptr && dredOwners->hasCommandList &&
-                             dredOwners->allocatorCount == 2 && dredOwners->backBufferCount == 2 &&
-                             dredOwners->rtvCount == 2 &&
-                             dredOwners->hasSwapChain && dredOwners->hasRtvHeap && dredOwners->hasQueue &&
-                             dredOwners->hasFence && dredOwners->hasFenceEvent &&
-                             presentation->state() == cue::PresentationContextState::Shutdown &&
-                             backend->state() == cue::GraphicsBackendState::DeviceRemoved;
+    const bool resizeValid =
+        removalResult && firstCountResult && *firstCountResult.try_value() == 0 && !resizeResult &&
+        has_error_code(resizeResult.try_error(), 34) && resizeCountResult && *resizeCountResult.try_value() == 1 &&
+        dredOwners != nullptr && dredOwners->hasCommandList && dredOwners->allocatorCount == 2 &&
+        dredOwners->backBufferCount == 2 && dredOwners->rtvCount == 2 && dredOwners->hasSwapChain &&
+        dredOwners->hasRtvHeap && dredOwners->hasQueue && dredOwners->hasFence && dredOwners->hasFenceEvent &&
+        presentation->state() == cue::PresentationContextState::Shutdown &&
+        backend->state() == cue::GraphicsBackendState::DeviceRemoved;
     cue::Result<void> presentationShutdownResult = presentation->shutdown();
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
-    const bool cleanupValid = presentationShutdownResult && backendShutdownResult &&
-                              backend->state() == cue::GraphicsBackendState::Shutdown;
+    const bool cleanupValid =
+        presentationShutdownResult && backendShutdownResult && backend->state() == cue::GraphicsBackendState::Shutdown;
     backend.reset();
     return resizeValid && cleanupValid ? 0 : 24;
 }
@@ -645,8 +645,7 @@ class ForeignWindow final : public cue::Window
                               *contextCountResult.try_value() == 1;
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
-    const bool cleanupValid =
-        backendShutdownResult && backend->state() == cue::GraphicsBackendState::Shutdown;
+    const bool cleanupValid = backendShutdownResult && backend->state() == cue::GraphicsBackendState::Shutdown;
     backend.reset();
     return removalValid && contextValid && cleanupValid ? 0 : 18;
 }

@@ -14,10 +14,14 @@ and releases them only after the normal GPU-idle or Device Removal cleanup
 condition. A Scene Frame records Clear and Cube draws into the same Command
 List, then uses the existing single Execute／Present／Signal sequence. The
 Clear-only `present_frame` behavior remains unchanged. Failed lazy initialization
-also runs the existing Backend Device Removal and DRED classification path.
+retains partial native resources until the existing Backend Device Removal and
+DRED classification has completed, then releases them. Device Removal is the
+primary error and the Scene creation failure remains its cause.
 
 `SceneFrame.hlsl` is first-party source compiled by the selected Windows SDK
-`fxc.exe` at build time into generated C headers. Runtime products do not need
+`fxc.exe` from the selected Windows SDK root at build time into generated C
+headers. The SDK root can be supplied with `CMAKE_WINDOWS_KITS_10_DIR` or
+`WindowsSdkDir`; otherwise it is read from the Windows Kits registry. Runtime products do not need
 the shader source or a newly introduced load-time shader compiler DLL. The
 fixed Pass intentionally has no Depth attachment and does not cull faces;
 Depth, back-face Cull, and resize-specific validation belong to Issue #356.
@@ -40,3 +44,12 @@ The generated shader headers share one path across configurations in a single
 multi-config build tree. Sequential builds and separate CI jobs are covered;
 simultaneously building different configurations in that same tree is not
 validated and should use separate build directories if needed.
+
+PR review follow-up: the lazy Scene initialization Device Removal test now
+checks primary code 52, its retained Scene creation cause, and one DRED attempt.
+The SDK compiler path is derived directly from the selected SDK root/version on
+every configure, without a cached executable search. During follow-up Debug
+testing, `Cue.Editor.Workflow.ProcessRoundTrip` once failed with Windows
+`Access is denied` while renaming its test project; it passed when run alone
+and in the next full 280-test run. This intermittent unrelated test failure
+has not been attributed to the Scene change.
