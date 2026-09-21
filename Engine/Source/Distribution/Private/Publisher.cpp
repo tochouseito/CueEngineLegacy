@@ -83,7 +83,8 @@ namespace
     constexpr std::array forbiddenExtensions = {
         std::string_view(".pdb"),  std::string_view(".ilk"), std::string_view(".obj"), std::string_view(".idb"),
         std::string_view(".user"), std::string_view(".suo"), std::string_view(".pfx"), std::string_view(".pem"),
-        std::string_view(".key"),  std::string_view(".p12"), std::string_view(".jks"), std::string_view(".keystore"),
+        std::string_view(".key"),  std::string_view(".p12"), std::string_view(".ppk"), std::string_view(".jks"),
+        std::string_view(".keystore"),
         std::string_view(".cer"),  std::string_view(".exe"), std::string_view(".dll"), std::string_view(".lib"),
         std::string_view(".exp"),
     };

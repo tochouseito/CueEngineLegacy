@@ -323,6 +323,20 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     std::string duplicateKey(manifest);
     duplicateKey.insert(duplicateKey.find(",\n    \"version-string\""), ",\n    \"name\": \"cue-engine\"");
     require(!cue::distribution::make_dependency_definition_id(duplicateKey, configuration, tool, a_assertContext));
+    std::string unapprovedDependency(manifest);
+    unapprovedDependency.replace(unapprovedDependency.find("\"imgui\""), std::string_view("\"imgui\"").size(),
+                                 "\"zlib\"");
+    require(!cue::distribution::make_dependency_definition_id(unapprovedDependency, configuration, tool,
+                                                               a_assertContext));
+    std::string unapprovedFeature(manifest);
+    unapprovedFeature.replace(unapprovedFeature.find("\"win32-binding\""),
+                              std::string_view("\"win32-binding\"").size(), "\"vulkan-binding\"");
+    require(!cue::distribution::make_dependency_definition_id(unapprovedFeature, configuration, tool,
+                                                               a_assertContext));
+    std::string defaultFeatures(manifest);
+    defaultFeatures.replace(defaultFeatures.find("false"), 5U, "true");
+    require(!cue::distribution::make_dependency_definition_id(defaultFeatures, configuration, tool,
+                                                               a_assertContext));
     std::string alternateRepository(tool);
     alternateRepository.replace(alternateRepository.find("https://github.com/microsoft/vcpkg.git"),
                                 std::string_view("https://github.com/microsoft/vcpkg.git").size(),

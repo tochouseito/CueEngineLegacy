@@ -223,8 +223,18 @@ class DefinitionCursor final
         {
             return false;
         }
+        if (!firstDependency || dependency != "imgui" || defaultFeatures)
+        {
+            return false;
+        }
         previousDependency = dependency;
 
+        constexpr std::array approvedFeatures = {
+            std::string_view("docking-experimental"),
+            std::string_view("dx12-binding"),
+            std::string_view("win32-binding"),
+        };
+        std::size_t featureCount = 0U;
         std::string_view previousFeature;
         bool firstFeature = true;
         while (true)
@@ -235,10 +245,12 @@ class DefinitionCursor final
             }
             std::string_view feature;
             if (!cursor.expect("                ") || !cursor.parse_string(feature) || !is_definition_token(feature) ||
-                (!previousFeature.empty() && feature <= previousFeature))
+                (!previousFeature.empty() && feature <= previousFeature) || featureCount >= approvedFeatures.size() ||
+                feature != approvedFeatures[featureCount])
             {
                 return false;
             }
+            ++featureCount;
             previousFeature = feature;
             firstFeature = false;
             if (cursor.expect("\n            ]"))
@@ -247,6 +259,10 @@ class DefinitionCursor final
             }
         }
         if (!cursor.expect("\n        }"))
+        {
+            return false;
+        }
+        if (featureCount != approvedFeatures.size())
         {
             return false;
         }
