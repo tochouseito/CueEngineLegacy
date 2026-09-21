@@ -75,7 +75,8 @@ EditorCore、Editor ImGui、EditorTool、Test、CMake、ADR、手動手順に限
 
 ## Validation Commands
 
-- `pwsh -NoProfile -File Tools/Dependencies/RestoreVcpkg.ps1`
+- Dependency Restore（当時実行済み。現行の再実行は`README.md`の手順で`ToolRoot`、`InstallRoot`、
+  `GitExecutable`を明示する）
 - `cmake --preset windows-vs2026`
 - `cmake --build --preset windows-vs2026-debug --parallel`
 - `ctest --preset windows-vs2026-debug --output-on-failure`

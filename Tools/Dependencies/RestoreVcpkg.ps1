@@ -107,6 +107,8 @@ $expectedMarker = $null
 $finalDependencyRoot = $null
 $stagingDependencyRoot = $null
 $dependencyLease = $null
+$expectedTriplet = $null
+$overlayTripletRoot = $null
 
 if ($rootMode)
 {
@@ -133,6 +135,25 @@ if ($rootMode)
     {
         throw "DependencyBuildIdentityJson must be canonical and contain the fixed v1 members."
     }
+    if ($buildIdentity.targetTriplet -cne "x64-windows" -or
+        $buildIdentity.hostArchitecture -cne "x64" -or
+        $buildIdentity.targetArchitecture -cne "x64" -or
+        $buildIdentity.compilerVendor -cne "msvc" -or
+        $buildIdentity.crtLinkage -cne "dynamic" -or
+        $buildIdentity.toolsetVersion -cnotmatch '^\d+\.\d+(\.\d+)?$' -or
+        $buildIdentity.windowsSdkTargetVersion -cnotmatch '^\d+\.\d+\.\d+\.\d+$')
+    {
+        throw "DependencyBuildIdentityJson must describe the supported x64-windows MSVC ABI."
+    }
+
+    $expectedTriplet = @(
+        "set(VCPKG_TARGET_ARCHITECTURE x64)",
+        "set(VCPKG_CRT_LINKAGE dynamic)",
+        "set(VCPKG_LIBRARY_LINKAGE dynamic)",
+        "set(VCPKG_PLATFORM_TOOLSET_VERSION `"$($buildIdentity.toolsetVersion)`")",
+        "set(VCPKG_CMAKE_SYSTEM_VERSION `"$($buildIdentity.windowsSdkTargetVersion)`")"
+    ) -join "`n"
+    $expectedTriplet += "`n"
 
     $finalDependencyRoot = Split-Path -Parent $installedRoot
     if ((Split-Path -Leaf $finalDependencyRoot) -cne $DependencyRootId -or
@@ -337,21 +358,49 @@ function Test-VcpkgCheckout
 
 function Test-CompletedDependencyRoot
 {
-    if (-not $rootMode -or -not (Test-Path -LiteralPath $finalDependencyRoot -PathType Container))
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    if (-not $rootMode -or -not (Test-Path -LiteralPath $Root -PathType Container))
     {
         return $false
     }
-    $markerPath = Join-Path $finalDependencyRoot "CueDependencyRoot.complete.json"
+    $markerPath = Join-Path $Root "CueDependencyRoot.complete.json"
+    $tripletPath = Join-Path $Root "Triplets\x64-windows.cmake"
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf))
     {
         return $false
     }
     $actualMarker = [IO.File]::ReadAllText($markerPath)
-    if ($actualMarker -cne $expectedMarker -or -not (Test-VcpkgCheckout) -or -not (Test-VcpkgExecutable))
+    if (-not (Test-Path -LiteralPath $tripletPath -PathType Leaf) -or
+        [IO.File]::ReadAllText($tripletPath) -cne $expectedTriplet -or
+        $actualMarker -cne $expectedMarker -or -not (Test-VcpkgCheckout) -or -not (Test-VcpkgExecutable))
     {
         return $false
     }
     return Test-Path -LiteralPath (Join-Path $installedRoot "vcpkg\status") -PathType Leaf
+}
+
+function Move-InvalidDependencyRoot
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    $quarantineRoot = Join-Path (Split-Path -Parent $Root) `
+        ".invalid-$DependencyRootId-$([Guid]::NewGuid().ToString('N'))"
+    try
+    {
+        Move-Item -LiteralPath $Root -Destination $quarantineRoot -ErrorAction Stop
+    }
+    catch
+    {
+        throw "Invalid Dependency Root could not be quarantined: $($_.Exception.Message)"
+    }
+    return $quarantineRoot
 }
 
 function Invoke-VcpkgRestore
@@ -466,13 +515,22 @@ function Invoke-VcpkgRestore
     }
 
     $vcpkgPath = Join-Path $toolRoot "vcpkg.exe"
-    $env:VCPKG_DISABLE_METRICS = "1"
-    Invoke-CheckedProcess -FilePath $vcpkgPath -ArgumentList @(
+    $installArguments = @(
         "install",
         "--x-manifest-root=$thirdPartyRoot",
         "--x-install-root=$installedRoot",
         "--triplet=x64-windows"
-    ) -WorkingDirectory $repositoryRoot
+    )
+    if ($rootMode)
+    {
+        $overlayTripletRoot = Join-Path $stagingDependencyRoot "Triplets"
+        New-Item -ItemType Directory -Path $overlayTripletRoot -Force | Out-Null
+        $tripletPath = Join-Path $overlayTripletRoot "x64-windows.cmake"
+        [IO.File]::WriteAllText($tripletPath, $expectedTriplet, [Text.UTF8Encoding]::new($false))
+        $installArguments += "--overlay-triplets=$overlayTripletRoot"
+    }
+    $env:VCPKG_DISABLE_METRICS = "1"
+    Invoke-CheckedProcess -FilePath $vcpkgPath -ArgumentList $installArguments -WorkingDirectory $repositoryRoot
 }
 
 try
@@ -481,11 +539,11 @@ try
     {
         if (Test-Path -LiteralPath $finalDependencyRoot -PathType Container)
         {
-            if (-not (Test-CompletedDependencyRoot))
+            if (Test-CompletedDependencyRoot -Root $finalDependencyRoot)
             {
-                throw "Published Dependency Root does not match its immutable completion marker."
+                return
             }
-            return
+            [void](Move-InvalidDependencyRoot -Root $finalDependencyRoot)
         }
 
         $stagingDependencyRoot = Join-Path (Split-Path -Parent $finalDependencyRoot) `
@@ -516,13 +574,19 @@ try
             $markerStream.Dispose()
         }
 
+        if (-not (Test-CompletedDependencyRoot -Root $stagingDependencyRoot))
+        {
+            throw "Staged Dependency Root failed pre-publish validation."
+        }
+
         Move-Item -LiteralPath $stagingDependencyRoot -Destination $finalDependencyRoot
         $stagingDependencyRoot = $null
         $toolRoot = Join-Path $finalDependencyRoot "Tool\vcpkg"
         $installedRoot = Join-Path $finalDependencyRoot "Installed"
-        if (-not (Test-CompletedDependencyRoot))
+        if (-not (Test-CompletedDependencyRoot -Root $finalDependencyRoot))
         {
-            throw "Published Dependency Root failed post-publish validation."
+            $quarantineRoot = Move-InvalidDependencyRoot -Root $finalDependencyRoot
+            throw "Published Dependency Root failed post-publish validation and was quarantined at '$quarantineRoot'."
         }
     }
 }

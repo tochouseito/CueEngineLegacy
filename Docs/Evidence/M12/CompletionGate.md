@@ -59,7 +59,8 @@ Sceneの作成、Hierarchy／Inspector編集、Undo／Redo、Save／Save As、Re
 ## Validation Commands
 
 - `git clone --branch codex/m12-165-completion-gate --single-branch https://github.com/tochouseito/CueEngine.git <clean-checkout>`
-- `pwsh -NoProfile -File Tools/Dependencies/RestoreVcpkg.ps1`
+- Dependency Restore（当時実行済み。現行の再実行は`README.md`の手順で`ToolRoot`、`InstallRoot`、
+  `GitExecutable`を明示する）
 - `cmake --preset windows-vs2026`
 - `cmake --build --preset windows-vs2026-debug --parallel`
 - `cmake --build --preset windows-vs2026-development --parallel`

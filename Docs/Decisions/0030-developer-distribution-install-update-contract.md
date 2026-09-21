@@ -162,6 +162,9 @@ PDB／OBJ／LIB／DLL／EXE、Credential／署名Key、Player ProductとAllowlis
 - 共有Dependency Rootの初回RestoreはDependency Root IDごとのProcess間排他Leaseを取得し、
   Operation固有StagingへTool／Install Treeを生成・検証してから同一Volume Renameで公開する。
   公開済みRootはDefinition ID、Build Identity、Root ID、Pinを持つ完了Markerを再検証してImmutable再利用する。
+  RestoreはBuild Identityから生成したOverlay TripletでMSVC ToolsetとWindows SDKを固定し、隔離CMake Buildも
+  同じToolset／SDKをGeneratorへ明示する。Stagingと公開後の再検証に失敗したRootは最終Pathから同一Volumeの
+  隔離Pathへ移し、成功Rootとして再利用せず、同じRoot IDの再Restoreを妨げない。
   Configure／Buildは共有Leaseを保持し、Manifest自動Installを無効化して公開Rootへ書き戻さない。異なる
   依存定義またはBuild Identityは新しいRoot IDへ分離する
 - 新しいLibrary、Installer Framework、Archive Library、署名ToolをM18の暗黙依存にしない。

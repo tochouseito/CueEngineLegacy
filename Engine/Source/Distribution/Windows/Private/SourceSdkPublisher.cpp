@@ -77,6 +77,26 @@ constexpr std::array k_expectedTools = {
     return cue::distribution::make_distribution_error(a_assertContext, a_error, a_summary);
 }
 
+/// @brief Operation Rootを削除し、失敗を診断可能なResultへ変換する
+[[nodiscard]] cue::Result<void> cleanup_operation_root(
+    const std::filesystem::path &a_operationRoot, const cue::AssertContext &a_assertContext) noexcept
+{
+    std::error_code error;
+    static_cast<void>(std::filesystem::remove_all(a_operationRoot, error));
+    if (!error)
+    {
+        return cue::Result<void>::success();
+    }
+    cue::ErrorCode code = cue::ErrorCode::create(
+        a_assertContext.fatal_handler(), "Cue.Distribution",
+        static_cast<std::int64_t>(cue::distribution::DistributionError::PlatformOperationFailed));
+    cue::NativeError native = cue::NativeError::create(
+        a_assertContext.fatal_handler(), "Win32", static_cast<std::int64_t>(error.value()));
+    return cue::Result<void>::failure(cue::Error::create(
+        a_assertContext.fatal_handler(), std::move(code), "Source SDK operation root cleanup failed",
+        std::move(native)));
+}
+
 [[nodiscard]] std::filesystem::path native_path(std::string_view a_path)
 {
     std::u8string value;
@@ -719,6 +739,8 @@ constexpr std::array k_expectedTools = {
 
         const std::filesystem::path toolRoot = a_dependencyRoot / "Tool" / "vcpkg";
         const std::filesystem::path installRoot = a_dependencyRoot / "Installed";
+        const std::string generatorPlatform = "x64,version=" + a_identity.windowsSdkTargetVersion;
+        const std::string generatorToolset = "host=x64,version=" + a_identity.toolsetVersion;
         auto configured = run_process(
             a_runner, a_request.cmakeExecutable,
             {"-S",
@@ -728,7 +750,9 @@ constexpr std::array k_expectedTools = {
              "-G",
              a_request.cmakeGenerator,
              "-A",
-             "x64",
+             generatorPlatform,
+             "-T",
+             generatorToolset,
              "-DBUILD_TESTING=OFF",
              "-DCMAKE_TOOLCHAIN_FILE=" + utf8_path(a_stagingAbsolute / "CMake" / "CueVcpkgToolchain.cmake"),
              "-DCUE_VCPKG_ROOT=" + utf8_path(toolRoot),
@@ -1021,8 +1045,12 @@ Result<SourceSdkPublishReport> publish_windows_source_sdk(const WindowsSourceSdk
                 a_error.append_secondary_diagnostics(a_assertContext, *rollback.try_error(),
                                                      "Source SDK staging rollback failed", "Rollback");
             }
-            std::error_code cleanupError;
-            static_cast<void>(std::filesystem::remove_all(operationRoot, cleanupError));
+            auto operationCleanup = cleanup_operation_root(operationRoot, a_assertContext);
+            if (!operationCleanup)
+            {
+                a_error.append_secondary_diagnostics(a_assertContext, *operationCleanup.try_error(),
+                                                     "Source SDK operation root cleanup failed", "Cleanup");
+            }
             return Result<SourceSdkPublishReport>::failure(std::move(a_error));
         };
 
@@ -1151,14 +1179,24 @@ Result<SourceSdkPublishReport> publish_windows_source_sdk(const WindowsSourceSdk
             native_path(a_request.destinationParent) / native_path(destinationName), manifest, a_assertContext);
         auto publishedToolsValid = validate_generated_tools(**filesystem.try_value(), *destination.try_value(),
                                                             manifest, a_assertContext);
-        std::error_code cleanupError;
-        static_cast<void>(std::filesystem::remove_all(operationRoot, cleanupError));
+        auto operationCleanup = cleanup_operation_root(operationRoot, a_assertContext);
         if (!publishedValid || !publishedDirectoryValid || !publishedToolsValid)
         {
-            return Result<SourceSdkPublishReport>::failure(
-                !publishedValid          ? std::move(*publishedValid.try_error())
+            Error publicationError =
+                !publishedValid            ? std::move(*publishedValid.try_error())
                 : !publishedDirectoryValid ? std::move(*publishedDirectoryValid.try_error())
-                                           : std::move(*publishedToolsValid.try_error()));
+                                             : std::move(*publishedToolsValid.try_error());
+            if (!operationCleanup)
+            {
+                publicationError.append_secondary_diagnostics(
+                    a_assertContext, *operationCleanup.try_error(), "Source SDK operation root cleanup failed",
+                    "Cleanup");
+            }
+            return Result<SourceSdkPublishReport>::failure(std::move(publicationError));
+        }
+        if (!operationCleanup)
+        {
+            return Result<SourceSdkPublishReport>::failure(std::move(*operationCleanup.try_error()));
         }
         return Result<SourceSdkPublishReport>::success(
             {SourceSdkPublishStage::Completed,

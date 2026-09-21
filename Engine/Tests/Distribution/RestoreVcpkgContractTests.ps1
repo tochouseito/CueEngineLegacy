@@ -83,3 +83,12 @@ Assert-RestoreRejected -Arguments @(
     "-DependencyDefinitionId", $definitionId,
     "-DependencyBuildIdentityJson", ($buildIdentity.Replace(":", ": "))
 ) -ExpectedMessage "must be canonical"
+
+Assert-RestoreRejected -Arguments @(
+    "-ToolRoot", $dependencyTool,
+    "-InstallRoot", $dependencyInstall,
+    "-InstalledVersionRoot", $versionRoot,
+    "-DependencyRootId", $dependencyId,
+    "-DependencyDefinitionId", $definitionId,
+    "-DependencyBuildIdentityJson", ($buildIdentity.Replace("x64-windows", "x86-windows"))
+) -ExpectedMessage "supported x64-windows MSVC ABI"
