@@ -129,6 +129,46 @@ void test_cube_mesh() noexcept
     require(minimum == cue::math::Vector3{-0.5F, -0.5F, -0.5F});
     require(maximum == cue::math::Vector3{0.5F, 0.5F, 0.5F});
 
+    using VertexSignature = std::array<float, 6U>;
+    std::array<VertexSignature, 24U> vertexSet{};
+    std::size_t vertexIndex = 0U;
+    for (const auto &vertex : cube.vertices)
+    {
+        vertexSet[vertexIndex] = {vertex.position.x, vertex.position.y, vertex.position.z,
+                                  vertex.normal.x,   vertex.normal.y,   vertex.normal.z};
+        ++vertexIndex;
+    }
+
+    std::array<VertexSignature, 24U> expectedVertexSet = {
+        VertexSignature{0.5F, -0.5F, -0.5F, 1.0F, 0.0F, 0.0F},
+        VertexSignature{0.5F, 0.5F, -0.5F, 1.0F, 0.0F, 0.0F},
+        VertexSignature{0.5F, 0.5F, 0.5F, 1.0F, 0.0F, 0.0F},
+        VertexSignature{0.5F, -0.5F, 0.5F, 1.0F, 0.0F, 0.0F},
+        VertexSignature{-0.5F, -0.5F, 0.5F, -1.0F, 0.0F, 0.0F},
+        VertexSignature{-0.5F, 0.5F, 0.5F, -1.0F, 0.0F, 0.0F},
+        VertexSignature{-0.5F, 0.5F, -0.5F, -1.0F, 0.0F, 0.0F},
+        VertexSignature{-0.5F, -0.5F, -0.5F, -1.0F, 0.0F, 0.0F},
+        VertexSignature{-0.5F, 0.5F, -0.5F, 0.0F, 1.0F, 0.0F},
+        VertexSignature{-0.5F, 0.5F, 0.5F, 0.0F, 1.0F, 0.0F},
+        VertexSignature{0.5F, 0.5F, 0.5F, 0.0F, 1.0F, 0.0F},
+        VertexSignature{0.5F, 0.5F, -0.5F, 0.0F, 1.0F, 0.0F},
+        VertexSignature{-0.5F, -0.5F, 0.5F, 0.0F, -1.0F, 0.0F},
+        VertexSignature{-0.5F, -0.5F, -0.5F, 0.0F, -1.0F, 0.0F},
+        VertexSignature{0.5F, -0.5F, -0.5F, 0.0F, -1.0F, 0.0F},
+        VertexSignature{0.5F, -0.5F, 0.5F, 0.0F, -1.0F, 0.0F},
+        VertexSignature{-0.5F, -0.5F, 0.5F, 0.0F, 0.0F, 1.0F},
+        VertexSignature{0.5F, -0.5F, 0.5F, 0.0F, 0.0F, 1.0F},
+        VertexSignature{0.5F, 0.5F, 0.5F, 0.0F, 0.0F, 1.0F},
+        VertexSignature{-0.5F, 0.5F, 0.5F, 0.0F, 0.0F, 1.0F},
+        VertexSignature{0.5F, -0.5F, -0.5F, 0.0F, 0.0F, -1.0F},
+        VertexSignature{-0.5F, -0.5F, -0.5F, 0.0F, 0.0F, -1.0F},
+        VertexSignature{-0.5F, 0.5F, -0.5F, 0.0F, 0.0F, -1.0F},
+        VertexSignature{0.5F, 0.5F, -0.5F, 0.0F, 0.0F, -1.0F},
+    };
+    std::ranges::sort(vertexSet);
+    std::ranges::sort(expectedVertexSet);
+    require(vertexSet == expectedVertexSet);
+
     using TriangleSignature = std::array<std::uint8_t, 4U>;
     std::array<TriangleSignature, 12U> triangleSet{};
     std::size_t triangleIndex = 0U;

@@ -64,6 +64,9 @@ struct BuiltInMeshDescriptor final
                                                          const AssertContext &a_assertContext) noexcept;
 
 /// @brief Canonical IDをTyped Mesh Catalogから解決し不変Descriptorを返す
+///
+/// 成功時のPointerは非所有であり、Process終了まで有効なCanonical Catalog要素を指す。
+/// Catalogは不変であるため、複数Threadから同じPointerを同時にReadできる。
 [[nodiscard]] Result<const BuiltInMeshDescriptor *> resolve_builtin_mesh_descriptor(
     std::string_view a_assetId, const AssertContext &a_assertContext) noexcept;
 
