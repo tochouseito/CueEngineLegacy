@@ -173,6 +173,13 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
 利用できるようにする。入力はLocal Bundle Rootと操作種別だけとし、Network Download、Store、
 自己更新はM18に含めない。
 
+初回Installを含む通常操作は、有効なInstalled Version Registryが存在する場合だけ開始する。排他Control Lease取得後に
+Registryが不在なら、Install Journalを作る前に`kind: missing`の`registryRecovery`を完了させる。Recoveryは
+`Versions`配下を列挙し、完成Markerを持つVersionがない新規端末では空の候補配列を正当な結果として扱い、Recovery
+Operation IDを`generationId`、`revision: 1`とする空RegistryをAtomic Publishする。完成Versionが存在する場合は同じ
+Recoveryで検証済み候補を再構築し、未完了または不一致のVersionをSelectableにしない。Recoveryの最終Stage検証、
+Cleanup、Journal削除後にRegistryを再読込し、そのGeneration ID／RevisionをExpected値としてInstallを開始する。
+
 1. Bundle Manifest、Canonical表現、Inventory、Host／Toolchain互換を読取専用で検証する
 2. Operation IDごとのInstall Root内StagingへPayloadをCopyする
 3. Stagingの全Fileを再Hashし、Entry PointのPE Architectureを検証する
@@ -220,7 +227,8 @@ Payload／Markerを全件再検証し、一致しない場合は再構築を進�
 現行Registryを再読込し、`kind: corrupt`では退避前ByteのSize／SHA-256、`kind: missing`では不在が
 `sourceRegistryEvidence`と一致する場合だけ続行する。Valid Registryへの置換、別の破損Byte、File出現を検出したら
 Conflict Errorとして中止する。再構築RegistryはRecovery Operation IDを新しい`generationId`、`revision: 1`とし、
-破損Registryから旧Revisionを推測しない。以後の通常操作はこの新しいGeneration ID／Revision組を期待値に使う。
+破損Registryから旧Revisionを推測しない。候補配列は完成Versionが一つもない新規Install Rootに限り空を許可する。
+以後の通常操作はこの新しいGeneration ID／Revision組を期待値に使う。
 
 Journal v1のStageは「最後に完了した耐久副作用」を表し、次の表以外の値と遷移を許可しない。
 

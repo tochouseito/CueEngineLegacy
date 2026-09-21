@@ -88,6 +88,8 @@ Evidenceと検証済み候補Identity／Digest配列を保持する。Publish直
 Operation IDを新しいGeneration ID、Revision 1として再構築する。ADR-0030でKind別のStage列挙、許可遷移、
 各Stageが証明する耐久副作用を固定し、最後の共有状態Publishを
 最終Stageとする。Cleanup後のJournal不在を完了状態とし、削除後の`completed` Stageは定義しない。
+初回InstallでRegistryが不在の場合も、先に`kind: missing`のRecoveryを空候補で完了し、新Generationの空Registryを
+Publishしてから通常Installを開始する。
 未知Schema／Member、列挙外Stage、不正遷移、旧Worker不一致、破損はFail-closedでEvidenceへ隔離し、Migrationは
 専用Issueで明示する。
 
