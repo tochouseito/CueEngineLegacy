@@ -281,6 +281,11 @@ if(WIN32)
         Cue.RHI.D3D12.RtvHeap.OwnerDestructor
         Cue.RHI.D3D12.RtvHeap.ActiveMoveAssignment
         Cue.RHI.D3D12.SceneFrame.WarpPixel
+        Cue.RHI.D3D12.SceneFrame.HardwarePixel
+        Cue.RHI.D3D12.SceneFrame.Depth.WarpPixel
+        Cue.RHI.D3D12.SceneFrame.Depth.HardwarePixel
+        Cue.RHI.D3D12.SceneFrame.BackFaceCull.WarpPixel
+        Cue.RHI.D3D12.SceneFrame.BackFaceCull.HardwarePixel
         Cue.RHI.D3D12.SwapChain.SmokeVsync
         Cue.RHI.D3D12.SwapChain.SmokeImmediate
         Cue.RHI.D3D12.SwapChain.InfoQueue
@@ -301,6 +306,7 @@ if(WIN32)
         Cue.RHI.D3D12.SwapChain.ClearSmoke
         Cue.RHI.D3D12.SwapChain.SceneSmoke
         Cue.RHI.D3D12.SwapChain.SceneDeviceRemoval
+        Cue.RHI.D3D12.SwapChain.SceneResize
         Cue.RHI.D3D12.SwapChain.PresentFrames300
         Cue.RHI.D3D12.SwapChain.ResizeLifecycle
         Cue.RHI.D3D12.SwapChain.ResizeFailure
@@ -826,10 +832,21 @@ if(WIN32)
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyD3d12RtvHeapViolation.cmake
         )
     endforeach()
-    add_test(NAME Cue.RHI.D3D12.SceneFrame.WarpPixel COMMAND CueRhiD3d12SceneFrameProcess)
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.WarpPixel COMMAND CueRhiD3d12SceneFrameProcess Basic Warp)
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.HardwarePixel COMMAND CueRhiD3d12SceneFrameProcess Basic Hardware)
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.Depth.WarpPixel COMMAND CueRhiD3d12SceneFrameProcess Depth Warp)
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.Depth.HardwarePixel COMMAND CueRhiD3d12SceneFrameProcess Depth Hardware)
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.BackFaceCull.WarpPixel COMMAND CueRhiD3d12SceneFrameProcess Cull Warp)
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.BackFaceCull.HardwarePixel COMMAND CueRhiD3d12SceneFrameProcess Cull Hardware)
+    set_tests_properties(
+        Cue.RHI.D3D12.SceneFrame.HardwarePixel
+        Cue.RHI.D3D12.SceneFrame.Depth.HardwarePixel
+        Cue.RHI.D3D12.SceneFrame.BackFaceCull.HardwarePixel
+        PROPERTIES SKIP_RETURN_CODE 77
+    )
     foreach(
         swapChainMode
-        IN ITEMS SmokeVsync SmokeImmediate InfoQueue TearingMatrix PresentMatrix PresentSignalRecovery BeginFrameUnavailableRetention CloseFrameDeviceRemoved PresentUnavailableRetention SignalUnavailableRetention DirectPresentDeviceRemoved RecoverySignalDeviceRemoved RegularSignalDeviceRemoved CreationFaults LogFailure Validation ProductionOwnership ClearSmoke SceneSmoke SceneDeviceRemoval PresentFrames300 ResizeLifecycle ResizeFailure RtvRebuildFailure TerminalResizeRejection ResizeUnavailableRetention DeviceRemovalLifecycle DeviceRemovalResize DeviceRemovalDredFailure
+        IN ITEMS SmokeVsync SmokeImmediate InfoQueue TearingMatrix PresentMatrix PresentSignalRecovery BeginFrameUnavailableRetention CloseFrameDeviceRemoved PresentUnavailableRetention SignalUnavailableRetention DirectPresentDeviceRemoved RecoverySignalDeviceRemoved RegularSignalDeviceRemoved CreationFaults LogFailure Validation ProductionOwnership ClearSmoke SceneSmoke SceneDeviceRemoval SceneResize PresentFrames300 ResizeLifecycle ResizeFailure RtvRebuildFailure TerminalResizeRejection ResizeUnavailableRetention DeviceRemovalLifecycle DeviceRemovalResize DeviceRemovalDredFailure
     )
         add_test(
             NAME Cue.RHI.D3D12.SwapChain.${swapChainMode}

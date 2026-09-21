@@ -296,6 +296,66 @@ class ForeignWindow final : public cue::Window
     return valid && presentationShutdown && backendShutdown && a_logSink.error_count() == initialErrorCount;
 }
 
+/// @brief SceneのDepth／DSVをGPU Idle証明後のSize変更で退役し、新寸法で再生成する
+[[nodiscard]] bool run_scene_resize(cue::Window &a_window, ProcessLogSink &a_logSink,
+                                    cue::AssertContext &a_assertContext) noexcept
+{
+    const std::uint32_t initialErrorCount = a_logSink.error_count();
+    cue::D3d12BackendDescriptor backendDescriptor = {
+        cue::D3d12AdapterPolicy::Warp,
+        cue::are_d3d12_diagnostics_allowed_for_probe() ? cue::D3d12ValidationMode::Standard
+                                                       : cue::D3d12ValidationMode::Disabled,
+        false,
+        5'000,
+    };
+    cue::Result<std::unique_ptr<cue::D3d12Backend>> backendResult =
+        cue::create_d3d12_backend(backendDescriptor, a_assertContext);
+    if (!backendResult)
+    {
+        return false;
+    }
+    std::unique_ptr<cue::D3d12Backend> backend = std::move(*backendResult.try_value());
+    if (!a_window.show())
+    {
+        static_cast<void>(backend->shutdown());
+        return false;
+    }
+    cue::Result<std::unique_ptr<cue::PresentationContext>> presentationResult =
+        cue::create_d3d12_windows_presentation(*backend, a_window, cue::PresentationDescriptor{true});
+    if (!presentationResult)
+    {
+        static_cast<void>(backend->shutdown());
+        return false;
+    }
+    std::unique_ptr<cue::PresentationContext> presentation = std::move(*presentationResult.try_value());
+    const std::uint32_t initialWidth = presentation->width();
+    const std::uint32_t initialHeight = presentation->height();
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    cue::PresentationSceneCube cube = {identity};
+    cube.localToWorld[14] = 0.75F;
+    const std::array cubes = {cube};
+    const cue::PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, cubes};
+    cue::Result<cue::PresentationFrameStatus> firstFrame = presentation->present_scene_frame(scene);
+    const cue::D3d12PresentationProbeReport firstReport = cue::probe_d3d12_presentation(*presentation);
+    const std::uint32_t resizedWidth = initialWidth + 97U;
+    const std::uint32_t resizedHeight = initialHeight + 43U;
+    cue::Result<void> resizeResult = presentation->resize(resizedWidth, resizedHeight);
+    const cue::D3d12PresentationProbeReport resizedReport = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<cue::PresentationFrameStatus> secondFrame = presentation->present_scene_frame(scene);
+    const cue::D3d12PresentationProbeReport secondReport = cue::probe_d3d12_presentation(*presentation);
+    const bool valid = firstFrame && firstReport.hasSceneDepthDsv && firstReport.sceneDepthWidth == initialWidth &&
+                       firstReport.sceneDepthHeight == initialHeight && firstReport.lastSubmittedFence == 1U &&
+                       resizeResult && !resizedReport.hasSceneDepthDsv && resizedReport.sceneDepthWidth == 0U &&
+                       resizedReport.sceneDepthHeight == 0U && secondFrame && secondReport.hasSceneDepthDsv &&
+                       secondReport.sceneDepthWidth == resizedWidth && secondReport.sceneDepthHeight == resizedHeight &&
+                       secondReport.lastSubmittedFence == 2U;
+    cue::Result<void> presentationShutdown = presentation->shutdown();
+    presentation.reset();
+    cue::Result<void> backendShutdown = backend->shutdown();
+    return valid && presentationShutdown && backendShutdown && a_logSink.error_count() == initialErrorCount;
+}
+
 /// @brief 遅延Scene初期化で未分類Device Removalを検出したときの状態とDREDを検証する
 [[nodiscard]] int run_scene_device_removal(cue::Window &a_window, cue::AssertContext &a_assertContext) noexcept
 {
@@ -762,6 +822,11 @@ int main(int a_argumentCount, char **a_arguments)
     {
         failureCode = run_scene_device_removal(*window, assertContext);
         valid = failureCode == 0;
+    }
+    else if (mode == "SceneResize")
+    {
+        valid = run_scene_resize(*window, *processSinkView, assertContext);
+        failureCode = valid ? 0 : 42;
     }
     else if (mode == "PresentFrames300")
     {

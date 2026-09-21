@@ -725,7 +725,8 @@ class D3d12PresentationContext final : public cue::PresentationContext
         }
         if (!m_scenePass.has_native_objects())
         {
-            cue::Result<void> sceneResult = m_scenePass.initialize(m_device, m_swapChain.format(), *m_assertContext);
+            cue::Result<void> sceneResult = m_scenePass.initialize(m_device, m_swapChain.format(), m_swapChain.width(),
+                                                                   m_swapChain.height(), *m_assertContext);
             if (!sceneResult)
             {
                 cue::Result<void> classificationResult =
@@ -1116,6 +1117,8 @@ class D3d12PresentationContext final : public cue::PresentationContext
             return shutdown_after_resize_failure(std::move(*resourceReleasePreparation.try_error()), false);
         }
 
+        // GPU Idle確認後に旧寸法のDepthを退役し、次のScene Frameで新寸法を遅延生成する
+        m_scenePass.release();
         cue::Result<void> rtvReleaseResult = m_frameCommandState.release_rtv_slots(m_rtvHeap);
 
         if (!rtvReleaseResult)
@@ -1298,6 +1301,10 @@ class D3d12PresentationContext final : public cue::PresentationContext
         report.hasSwapChain = m_swapChain.has_native_objects();
         report.hasRtvHeap = m_rtvHeap.has_native_object();
         report.isRegistered = m_isRegistered;
+        const std::array<std::uint32_t, 2> depthExtent = m_scenePass.depth_extent();
+        report.sceneDepthWidth = depthExtent[0];
+        report.sceneDepthHeight = depthExtent[1];
+        report.hasSceneDepthDsv = m_scenePass.has_depth_dsv();
         return report;
     }
 
