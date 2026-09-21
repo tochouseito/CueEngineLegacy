@@ -537,6 +537,77 @@ void test_runtime_scene_snapshot_boundary() noexcept
     require(!tooDeep.has_value());
     require(tooDeep.try_error()->code().value() ==
             static_cast<std::int64_t>(cue::scene::SceneError::HierarchyDepthExceeded));
+
+    cue::schema::SchemaRegistryIdentitySource registryIdentitySource;
+    std::unique_ptr<cue::schema::SchemaRegistry> registry = make_registry(registryIdentitySource, assertContext);
+    cue::scene::ComponentValueSchemaRegistry valueRegistry = make_value_registry(*registry, assertContext);
+    /// @brief 検証ケースごとに一意なRuntime Object Identityを割り当てる
+    const auto makeObject = [&](std::vector<cue::scene::SceneComponent> a_components)
+    {
+        return cue::scene::RuntimeSceneObjectData{
+            take_value(cue::scene::ObjectId::generate(identitySource, assertContext)), std::nullopt, true,
+            cue::math::Transform{}, std::move(a_components)};
+    };
+    /// @brief 各負例を独立したScene Asset IdentityでSnapshot構築へ投入する
+    const auto snapshotFrom = [&](std::vector<cue::scene::RuntimeSceneObjectData> a_objects)
+    {
+        return cue::scene::create_runtime_scene_snapshot(
+            take_value(cue::scene::SceneAssetId::generate(identitySource, assertContext)),
+            std::move(a_objects), assertContext);
+    };
+
+    const cue::scene::KnownComponentData duplicateData =
+        make_known_component(identitySource, *registry, valueRegistry, assertContext);
+    std::vector<cue::scene::SceneComponent> firstDuplicate;
+    firstDuplicate.push_back(cue::scene::SceneComponent::known(duplicateData));
+    std::vector<cue::scene::SceneComponent> secondDuplicate;
+    secondDuplicate.push_back(cue::scene::SceneComponent::known(duplicateData));
+    std::vector<cue::scene::RuntimeSceneObjectData> duplicateComponentObjects;
+    duplicateComponentObjects.push_back(makeObject(std::move(firstDuplicate)));
+    duplicateComponentObjects.push_back(makeObject(std::move(secondDuplicate)));
+    auto duplicateComponent = snapshotFrom(std::move(duplicateComponentObjects));
+    require(!duplicateComponent.has_value());
+    require(duplicateComponent.try_error()->code().value() ==
+            static_cast<std::int64_t>(cue::scene::SceneError::DuplicateComponentId));
+
+    const cue::scene::KnownComponentData earlierData =
+        make_known_component(identitySource, *registry, valueRegistry, assertContext);
+    const cue::scene::KnownComponentData laterData =
+        make_known_component(identitySource, *registry, valueRegistry, assertContext);
+    std::vector<cue::scene::SceneComponent> unorderedComponents;
+    unorderedComponents.push_back(cue::scene::SceneComponent::known(laterData));
+    unorderedComponents.push_back(cue::scene::SceneComponent::known(earlierData));
+    std::vector<cue::scene::RuntimeSceneObjectData> unorderedObjects;
+    unorderedObjects.push_back(makeObject(std::move(unorderedComponents)));
+    auto unordered = snapshotFrom(std::move(unorderedObjects));
+    require(!unordered.has_value());
+    require(unordered.try_error()->code().value() ==
+            static_cast<std::int64_t>(cue::scene::SceneError::DuplicateComponentId));
+
+    std::vector<cue::scene::SceneComponent> excessiveComponents;
+    excessiveComponents.reserve(cue::scene::k_maximumSceneComponentsPerObject + 1U);
+    for (std::size_t index = 0U; index <= cue::scene::k_maximumSceneComponentsPerObject; ++index)
+    {
+        excessiveComponents.push_back(cue::scene::SceneComponent::known(duplicateData));
+    }
+    std::vector<cue::scene::RuntimeSceneObjectData> excessiveObjects;
+    excessiveObjects.push_back(makeObject(std::move(excessiveComponents)));
+    auto excessive = snapshotFrom(std::move(excessiveObjects));
+    require(!excessive.has_value());
+    require(excessive.try_error()->code().value() ==
+            static_cast<std::int64_t>(cue::scene::SceneError::ResourceLimitExceeded));
+
+    cue::scene::SceneComponent movedFrom = cue::scene::SceneComponent::known(duplicateData);
+    cue::scene::SceneComponent movedTo = std::move(movedFrom);
+    require(movedTo.is_valid() && !movedFrom.is_valid());
+    std::vector<cue::scene::SceneComponent> invalidComponents;
+    invalidComponents.push_back(std::move(movedFrom));
+    std::vector<cue::scene::RuntimeSceneObjectData> invalidObjects;
+    invalidObjects.push_back(makeObject(std::move(invalidComponents)));
+    auto invalid = snapshotFrom(std::move(invalidObjects));
+    require(!invalid.has_value());
+    require(invalid.try_error()->code().value() ==
+            static_cast<std::int64_t>(cue::scene::SceneError::InvalidComponentData));
 }
 } // namespace
 

@@ -218,6 +218,43 @@ Result<SceneSnapshot> create_runtime_scene_snapshot(
             }
         }
 
+        std::vector<ComponentInstanceId> componentIds;
+        for (const RuntimeSceneObjectData &object : a_objects)
+        {
+            if (object.components.size() > k_maximumSceneComponentsPerObject)
+            {
+                return Result<SceneSnapshot>::failure(make_scene_error(
+                    a_assertContext, SceneError::ResourceLimitExceeded,
+                    "Runtime Scene component count exceeds the 4096 element limit"));
+            }
+            const ComponentInstanceId *previousId = nullptr;
+            for (const SceneComponent &component : object.components)
+            {
+                if (!component.is_valid())
+                {
+                    return Result<SceneSnapshot>::failure(make_scene_error(
+                        a_assertContext, SceneError::InvalidComponentData,
+                        "Runtime Scene contains moved-from component data"));
+                }
+                const ComponentInstanceId &componentId = component.instance_id();
+                if (previousId != nullptr && !(*previousId < componentId))
+                {
+                    return Result<SceneSnapshot>::failure(make_scene_error(
+                        a_assertContext, SceneError::DuplicateComponentId,
+                        "Runtime Scene component identities must be stable ordered"));
+                }
+                componentIds.push_back(componentId);
+                previousId = &componentId;
+            }
+        }
+        std::sort(componentIds.begin(), componentIds.end());
+        if (std::adjacent_find(componentIds.begin(), componentIds.end()) != componentIds.end())
+        {
+            return Result<SceneSnapshot>::failure(make_scene_error(
+                a_assertContext, SceneError::DuplicateComponentId,
+                "Runtime Scene component identities must be unique across objects"));
+        }
+
         constexpr std::size_t k_noParent = std::numeric_limits<std::size_t>::max();
         std::vector<std::size_t> parentIndices(a_objects.size(), k_noParent);
         for (std::size_t index = 0U; index < a_objects.size(); ++index)

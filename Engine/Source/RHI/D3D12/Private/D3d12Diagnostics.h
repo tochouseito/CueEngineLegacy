@@ -59,8 +59,8 @@ struct D3d12DiagnosticsStatus final
     ID3D12Device *a_device, const D3d12DiagnosticsStatus &a_status, std::string_view a_context,
     const AssertContext &a_assertContext) noexcept;
 
-/// @brief Device Removal 後の DRED と Removal Reason を収集して Logger へ記録する
+/// @brief Device Removal 後の DRED と Removal Reason を収集し、収集Interfaceの可用性を返す
 [[nodiscard]] Result<void> collect_d3d12_device_removed_diagnostics(
     ID3D12Device *a_device, const D3d12DiagnosticsStatus &a_status,
-    const AssertContext &a_assertContext) noexcept;
+    bool &a_isDredCollectionInterfaceAvailable, const AssertContext &a_assertContext) noexcept;
 } // namespace cue

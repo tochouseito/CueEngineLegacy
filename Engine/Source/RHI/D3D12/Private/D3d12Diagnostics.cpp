@@ -601,8 +601,10 @@ Result<void> log_d3d12_messages_at_quiescent_point(
 // DRED が有効な場合は、Native Object 解放後に失われる Breadcrumb と Page Fault 情報の収集を試行する
 Result<void> collect_d3d12_device_removed_diagnostics(ID3D12Device *a_device,
                                                        const D3d12DiagnosticsStatus &a_status,
+                                                       bool &a_isDredCollectionInterfaceAvailable,
                                                        const AssertContext &a_assertContext) noexcept
 {
+    a_isDredCollectionInterfaceAvailable = false;
     if (a_device == nullptr)
     {
         return Result<void>::failure(
@@ -622,6 +624,8 @@ Result<void> collect_d3d12_device_removed_diagnostics(ID3D12Device *a_device,
         return log_fallback(
             a_assertContext, "D3D12 Device RemovalのDRED Interfaceを取得できません", queryResult);
     }
+
+    a_isDredCollectionInterfaceAvailable = true;
 
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs = {};
     HRESULT breadcrumbsResult = dred->GetAutoBreadcrumbsOutput1(&breadcrumbs);
