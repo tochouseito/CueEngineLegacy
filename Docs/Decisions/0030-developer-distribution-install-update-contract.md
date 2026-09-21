@@ -76,7 +76,7 @@ CueEngine-<version>-windows-x64/
 
 `CueEngineDistribution.json`はVersion付きCanonical JSONとし、Bundle Identity、Engine
 Version、Engine Source Revision、`clean`に固定したEngine Source State、Source Inventory Hash、
-Dependency Set ID、Host OS／Architecture、
+Dependency Definition ID、Publisher Build Identity、Host OS／Architecture、
 最低Toolchain、Entry Point、全Payload FileのRole、Size、SHA-256を記録する。Manifest自身、
 署名用予約File、DirectoryはInventoryへ含めない。
 未知Role、重複Path、非Canonical Path、Root外参照、未登録File、Size／Hash不一致を拒否する。
@@ -86,21 +86,28 @@ lowercase canonical UUID v4に固定する。Version Directory名は検証済み
 `v<MAJOR>.<MINOR>.<PATCH>--<uuid>`として生成し、入力文字列をPathへ直接連結しない。生成後のPathを
 Canonical化し、`Versions`直下の単一要素であることを再検証する。
 
-Dependency Set IDは、Canonical化したvcpkg Manifest／Configuration／Tool Pinと、検証済み
-Dependency Build Identityから生成する64文字のlowercase SHA-256 hexに固定する。Dependency Build
-IdentityはTarget Triplet、Host／Target Architecture、Compiler Vendor／Full Version／Toolset、CRT
-Linkage／Version、Windows SDK Target Versionを含むCanonical表現とする。完了Markerにも同じIdentityを
-記録し、一項目でも異なるToolchain／Compiler／CRT ABIの出力は同じRootとして再利用せず、新しいIDへ
-分離する。検証前の値をPathへ使用せず、生成したDirectoryが`Dependencies`直下の単一要素であることを
-Canonical化後に再検証する。
+Dependency Definition IDはCanonical化したvcpkg Manifest／Configuration／Tool Pinだけから生成する
+64文字のlowercase SHA-256 hexとし、Bundleおよび導入先で不変とする。導入先がToolchainを選択した後、
+Target Triplet、Host／Target Architecture、Compiler Vendor／Full Version／Toolset、CRT Linkage／Version、
+Windows SDK Target VersionをCanonical Dependency Build Identityとして取得し、Definition IDとBuild
+IdentityのCanonical結合をSHA-256したDependency Root IDを導出する。外部Rootの完了MarkerはDefinition ID、
+Build Identity、Root IDを記録し、一項目でも異なるBinaryを再利用しない。検証前の値をPathへ使用せず、
+生成したDirectoryが`Dependencies`直下の単一要素であることをCanonical化後に再検証する。
 
 Source SDK Publisherは開始時にGit HEADを固定し、Tracked／Untracked変更のないWorktreeだけを入力として
-受け付ける。固定AllowlistのPayloadはLive Worktreeの後続状態からCopyせず、記録したCommit TreeのBlobを
-Materializeして不変SnapshotをStagingへ生成する。Stagingの各Fileが同じCommit Blobと一致することを検証し、
+受け付ける。Source、HLSL、CMake、Script、Template、Document、LicenseなどSource Control管理Payloadは、
+Live Worktreeの後続状態からCopyせず、記録したCommit TreeのBlobをMaterializeしてStagingへ生成する。
+各FileのCommit Blob一致を検証し、Source Inventory Hashへ集約する。
+
+`Bin`配下の生成BinaryはCommit Blob検証の対象にしない。同じ固定Commitから隔離されたBuild RootでRelease
+TargetをBuildし、Target名、Configuration、Compiler／Toolset、CRT、Windows SDK、Host／Target Architectureを
+Publisher Build IdentityとしてManifestへ記録する。生成Binaryは期待Target／PE Architecture／Inventory Roleと
+Size／SHA-256を検証し、`builtFromRevision`で固定Commitへ結び付ける。Source管理Payloadと生成Binaryの検証を
+同じ規則で代用しない。
+
 Inventory生成後にHEAD、Index、Tracked／Untracked状態を再読込して開始時と変化していれば公開を拒否する。
 Repository Rootからの場当たり的な再帰Copyは行わず、検証済みRevision、`clean` Source State、Source
-Inventory HashをManifestへ記録する。これによりManifestのRevisionと実際に収録したByteを同じCommitへ
-結び付ける。配布物からProject SourceやUser Dataへ書き戻さない。
+Inventory HashをManifestへ記録する。配布物からProject SourceやUser Dataへ書き戻さない。
 
 ### Third-Party and Toolchain
 
@@ -110,15 +117,16 @@ Inventory HashをManifestへ記録する。これによりManifestのRevisionと
 - vcpkg Manifest、Registry Baseline、Tool Pinは配布するが、`ThirdParty/.tools`、
   `ThirdParty/vcpkg_installed`、Download Cacheは配布しない
 - 初回Buildは明示Dependency Restoreを使用し、取得元、Version、Hash、LicenseをRepositoryと同じ
-  Control Planeで検証する。Restore Scriptは`Dependency Set ID`で分離した明示`Tool Root`と
+  Control Planeで検証する。Restore Scriptは`Dependency Root ID`で分離した明示`Tool Root`と
   `Install Root`を必須入力とし、Installed Version配下への出力を拒否する
-- vcpkg Tool、Download、Install Treeは`%LOCALAPPDATA%/CueEngine/Dependencies/<dependency-set-id>/`
+- vcpkg Tool、Download、Install Treeは`%LOCALAPPDATA%/CueEngine/Dependencies/<dependency-root-id>/`
   配下またはProjectが明示した外部Workspaceへ配置し、Immutable VersionのInventoryを変更しない。
   CMake Toolchainへ`VCPKG_ROOT`と`VCPKG_INSTALLED_DIR`を明示的に渡す
-- 共有Dependency Rootの初回RestoreはDependency Set IDごとのProcess間排他Leaseを取得し、
+- 共有Dependency Rootの初回RestoreはDependency Root IDごとのProcess間排他Leaseを取得し、
   Operation固有StagingへTool／Install Treeを生成・検証してから同一Volume Renameで公開する。
-  公開済みRootは完了MarkerとPinを再検証し、Immutableとして再利用する。Configure／Buildは共有Leaseを
-  保持し、Manifest自動Installを無効化して公開Rootへ書き戻さない。異なる依存定義は新しいIDへ分離する
+  公開済みRootはDefinition ID、Build Identity、Root ID、Pinを持つ完了Markerを再検証してImmutable再利用する。
+  Configure／Buildは共有Leaseを保持し、Manifest自動Installを無効化して公開Rootへ書き戻さない。異なる
+  依存定義またはBuild Identityは新しいRoot IDへ分離する
 - 新しいLibrary、Installer Framework、Archive Library、署名ToolをM18の暗黙依存にしない。
   導入が必要なら対象、用途、License、Version、取得元、配布影響を提示してUser承認を得る
 - Windows SDK、CMake、MSVC、Git for Windows 2.44.0以上はDeveloper PrerequisiteとしてVersion診断する。
@@ -135,7 +143,7 @@ Inventory HashをManifestへ記録する。これによりManifestのRevisionと
   State/InstalledVersions.json
   Operations/
     Workers/<worker-version>/CueEngineInstallWorker.exe
-  Dependencies/<dependency-set-id>/
+  Dependencies/<dependency-root-id>/
   Logs/
 ```
 
@@ -194,6 +202,20 @@ Expected Registry Revision、対象Version／Bundle Identity、Manifest Digest�
 進め、Workerは自身が対応するSchemaとOperation Kindだけを再開する。破損または非互換JournalはEvidenceとして
 Quarantineし、Payload／Registryを推測で変更しない。意味変更と移行は専用Issueで新Schemaと明示Migrationを
 定義し、暗黙Upgradeしない。
+
+Journal v1のStageは「最後に完了した耐久副作用」を表し、次の表以外の値と遷移を許可しない。
+
+| Operation Kind | 許可する単調Stage遷移 | Stageが証明する耐久副作用 |
+| --- | --- | --- |
+| `install`／`update` | `prepared` → `payloadStaged` → `versionPublished` → `probeSucceeded` → `registryPublished` → `completed` | Journal作成 → Staging完了Marker → Version Rename → Probe成功Marker → Selectable Registry Publish → Staging／Journal Cleanup完了 |
+| `rollback` | `prepared` → `selectionPublished` → `completed` | Journal作成 → 既存Version選択のRegistry Publish → Journal Cleanup完了 |
+| `uninstall` | `prepared` → `removalBlocked` → `versionQuarantined` → `registryEntryRemoved` → `completed` | Journal作成 → `pendingRemoval` Registry Publish → Version Quarantine Rename → Registry Entry削除Publish → Quarantine削除とCleanup完了 |
+| `registryRecovery` | `prepared` → `candidatesValidated` → `registryPublished` → `completed` | Journal作成 → Manifest／Payload／Probe Marker候補検証 → Registry再構築Publish → Journal Cleanup完了 |
+
+Writerは副作用を耐久化して再読込検証した後だけ次StageをAtomic Replaceする。副作用後かつStage更新前にCrashした
+場合、Recoveryは現在Stageの直後に期待されるFile／Marker／RegistryだけをOperation IdentityとDigestで照合し、
+完全一致時だけ同じ副作用を冪等完了してStageを進める。欠落、別Identity、想定外の先行副作用、複数候補、
+Stage後退を検出した場合は再開もRollbackも推測せず、Journalと対象をEvidenceへ隔離して明示診断する。
 
 ### Update, Rollback, and Uninstall
 
@@ -270,14 +292,16 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 ## Verification
 
 - Allowlist外File、Path Traversal、重複、欠落、Size／Hash、非Canonical Manifestを拒否する
-- Dirty Repository、Publisher実行中のHEAD／Worktree変更、Commit Blobと不一致なSnapshotからのBundle生成を拒否する
-- 非Canonical Dependency Set ID、Toolchain／Compiler／CRT ABI Identity不一致、Dependencies Root外Pathを拒否する
+- Dirty Repository、Publisher実行中のHEAD／Worktree変更、Commit Blobと不一致なSource管理SnapshotからのBundle生成を拒否する
+- 生成BinaryのSource Revision／Publisher Build Identity／Target／PE Architecture／Inventory不一致を拒否する
+- 非Canonical Dependency Definition／Root ID、Toolchain／Compiler／CRT Build Identity不一致、Dependencies Root外Pathを拒否する
 - Staging失敗、Copy失敗、Hash不一致、Registry Publish失敗で旧Versionを維持する
 - Install、同一Bundle再実行、Side-by-side Update、Rollback、Uninstall、Crash RecoveryをProcess Testする
 - 排他Control Lease中の専用Probeが完了し、通常起動経路が同じ状態では待機することをProcess Testする
 - Probe前Crashから未Probe VersionをSelectableへ復活させず、Probe成功MarkerだけをRecovery対象にする
-- Operation Journalの未知Schema／Member、不正Stage遷移、旧Worker互換性違反、破損をFail-closedで拒否する
-- 同一Dependency Setの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
+- Operation Journalの未知Schema／Member、Kind別v1列挙外Stage／遷移、旧Worker互換性違反、破損をFail-closedで拒否する
+- 各Journal Stage間へCrashを注入し、完全一致する直後の副作用だけを冪等再開して想定外状態を隔離する
+- 同一Dependency Root IDの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
 - Release Tool起動、異なるWorking Directory、Unicode／Long Pathを確認する
 - VC++ Runtime不足、Toolchain不一致、Architecture不一致を診断する
