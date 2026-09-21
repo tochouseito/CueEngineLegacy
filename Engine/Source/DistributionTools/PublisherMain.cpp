@@ -77,6 +77,7 @@ namespace
         Variable{L"TMP", "TMP"},
         Variable{L"ComSpec", "ComSpec"},
         Variable{L"PATH", "PATH"},
+        Variable{L"PATHEXT", "PATHEXT"},
         Variable{L"OS", "OS"},
         Variable{L"NUMBER_OF_PROCESSORS", "NUMBER_OF_PROCESSORS"},
         Variable{L"PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITECTURE"},
