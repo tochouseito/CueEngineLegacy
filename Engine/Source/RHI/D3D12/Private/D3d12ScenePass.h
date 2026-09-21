@@ -33,7 +33,7 @@ class D3d12ScenePass final
     /// @brief Presentation Contextの固定所有域から移動させない
     D3d12ScenePass &operator=(D3d12ScenePass &&) noexcept = delete;
 
-    /// @brief Shader、Cube Buffer、Frame Slot別Constantを生成し、失敗時は部分Resourceを戻す
+    /// @brief Shader、Cube Buffer、Frame Slot別Constantを生成し、失敗時は診断まで部分Resourceを保持する
     [[nodiscard]] Result<void> initialize(ID3D12Device *a_device, DXGI_FORMAT a_format,
                                           const AssertContext &a_assertContext) noexcept;
     /// @brief Fence完了またはDevice Removal確定後に保持Resourceを解放する
@@ -46,7 +46,7 @@ class D3d12ScenePass final
                 const PresentationSceneFrameDescriptor &a_descriptor) noexcept;
 
   private:
-    /// @brief 初期化中だけ部分Resourceを許し、呼出し側が失敗時に一括解放する
+    /// @brief 初期化中だけ部分Resourceを許し、呼出し側が診断後に一括解放する
     [[nodiscard]] Result<void> create_resources(ID3D12Device *a_device, DXGI_FORMAT a_format,
                                                 const AssertContext &a_assertContext) noexcept;
 

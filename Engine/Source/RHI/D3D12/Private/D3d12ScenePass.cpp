@@ -99,12 +99,7 @@ Result<void> D3d12ScenePass::initialize(ID3D12Device *a_device, DXGI_FORMAT a_fo
         return Result<void>::failure(d3d12_private::make_error(a_assertContext, k_scenePassAlreadyInitialized,
                                                                "D3D12 Scene Pass is already initialized"));
     }
-    Result<void> result = create_resources(a_device, a_format, a_assertContext);
-    if (!result)
-    {
-        release();
-    }
-    return result;
+    return create_resources(a_device, a_format, a_assertContext);
 }
 
 Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMAT a_format,

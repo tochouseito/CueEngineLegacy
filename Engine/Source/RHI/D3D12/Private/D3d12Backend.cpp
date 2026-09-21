@@ -461,6 +461,7 @@ struct PresentationCleanupOwnerShape final
 };
 
 using PreparePresentationCleanup = cue::Result<void> (*)(void *, const PresentationCleanupOwnerShape &) noexcept;
+using ClassifyPresentationNativeFailure = cue::Result<void> (*)(void *, cue::Error &&) noexcept;
 
 /// @brief D3D12 Backend で使用する Render Target View を生成し、呼び出し元へ返す
 [[nodiscard]] HRESULT create_render_target_view(ID3D12Device *a_device, ID3D12Resource *a_resource,
@@ -580,13 +581,14 @@ class D3d12PresentationContext final : public cue::PresentationContext
                              cue::D3d12RtvHeap &&a_rtvHeap, ID3D12Device *a_device, cue::GraphicsBackend &a_backend,
                              void *a_backendOwner, UnregisterPresentation a_unregisterPresentation,
                              PreparePresentationCleanup a_preparePresentationCleanup,
+                             ClassifyPresentationNativeFailure a_classifyNativeFailure,
                              cue::AssertContext &a_assertContext) noexcept
         : m_swapChain(std::move(a_swapChain)), m_frameCommandState(std::move(a_frameCommandState)),
           m_rtvHeap(std::move(a_rtvHeap)), m_device(a_device), m_backend(&a_backend), m_backendOwner(a_backendOwner),
           m_unregisterPresentation(a_unregisterPresentation),
-          m_preparePresentationCleanup(a_preparePresentationCleanup), m_assertContext(&a_assertContext),
-          m_creationThread(std::this_thread::get_id()), m_state(cue::PresentationContextState::Ready),
-          m_isRegistered(true), m_isResizePending(false)
+          m_preparePresentationCleanup(a_preparePresentationCleanup), m_classifyNativeFailure(a_classifyNativeFailure),
+          m_assertContext(&a_assertContext), m_creationThread(std::this_thread::get_id()),
+          m_state(cue::PresentationContextState::Ready), m_isRegistered(true), m_isResizePending(false)
     {
     }
 
@@ -710,13 +712,13 @@ class D3d12PresentationContext final : public cue::PresentationContext
             {
                 if (!std::isfinite(value))
                 {
-                    return cue::Result<cue::PresentationFrameStatus>::failure(make_error(
-                        *m_assertContext, k_invalidSceneFrame, "D3D12 Scene Instance Matrix is not finite"));
+                    return cue::Result<cue::PresentationFrameStatus>::failure(
+                        make_error(*m_assertContext, k_invalidSceneFrame, "D3D12 Scene Instance Matrix is not finite"));
                 }
             }
         }
-        if (m_state != cue::PresentationContextState::Ready ||
-            m_backend->state() != cue::GraphicsBackendState::Ready || m_isResizePending)
+        if (m_state != cue::PresentationContextState::Ready || m_backend->state() != cue::GraphicsBackendState::Ready ||
+            m_isResizePending)
         {
             return cue::Result<cue::PresentationFrameStatus>::failure(
                 make_error(*m_assertContext, k_presentationUnavailable, "D3D12 Scene Frame is unavailable"));
@@ -726,14 +728,20 @@ class D3d12PresentationContext final : public cue::PresentationContext
             cue::Result<void> sceneResult = m_scenePass.initialize(m_device, m_swapChain.format(), *m_assertContext);
             if (!sceneResult)
             {
-                cue::Error sceneError = std::move(*sceneResult.try_error());
+                cue::Result<void> classificationResult =
+                    m_classifyNativeFailure(m_backendOwner, std::move(*sceneResult.try_error()));
+                CUE_ASSERT(*m_assertContext, !classificationResult,
+                           "D3D12 Scene initialization failure classification must retain an Error");
+                cue::Error sceneError = std::move(*classificationResult.try_error());
                 cue::Result<void> cleanupPreparation = prepare_backend_cleanup();
                 if (!cleanupPreparation)
                 {
-                    add_secondary_error_context(sceneError, *cleanupPreparation.try_error(),
-                                                "D3D12 Backend cleanup preparation also failed after Scene initialization",
-                                                *m_assertContext);
+                    add_secondary_error_context(
+                        sceneError, *cleanupPreparation.try_error(),
+                        "D3D12 Backend cleanup preparation also failed after Scene initialization", *m_assertContext);
                 }
+                // 初回 Scene はまだ Submit していないため、診断収集後に部分生成 Resource を戻せる
+                m_scenePass.release();
                 if (m_backend->state() == cue::GraphicsBackendState::DeviceRemoved)
                 {
                     m_state = cue::PresentationContextState::DeviceRemoved;
@@ -750,8 +758,7 @@ class D3d12PresentationContext final : public cue::PresentationContext
 
     /// @brief Clear専用と固定Sceneの両方を一つのSubmit／Present／Signal順序で実行する
     [[nodiscard]] cue::Result<cue::PresentationFrameStatus> present_frame_impl(
-        const std::array<float, 4> &a_clearColor,
-        const cue::PresentationSceneFrameDescriptor *a_scene) noexcept
+        const std::array<float, 4> &a_clearColor, const cue::PresentationSceneFrameDescriptor *a_scene) noexcept
     {
         assert_thread("D3D12 Presentation Frame must run on the creation thread");
 
@@ -807,8 +814,7 @@ class D3d12PresentationContext final : public cue::PresentationContext
                                       "D3D12 Backend cleanup preparation also failed after Render Target Barrier");
         }
 
-        cue::Result<void> clearResult =
-            m_frameCommandState.clear_back_buffer(frameIndex, m_rtvHeap, a_clearColor);
+        cue::Result<void> clearResult = m_frameCommandState.clear_back_buffer(frameIndex, m_rtvHeap, a_clearColor);
 
         if (!clearResult)
         {
@@ -1478,6 +1484,7 @@ class D3d12PresentationContext final : public cue::PresentationContext
     void *m_backendOwner;
     UnregisterPresentation m_unregisterPresentation;
     PreparePresentationCleanup m_preparePresentationCleanup;
+    ClassifyPresentationNativeFailure m_classifyNativeFailure;
     cue::AssertContext *m_assertContext;
     std::thread::id m_creationThread;
     cue::PresentationContextState m_state;
@@ -1893,7 +1900,7 @@ class D3d12BackendImpl final : public cue::D3d12Backend
         {
             std::unique_ptr<cue::PresentationContext> presentation = std::make_unique<D3d12PresentationContext>(
                 std::move(swapChain), std::move(frameState), std::move(rtvHeap), m_device.Get(), *this, this,
-                unregister_presentation, prepare_presentation_cleanup, *m_assertContext);
+                unregister_presentation, prepare_presentation_cleanup, classify_scene_native_failure, *m_assertContext);
             ++m_activePresentationCount;
             return cue::Result<std::unique_ptr<cue::PresentationContext>>::success(std::move(presentation));
         }
@@ -1946,6 +1953,15 @@ class D3d12BackendImpl final : public cue::D3d12Backend
         D3d12BackendImpl &backend = *static_cast<D3d12BackendImpl *>(a_backend);
         CUE_ASSERT(*backend.m_assertContext, std::this_thread::get_id() == backend.m_creationThread,
                    "D3D12 RTV Heap failure must be classified on the Backend creation thread");
+        return backend.classify_presentation_native_failure(std::move(a_error));
+    }
+
+    /// @brief Scene 初期化の Native 失敗を部分 Resource 解放前に Device Removal と DRED へ分類する
+    [[nodiscard]] static cue::Result<void> classify_scene_native_failure(void *a_backend, cue::Error &&a_error) noexcept
+    {
+        D3d12BackendImpl &backend = *static_cast<D3d12BackendImpl *>(a_backend);
+        CUE_ASSERT(*backend.m_assertContext, std::this_thread::get_id() == backend.m_creationThread,
+                   "D3D12 Scene failure must be classified on the Backend creation thread");
         return backend.classify_presentation_native_failure(std::move(a_error));
     }
 

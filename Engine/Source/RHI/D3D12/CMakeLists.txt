@@ -19,15 +19,31 @@ if(
     )
 endif()
 
-find_program(
-    cueD3d12Fxc
-    NAMES fxc.exe
-    HINTS
-        "$ENV{WindowsSdkDir}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
-        "C:/Program Files (x86)/Windows Kits/10/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
-    NO_DEFAULT_PATH
-    REQUIRED
-)
+if(DEFINED ENV{CMAKE_WINDOWS_KITS_10_DIR} AND NOT "$ENV{CMAKE_WINDOWS_KITS_10_DIR}" STREQUAL "")
+    set(cueD3d12WindowsSdkRoot "$ENV{CMAKE_WINDOWS_KITS_10_DIR}")
+elseif(DEFINED ENV{WindowsSdkDir} AND NOT "$ENV{WindowsSdkDir}" STREQUAL "")
+    set(cueD3d12WindowsSdkRoot "$ENV{WindowsSdkDir}")
+else()
+    cmake_host_system_information(
+        RESULT cueD3d12WindowsSdkRoot
+        QUERY WINDOWS_REGISTRY "HKLM/SOFTWARE/Microsoft/Windows Kits/Installed Roots"
+        VALUE KitsRoot10
+        VIEW BOTH
+        ERROR_VARIABLE cueD3d12WindowsSdkRegistryError
+    )
+    if(NOT "${cueD3d12WindowsSdkRegistryError}" STREQUAL "")
+        message(FATAL_ERROR "Windows SDK root could not be resolved: ${cueD3d12WindowsSdkRegistryError}")
+    endif()
+endif()
+
+if(NOT IS_DIRECTORY "${cueD3d12WindowsSdkRoot}")
+    message(FATAL_ERROR "Selected Windows SDK root does not exist: ${cueD3d12WindowsSdkRoot}")
+endif()
+
+set(cueD3d12Fxc "${cueD3d12WindowsSdkRoot}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64/fxc.exe")
+if(NOT EXISTS "${cueD3d12Fxc}" OR IS_DIRECTORY "${cueD3d12Fxc}")
+    message(FATAL_ERROR "Selected Windows SDK fxc.exe does not exist: ${cueD3d12Fxc}")
+endif()
 
 set(cueD3d12ShaderDirectory "${CMAKE_CURRENT_BINARY_DIR}/Generated")
 set(cueD3d12VertexShader "${cueD3d12ShaderDirectory}/SceneVertexShader.h")
