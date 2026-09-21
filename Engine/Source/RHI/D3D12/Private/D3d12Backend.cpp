@@ -452,6 +452,17 @@ void retain_shutdown_error(std::optional<cue::Error> &a_firstError, cue::Result<
 
 using UnregisterPresentation = void (*)(void *) noexcept;
 
+#if CUE_D3D12_TESTING
+struct SceneOwnerProbeReport final
+{
+    bool hasDepthDsv;
+    bool hasGeometry;
+    bool hasConstants;
+    bool wasDredEnabled;
+    bool wasDredCollectionInterfaceAvailable;
+};
+#endif
+
 struct PresentationCleanupOwnerShape final
 {
     std::uint32_t allocatorCount;
@@ -460,6 +471,11 @@ struct PresentationCleanupOwnerShape final
     bool hasCommandList;
     bool hasSwapChain;
     bool hasRtvHeap;
+#if CUE_D3D12_TESTING
+    bool hasSceneDepthDsv;
+    bool hasSceneGeometry;
+    bool hasSceneConstants;
+#endif
 };
 
 using PreparePresentationCleanup = cue::Result<void> (*)(void *, const PresentationCleanupOwnerShape &) noexcept;
@@ -1333,6 +1349,13 @@ class D3d12PresentationContext final : public cue::PresentationContext
     }
 
 #if CUE_D3D12_TESTING
+    /// @brief Scene障害ProbeへGPU所有Resourceの個別保持状態を返す
+    [[nodiscard]] SceneOwnerProbeReport scene_owner_report_for_probe() const noexcept
+    {
+        return {m_scenePass.has_depth_dsv(), m_scenePass.has_geometry_for_probe(),
+                m_scenePass.has_constants_for_probe(), false, false};
+    }
+
     /// @brief このPresentationだけの次回Scene生成失敗をProbeから指定する
     void set_scene_creation_fault_for_probe(cue::D3d12SceneCreationFault a_fault) noexcept
     {
@@ -1503,6 +1526,10 @@ class D3d12PresentationContext final : public cue::PresentationContext
             m_frameCommandState.allocator_count(), m_frameCommandState.back_buffer_count(),
             m_frameCommandState.rtv_count(),       m_frameCommandState.has_command_list(),
             m_swapChain.has_native_objects(),      m_rtvHeap.has_native_object(),
+#if CUE_D3D12_TESTING
+            m_scenePass.has_depth_dsv(),           m_scenePass.has_geometry_for_probe(),
+            m_scenePass.has_constants_for_probe(),
+#endif
         };
         return m_preparePresentationCleanup(m_backendOwner, shape);
     }
@@ -1593,6 +1620,10 @@ class D3d12BackendImpl final : public cue::D3d12Backend
           m_capabilities(std::move(a_capabilities)), m_diagnostics(a_diagnostics), m_assertContext(&a_assertContext),
           m_creationThread(std::this_thread::get_id()), m_state(cue::GraphicsBackendState::Ready),
           m_activePresentationCount(0), m_dredCollectionAttemptCount(0), m_lastDredOwnerReport{}
+#if CUE_D3D12_TESTING
+          ,
+          m_lastDredSceneOwnerReport{}, m_isDredCollectionInterfaceAvailable(false)
+#endif
     {
     }
 
@@ -1685,6 +1716,14 @@ class D3d12BackendImpl final : public cue::D3d12Backend
     {
         return m_lastDredOwnerReport;
     }
+
+#if CUE_D3D12_TESTING
+    /// @brief 直近DRED収集時点のScene Resource保持状態を障害Probeへ返す
+    [[nodiscard]] SceneOwnerProbeReport dred_scene_owner_report_for_probe() const noexcept
+    {
+        return m_lastDredSceneOwnerReport;
+    }
+#endif
 
     // Active Presentation が残る間は借用先が存在するため Shutdown を拒否し、先行解放を防ぐ
     // Device Removal 時は有効な診断だけ収集を試行する
@@ -1822,6 +1861,15 @@ class D3d12BackendImpl final : public cue::D3d12Backend
                 m_queueState.has_queue(),
                 m_queueState.has_fence(),
                 m_queueState.has_fence_event(),
+#if CUE_D3D12_TESTING
+            };
+            m_lastDredSceneOwnerReport = {
+                a_presentationShape->hasSceneDepthDsv,
+                a_presentationShape->hasSceneGeometry,
+                a_presentationShape->hasSceneConstants,
+                m_diagnostics.isDredEnabled,
+                m_isDredCollectionInterfaceAvailable,
+#endif
             };
         }
 
@@ -1831,7 +1879,14 @@ class D3d12BackendImpl final : public cue::D3d12Backend
         }
 
         ++m_dredCollectionAttemptCount;
-        return cue::collect_d3d12_device_removed_diagnostics(m_device.Get(), m_diagnostics, *m_assertContext);
+        bool isDredCollectionInterfaceAvailable = false;
+        cue::Result<void> result = cue::collect_d3d12_device_removed_diagnostics(
+            m_device.Get(), m_diagnostics, isDredCollectionInterfaceAvailable, *m_assertContext);
+#if CUE_D3D12_TESTING
+        m_isDredCollectionInterfaceAvailable = isDredCollectionInterfaceAvailable;
+        m_lastDredSceneOwnerReport.wasDredCollectionInterfaceAvailable = isDredCollectionInterfaceAvailable;
+#endif
+        return result;
     }
 
     /// @brief Presentation が Backend 診断へ使用する非所有 Assert Context を返す
@@ -2104,6 +2159,10 @@ class D3d12BackendImpl final : public cue::D3d12Backend
     std::uint32_t m_activePresentationCount;
     std::uint32_t m_dredCollectionAttemptCount;
     cue::D3d12DredOwnerProbeReport m_lastDredOwnerReport;
+#if CUE_D3D12_TESTING
+    SceneOwnerProbeReport m_lastDredSceneOwnerReport;
+    bool m_isDredCollectionInterfaceAvailable;
+#endif
 };
 } // namespace
 
@@ -2223,8 +2282,25 @@ Result<D3d12DredOwnerProbeReport> probe_d3d12_dred_owners_for_probe(D3d12Backend
     return Result<D3d12DredOwnerProbeReport>::success(std::move(report));
 }
 
-bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
-                                                std::uint32_t a_height, AssertContext &a_assertContext) noexcept
+#if CUE_D3D12_TESTING
+/// @brief Production Presentationが保持するScene Resourceの個別状態を障害Probeへ返す
+[[nodiscard]] SceneOwnerProbeReport probe_scene_owners_for_fault(PresentationContext &a_presentation) noexcept
+{
+    D3d12PresentationContext *presentation = dynamic_cast<D3d12PresentationContext *>(&a_presentation);
+    return presentation != nullptr ? presentation->scene_owner_report_for_probe() : SceneOwnerProbeReport{};
+}
+
+/// @brief 直近DRED収集時点のScene Resource保持状態を障害Probeへ返す
+[[nodiscard]] SceneOwnerProbeReport probe_dred_scene_owners_for_fault(D3d12Backend &a_backend) noexcept
+{
+    D3d12BackendImpl *backend = dynamic_cast<D3d12BackendImpl *>(&a_backend);
+    return backend != nullptr ? backend->dred_scene_owner_report_for_probe() : SceneOwnerProbeReport{};
+}
+
+/// @brief RTV再構築失敗前にScene投入した場合もGPU完了後だけScene Resourceを解放する
+[[nodiscard]] bool verify_d3d12_rtv_rebuild_failure_impl(const void *a_nativeWindow, std::uint32_t a_width,
+                                                         std::uint32_t a_height, bool a_useScene,
+                                                         AssertContext &a_assertContext) noexcept
 {
     struct ProbeReset final
     {
@@ -2262,14 +2338,33 @@ bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std:
     }
 
     std::unique_ptr<PresentationContext> presentation = std::move(*presentationResult.try_value());
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    const std::array sceneCubes = {PresentationSceneCube{identity}};
+    const PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, sceneCubes};
+    if (a_useScene && !presentation->present_scene_frame(scene))
+    {
+        static_cast<void>(presentation->shutdown());
+        static_cast<void>(backend->shutdown());
+        return false;
+    }
+    const D3d12PresentationProbeReport beforeResize = probe_d3d12_presentation(*presentation);
+    const SceneOwnerProbeReport sceneOwnersBeforeResize = probe_scene_owners_for_fault(*presentation);
     Result<void> resizeResult = presentation->resize(a_width + 1, a_height + 1);
+    const D3d12PresentationProbeReport afterResize = probe_d3d12_presentation(*presentation);
+    const SceneOwnerProbeReport sceneOwnersAfterResize = probe_scene_owners_for_fault(*presentation);
     const Error *resizeError = resizeResult.try_error();
     const NativeError *nativeError = resizeError != nullptr ? resizeError->try_native_error() : nullptr;
-    const bool failureValid = !resizeResult && resizeError->code().domain() == "Cue.RHI.D3D12" &&
-                              resizeError->code().value() == k_backBufferRtvCreationFailed && nativeError != nullptr &&
-                              nativeError->domain() == "D3D12" &&
-                              presentation->state() == PresentationContextState::Shutdown &&
-                              backend->state() == GraphicsBackendState::Ready;
+    const bool failureValid =
+        !resizeResult && resizeError->code().domain() == "Cue.RHI.D3D12" &&
+        resizeError->code().value() == k_backBufferRtvCreationFailed && nativeError != nullptr &&
+        nativeError->domain() == "D3D12" && presentation->state() == PresentationContextState::Shutdown &&
+        backend->state() == GraphicsBackendState::Ready &&
+        (!a_useScene || (beforeResize.lastSubmittedFence == 1U && beforeResize.hasSceneDepthDsv &&
+                         sceneOwnersBeforeResize.hasGeometry && sceneOwnersBeforeResize.hasConstants &&
+                         beforeResize.sceneDepthIdentity != 0U && !afterResize.hasSceneNativeObjects &&
+                         !afterResize.hasSceneDepthDsv && !sceneOwnersAfterResize.hasGeometry &&
+                         !sceneOwnersAfterResize.hasConstants));
     Result<void> presentationShutdownResult = presentation->shutdown();
     presentation.reset();
     Result<void> backendShutdownResult = backend->shutdown();
@@ -2279,7 +2374,18 @@ bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std:
     return failureValid && cleanupValid;
 }
 
-#if CUE_D3D12_TESTING
+bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                std::uint32_t a_height, AssertContext &a_assertContext) noexcept
+{
+    return verify_d3d12_rtv_rebuild_failure_impl(a_nativeWindow, a_width, a_height, false, a_assertContext);
+}
+
+bool verify_d3d12_scene_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                      std::uint32_t a_height, AssertContext &a_assertContext) noexcept
+{
+    return verify_d3d12_rtv_rebuild_failure_impl(a_nativeWindow, a_width, a_height, true, a_assertContext);
+}
+
 /// @brief GPU完了証明後にReadbackの中心・角画素から固定SceneのDepth結果を検査する
 [[nodiscard]] bool validate_scene_resize_capture(const D3d12ScenePixelCapture &a_capture,
                                                  bool a_expectNearCube) noexcept
@@ -2353,6 +2459,7 @@ D3d12ResizeScenePixelResult verify_d3d12_scene_resize_pixel_for_probe(const void
         {
             return false;
         }
+        const std::uint32_t submittedIndex = presentation->current_back_buffer_index();
         std::array<PresentationSceneCube, 2> cubes = {PresentationSceneCube{identity},
                                                       PresentationSceneCube{rotationY90}};
         cubes[0].localToWorld[14] = 0.75F;
@@ -2369,7 +2476,12 @@ D3d12ResizeScenePixelResult verify_d3d12_scene_resize_pixel_for_probe(const void
         d3d12Presentation->set_scene_capture_for_probe(&captures[a_index]);
         Result<PresentationFrameStatus> frame = presentation->present_scene_frame(scene);
         d3d12Presentation->set_scene_capture_for_probe(nullptr);
-        return static_cast<bool>(frame);
+        const D3d12PresentationProbeReport report = d3d12Presentation->probe_report();
+        const SceneOwnerProbeReport sceneOwners = d3d12Presentation->scene_owner_report_for_probe();
+        const std::uint64_t submittedFence = static_cast<std::uint64_t>(a_index) + 1U;
+        return frame && submittedIndex < k_d3d12FrameContextCount && report.lastSubmittedFence == submittedFence &&
+               report.frameReuseFences[submittedIndex] == submittedFence && sceneOwners.hasDepthDsv &&
+               sceneOwners.hasGeometry && sceneOwners.hasConstants;
     };
 
     bool valid = d3d12Presentation != nullptr && captureFrame(0U) && captureFrame(1U) && captureFrame(2U);
@@ -2569,6 +2681,7 @@ bool verify_d3d12_terminal_resize_rejection_for_probe(const void *a_nativeWindow
     return rejectionValid && cleanupValid;
 }
 
+#if CUE_D3D12_TESTING
 bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
                                                     std::uint32_t a_height, D3d12PresentFailureProbeMode a_mode,
                                                     AssertContext &a_assertContext) noexcept
@@ -2590,6 +2703,11 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
     } probeReset;
 
     static_cast<void>(probeReset);
+    constexpr std::array<float, 16> identity = {
+        1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F,
+    };
+    const std::array sceneCubes = {PresentationSceneCube{identity}};
+    const PresentationSceneFrameDescriptor scene = {{0.06F, 0.18F, 0.32F, 1.0F}, identity, sceneCubes};
     /// @brief Present、Signal、完了待機の失敗組み合わせが期待した主 Error を保持するか検証する
     const auto runCase =
         [&](bool a_failPresent, bool a_failSignal, bool a_failWaitAfterCompletion, std::int64_t a_expectedCode) noexcept
@@ -2663,7 +2781,7 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
     };
 
     /// @brief Begin Frame が利用不能な場合に既存 Frame 状態が保持されることを検証する
-    const auto runBeginFrameUnavailableCase = [&]() noexcept
+    const auto runBeginFrameUnavailableCase = [&](bool a_useScene) noexcept
     {
         g_presentationFrameProbeState = {true, false, false};
         g_queueLifecycleProbeState = {true, false, false, false, false, 0};
@@ -2694,15 +2812,22 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
         std::unique_ptr<PresentationContext> presentation = std::move(*presentationResult.try_value());
         constexpr std::array<float, 4> color = {0.06F, 0.18F, 0.32F, 1.0F};
         PresentationFrameDescriptor frameDescriptor = {color};
-        Result<PresentationFrameStatus> firstFrameResult = presentation->present_frame(frameDescriptor);
-        Result<PresentationFrameStatus> secondFrameResult = presentation->present_frame(frameDescriptor);
+        Result<PresentationFrameStatus> firstFrameResult =
+            a_useScene ? presentation->present_scene_frame(scene) : presentation->present_frame(frameDescriptor);
+        Result<PresentationFrameStatus> secondFrameResult =
+            a_useScene ? presentation->present_scene_frame(scene) : presentation->present_frame(frameDescriptor);
         D3d12PresentationProbeReport reportBeforeFailure = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwnersBeforeFailure = probe_scene_owners_for_fault(*presentation);
         g_queueLifecycleProbeState.failWaitWithoutCompletion = true;
-        Result<PresentationFrameStatus> frameResult = presentation->present_frame(frameDescriptor);
+        Result<PresentationFrameStatus> frameResult =
+            a_useScene ? presentation->present_scene_frame(scene) : presentation->present_frame(frameDescriptor);
         D3d12PresentationProbeReport report = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwners = probe_scene_owners_for_fault(*presentation);
         Result<D3d12BackendOwnerProbeReport> backendOwnerResult = probe_d3d12_backend_owners_for_probe(*backend);
         Result<void> presentationShutdownResult = presentation->shutdown();
         Result<void> backendShutdownResult = backend->shutdown();
+        const D3d12PresentationProbeReport afterShutdown = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwnersAfterShutdown = probe_scene_owners_for_fault(*presentation);
         const Error *frameError = frameResult.try_error();
         const D3d12BackendOwnerProbeReport *backendOwners = backendOwnerResult.try_value();
         const bool valid =
@@ -2716,10 +2841,17 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
             report.hasCommandList && report.allocatorCount == k_d3d12FrameContextCount &&
             report.backBufferCount == k_d3d12SwapChainBufferCount && report.rtvCount == k_d3d12SwapChainBufferCount &&
             report.formatsMatch && report.hasSwapChain && report.hasRtvHeap && report.isRegistered &&
+            (!a_useScene || (sceneOwners.hasDepthDsv && sceneOwners.hasGeometry && sceneOwners.hasConstants &&
+                             sceneOwnersBeforeFailure.hasGeometry && sceneOwnersBeforeFailure.hasConstants &&
+                             report.sceneDepthIdentity != 0U &&
+                             report.sceneDepthIdentity == reportBeforeFailure.sceneDepthIdentity)) &&
             backendOwners != nullptr && backendOwners->lastSignaledFence == 2 && backendOwners->hasQueue &&
             backendOwners->hasFence && backendOwners->hasFenceEvent && backendOwners->hasDevice &&
             backendOwners->hasAdapter && backendOwners->hasFactory && !presentationShutdownResult &&
-            !backendShutdownResult;
+            !backendShutdownResult &&
+            (!a_useScene ||
+             (sceneOwnersAfterShutdown.hasDepthDsv && sceneOwnersAfterShutdown.hasGeometry &&
+              sceneOwnersAfterShutdown.hasConstants && afterShutdown.sceneDepthIdentity == report.sceneDepthIdentity));
         static_cast<void>(presentation.release());
         static_cast<void>(backend.release());
         g_presentationFrameProbeState = {};
@@ -2796,7 +2928,7 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
     };
 
     /// @brief Present 経路が利用不能でも Frame 所有状態と期待 Error が保持されることを検証する
-    const auto runUnavailableCase = [&](bool a_failPresent, std::int64_t a_expectedCode) noexcept
+    const auto runUnavailableCase = [&](bool a_failPresent, std::int64_t a_expectedCode, bool a_useScene) noexcept
     {
         g_presentationFrameProbeState = {true, false, false};
         g_queueLifecycleProbeState = {true, false, false, false, false, 0};
@@ -2825,16 +2957,28 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
         }
 
         std::unique_ptr<PresentationContext> presentation = std::move(*presentationResult.try_value());
+        if (a_useScene && !presentation->present_scene_frame(scene))
+        {
+            static_cast<void>(presentation->shutdown());
+            static_cast<void>(backend->shutdown());
+            return false;
+        }
+        const D3d12PresentationProbeReport beforeFault = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwnersBeforeFault = probe_scene_owners_for_fault(*presentation);
         g_presentationFrameProbeState.failPresent = a_failPresent;
         g_queueLifecycleProbeState.failSignalAfterForwarding = true;
         g_queueLifecycleProbeState.failWaitWithoutCompletion = true;
         constexpr std::array<float, 4> color = {0.06F, 0.18F, 0.32F, 1.0F};
         PresentationFrameDescriptor frameDescriptor = {color};
-        Result<PresentationFrameStatus> frameResult = presentation->present_frame(frameDescriptor);
+        Result<PresentationFrameStatus> frameResult =
+            a_useScene ? presentation->present_scene_frame(scene) : presentation->present_frame(frameDescriptor);
         D3d12PresentationProbeReport report = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwners = probe_scene_owners_for_fault(*presentation);
         Result<D3d12BackendOwnerProbeReport> backendOwnerResult = probe_d3d12_backend_owners_for_probe(*backend);
         Result<void> presentationShutdownResult = presentation->shutdown();
         Result<void> backendShutdownResult = backend->shutdown();
+        const D3d12PresentationProbeReport afterShutdown = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwnersAfterShutdown = probe_scene_owners_for_fault(*presentation);
         const Error *frameError = frameResult.try_error();
         const D3d12BackendOwnerProbeReport *backendOwners = backendOwnerResult.try_value();
         const bool errorOrderValid =
@@ -2846,15 +2990,23 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
             !frameResult && frameError != nullptr && frameError->code().domain() == "Cue.RHI.D3D12" &&
             frameError->code().value() == a_expectedCode && errorOrderValid &&
             presentation->state() == PresentationContextState::Unavailable &&
-            backend->state() == GraphicsBackendState::Unavailable && report.lastSubmittedFence == 0 &&
-            report.frameReuseFences[0] == 0 && report.frameReuseFences[1] == 0 && !report.isAcceptingFrames &&
+            backend->state() == GraphicsBackendState::Unavailable &&
+            report.lastSubmittedFence == beforeFault.lastSubmittedFence &&
+            report.frameReuseFences == beforeFault.frameReuseFences && !report.isAcceptingFrames &&
             report.hasCommandList && report.allocatorCount == k_d3d12FrameContextCount &&
             report.backBufferCount == k_d3d12SwapChainBufferCount && report.rtvCount == k_d3d12SwapChainBufferCount &&
             report.formatsMatch && report.hasSwapChain && report.hasRtvHeap && report.isRegistered &&
-            backendOwners != nullptr && backendOwners->lastSignaledFence == 0 && backendOwners->hasQueue &&
-            backendOwners->hasFence && backendOwners->hasFenceEvent && backendOwners->hasDevice &&
-            backendOwners->hasAdapter && backendOwners->hasFactory && !presentationShutdownResult &&
-            !backendShutdownResult;
+            (!a_useScene || (beforeFault.lastSubmittedFence == 1U && sceneOwnersBeforeFault.hasGeometry &&
+                             sceneOwnersBeforeFault.hasConstants && sceneOwners.hasDepthDsv &&
+                             sceneOwners.hasGeometry && sceneOwners.hasConstants && report.sceneDepthIdentity != 0U &&
+                             report.sceneDepthIdentity == beforeFault.sceneDepthIdentity)) &&
+            backendOwners != nullptr && backendOwners->lastSignaledFence == beforeFault.lastSubmittedFence &&
+            backendOwners->hasQueue && backendOwners->hasFence && backendOwners->hasFenceEvent &&
+            backendOwners->hasDevice && backendOwners->hasAdapter && backendOwners->hasFactory &&
+            !presentationShutdownResult && !backendShutdownResult &&
+            (!a_useScene ||
+             (sceneOwnersAfterShutdown.hasDepthDsv && sceneOwnersAfterShutdown.hasGeometry &&
+              sceneOwnersAfterShutdown.hasConstants && afterShutdown.sceneDepthIdentity == report.sceneDepthIdentity));
         static_cast<void>(presentation.release());
         static_cast<void>(backend.release());
         g_presentationFrameProbeState = {};
@@ -2864,14 +3016,19 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
 
     /// @brief Present 前後の Device Removal 位置ごとに原因 Code と Backend 状態を検証する
     const auto runDeviceRemovedCase = [&](bool a_removeBeforePresent, bool a_failPresent, bool a_removeBeforeSignal,
-                                          std::int64_t a_expectedCauseCode) noexcept
+                                          std::int64_t a_expectedCauseCode, bool a_useScene) noexcept
     {
+        if (a_useScene && !are_d3d12_diagnostics_allowed())
+        {
+            g_deviceRemovalProbeUnavailable = true;
+            return false;
+        }
         g_presentationFrameProbeState = {true, false, false};
         g_queueLifecycleProbeState = {true, false, false, false, false, 0};
         D3d12BackendDescriptor backendDescriptor = {
             D3d12AdapterPolicy::Warp,
-            D3d12ValidationMode::Disabled,
-            false,
+            a_useScene ? D3d12ValidationMode::Standard : D3d12ValidationMode::Disabled,
+            a_useScene,
             5'000,
         };
         Result<std::unique_ptr<D3d12Backend>> backendResult = create_d3d12_backend(backendDescriptor, a_assertContext);
@@ -2893,17 +3050,33 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
         }
 
         std::unique_ptr<PresentationContext> presentation = std::move(*presentationResult.try_value());
+        if (a_useScene && !presentation->present_scene_frame(scene))
+        {
+            static_cast<void>(presentation->shutdown());
+            static_cast<void>(backend->shutdown());
+            return false;
+        }
+        const D3d12PresentationProbeReport beforeFault = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwnersBeforeFault = probe_scene_owners_for_fault(*presentation);
         g_presentationFrameProbeState.failPresent = a_failPresent;
         g_presentationFrameProbeState.removeDeviceBeforePresent = a_removeBeforePresent;
         g_queueLifecycleProbeState.removeDeviceBeforeSignal = a_removeBeforeSignal;
         g_queueLifecycleProbeState.failSignalAfterForwarding = a_removeBeforeSignal;
         constexpr std::array<float, 4> color = {0.06F, 0.18F, 0.32F, 1.0F};
         PresentationFrameDescriptor frameDescriptor = {color};
-        Result<PresentationFrameStatus> frameResult = presentation->present_frame(frameDescriptor);
+        Result<PresentationFrameStatus> frameResult =
+            a_useScene ? presentation->present_scene_frame(scene) : presentation->present_frame(frameDescriptor);
         const bool removalProbeAvailable = !g_deviceRemovalProbeUnavailable;
         g_presentationFrameProbeState = {};
         g_queueLifecycleProbeState = {};
         D3d12PresentationProbeReport report = probe_d3d12_presentation(*presentation);
+        const SceneOwnerProbeReport sceneOwners = probe_scene_owners_for_fault(*presentation);
+        const SceneOwnerProbeReport dredSceneOwners = probe_dred_scene_owners_for_fault(*backend);
+        if (a_useScene &&
+            (!dredSceneOwners.wasDredEnabled || !dredSceneOwners.wasDredCollectionInterfaceAvailable))
+        {
+            g_deviceRemovalProbeUnavailable = true;
+        }
         Result<D3d12BackendOwnerProbeReport> backendOwnerResult = probe_d3d12_backend_owners_for_probe(*backend);
         Result<D3d12DredOwnerProbeReport> dredOwnerResult = probe_d3d12_dred_owners_for_probe(*backend);
         Result<std::uint32_t> dredCountResult = d3d12_dred_attempt_count_for_probe(*backend);
@@ -2935,32 +3108,42 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
             frameError->causes().front().code().value() == a_expectedCauseCode && recoverySignalErrorValid &&
             directPresentNativeErrorValid && regularSignalNativeErrorValid &&
             presentationStateBeforeShutdown == PresentationContextState::DeviceRemoved &&
-            backendStateBeforeShutdown == GraphicsBackendState::DeviceRemoved && report.lastSubmittedFence == 0 &&
-            report.frameReuseFences[0] == 0 && report.frameReuseFences[1] == 0 && !report.isAcceptingFrames &&
+            backendStateBeforeShutdown == GraphicsBackendState::DeviceRemoved &&
+            report.lastSubmittedFence == beforeFault.lastSubmittedFence &&
+            report.frameReuseFences == beforeFault.frameReuseFences && !report.isAcceptingFrames &&
             report.hasCommandList && report.hasSwapChain && report.hasRtvHeap && report.isRegistered &&
-            backendOwners != nullptr && backendOwners->lastSignaledFence == 0 && backendOwners->hasQueue &&
-            backendOwners->hasFence && backendOwners->hasFenceEvent && dredCountResult &&
+            (!a_useScene || (beforeFault.lastSubmittedFence == 1U && sceneOwnersBeforeFault.hasGeometry &&
+                             sceneOwnersBeforeFault.hasConstants && sceneOwners.hasDepthDsv &&
+                             sceneOwners.hasGeometry && sceneOwners.hasConstants && report.sceneDepthIdentity != 0U &&
+                             report.sceneDepthIdentity == beforeFault.sceneDepthIdentity)) &&
+            backendOwners != nullptr && backendOwners->lastSignaledFence == beforeFault.lastSubmittedFence &&
+            backendOwners->hasQueue && backendOwners->hasFence && backendOwners->hasFenceEvent && dredCountResult &&
             *dredCountResult.try_value() == 1 && dredOwners != nullptr && dredOwners->hasCommandList &&
             dredOwners->allocatorCount == 2 && dredOwners->backBufferCount == 2 && dredOwners->rtvCount == 2 &&
             dredOwners->hasSwapChain && dredOwners->hasRtvHeap && dredOwners->hasQueue && dredOwners->hasFence &&
-            dredOwners->hasFenceEvent;
+            dredOwners->hasFenceEvent &&
+            (!a_useScene || (dredSceneOwners.hasDepthDsv && dredSceneOwners.hasGeometry &&
+                             dredSceneOwners.hasConstants && dredSceneOwners.wasDredEnabled &&
+                             dredSceneOwners.wasDredCollectionInterfaceAvailable));
         Result<void> presentationShutdownResult = presentation->shutdown();
+        const D3d12PresentationProbeReport afterShutdown = probe_d3d12_presentation(*presentation);
         presentation.reset();
         Result<void> backendShutdownResult = backend->shutdown();
-        const bool cleanupValid =
-            presentationShutdownResult && backendShutdownResult && backend->state() == GraphicsBackendState::Shutdown;
+        const bool cleanupValid = presentationShutdownResult && backendShutdownResult &&
+                                  backend->state() == GraphicsBackendState::Shutdown &&
+                                  (!a_useScene || !afterShutdown.hasSceneNativeObjects);
         backend.reset();
         return frameValid && cleanupValid;
     };
 
     if (a_mode == D3d12PresentFailureProbeMode::PresentUnavailable)
     {
-        return runUnavailableCase(true, 98);
+        return runUnavailableCase(true, 98, false);
     }
 
     if (a_mode == D3d12PresentFailureProbeMode::BeginFrameUnavailable)
     {
-        return runBeginFrameUnavailableCase();
+        return runBeginFrameUnavailableCase(false);
     }
 
     if (a_mode == D3d12PresentFailureProbeMode::CloseFrameDeviceRemoved)
@@ -2970,22 +3153,37 @@ bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, 
 
     if (a_mode == D3d12PresentFailureProbeMode::SignalUnavailable)
     {
-        return runUnavailableCase(false, 46);
+        return runUnavailableCase(false, 46, false);
     }
 
     if (a_mode == D3d12PresentFailureProbeMode::DirectPresentDeviceRemoved)
     {
-        return runDeviceRemovedCase(true, false, false, 98);
+        return runDeviceRemovedCase(true, false, false, 98, false);
     }
 
     if (a_mode == D3d12PresentFailureProbeMode::RecoverySignalDeviceRemoved)
     {
-        return runDeviceRemovedCase(false, true, true, 98);
+        return runDeviceRemovedCase(false, true, true, 98, false);
     }
 
     if (a_mode == D3d12PresentFailureProbeMode::RegularSignalDeviceRemoved)
     {
-        return runDeviceRemovedCase(false, false, true, 46);
+        return runDeviceRemovedCase(false, false, true, 46, false);
+    }
+
+    if (a_mode == D3d12PresentFailureProbeMode::SceneBeginFrameUnavailable)
+    {
+        return runBeginFrameUnavailableCase(true);
+    }
+
+    if (a_mode == D3d12PresentFailureProbeMode::SceneSignalUnavailable)
+    {
+        return runUnavailableCase(false, 46, true);
+    }
+
+    if (a_mode == D3d12PresentFailureProbeMode::SceneDirectPresentDeviceRemoved)
+    {
+        return runDeviceRemovedCase(true, false, false, 98, true);
     }
 
     return runCase(true, false, false, 98) && runCase(false, true, false, 46) && runCase(true, true, true, 98);
@@ -2995,6 +3193,7 @@ bool was_d3d12_present_device_removal_probe_unavailable() noexcept
 {
     return g_deviceRemovalProbeUnavailable;
 }
+#endif
 
 bool verify_d3d12_resize_unavailable_retention_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
                                                          std::uint32_t a_height,
