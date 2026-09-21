@@ -83,8 +83,10 @@ Process間LeaseとStaging Publishで共有Rootの並行Restoreを直列化する
 
 Install／Update／Rollback／Uninstall／Registry RecoveryのOperation JournalはVersion付きCanonical JSONとし、
 Operation ID、Kind、単調なStage、Worker IdentityとKind別Memberを必須化する。通常操作はExpected Registry
-Revisionと対象Identity／Digest、Registry Recoveryは破損Registry Evidenceと検証済み候補Identity／Digest配列を
-保持する。ADR-0030でKind別のStage列挙、許可遷移、各Stageが証明する耐久副作用を固定し、最後の共有状態Publishを
+Generation ID／Revisionと対象Identity／Digestを照合する。Registry Recoveryはこの照合から除外し、破損Registry
+Evidenceと検証済み候補Identity／Digest配列を保持する。Publish直前にもSource Evidenceを再照合し、Recovery
+Operation IDを新しいGeneration ID、Revision 1として再構築する。ADR-0030でKind別のStage列挙、許可遷移、
+各Stageが証明する耐久副作用を固定し、最後の共有状態Publishを
 最終Stageとする。Cleanup後のJournal不在を完了状態とし、削除後の`completed` Stageは定義しない。
 未知Schema／Member、列挙外Stage、不正遷移、旧Worker不一致、破損はFail-closedでEvidenceへ隔離し、Migrationは
 専用Issueで明示する。

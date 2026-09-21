@@ -150,7 +150,8 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
 - `Versions`配下はInstall完了後にImmutableとする
 - Project、Recent Project、Editor Preference、Cache、Build ArtifactはInstall Root外に置き、
   Uninstall対象にしない
-- RegistryへMachine-wideな所有権を作らず、初期版は`schemaVersion: 1`、単調増加`revision`、
+- RegistryへMachine-wideな所有権を作らず、初期版は`schemaVersion: 1`、`generationId`、Generation内で
+  単調増加する`revision`、
   Version Entryを持つCanonical JSONで保持する。Readerは対応外Majorと未知MemberをFail-closedで拒否し、
   新しいSchemaを旧Writerで上書きしない。破損時だけVersion Manifest、Payload完了Marker、
   Probe成功Markerの三つが同じBundle／Manifest Digestを示すVersionからRegistry v1を明示Recoveryし、
@@ -190,28 +191,36 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
 Manifest検証済みVersion Rootの読取とRelease Tool自己診断だけを行い、RegistryやProject状態を変更しない。
 
 Install、Update、Rollback、Uninstall、Registry RecoveryはProcess間Control Lockの排他Leaseを
-操作開始から最終Registry Publishまで保持する。Lease取得後にRegistryを再読込し、単調増加する
-Registry Revisionと期待Revisionを照合してから変更する。別Processが更新済みなら古いSnapshotを
-上書きせず再試行またはConflict Errorとする。Abandoned WriterはOperation JournalとVersion Directoryを
-再検証してからRecoveryする。Atomic ReplaceだけをProcess間排他の代用にしない。
+操作開始から最終Registry Publishまで保持する。通常操作はLease取得後にRegistryを再読込し、
+`generationId`と単調増加する`revision`の組を期待値と照合してから変更する。別Processが更新済みなら
+古いSnapshotを上書きせず再試行またはConflict Errorとする。Registry Recoveryは破損または不在のRegistryに
+比較可能なRevisionがないため、この期待値照合から除外し、後述のSource Evidence照合を使用する。
+Abandoned WriterはOperation JournalとVersion Directoryを再検証してからRecoveryする。Atomic Replaceだけを
+Process間排他の代用にしない。
 
 Operation Journalは`schemaVersion: 1`のCanonical JSONとし、全KindでOperation ID、Operation Kind、単調な
-Stage、Worker Identityを必須Memberとして記録する。`install`／`update`はExpected Registry Revision、対象
-Version／Bundle Identity、Manifest Digest、`rollback`はExpected Registry Revision、選択Version Identityと
-Manifest Digest、`uninstall`はExpected Registry Revision、対象Version IdentityとManifest DigestをKind別必須
+Stage、Worker Identityを必須Memberとして記録する。`install`／`update`はExpected Registry Generation ID／
+Revision、対象Version／Bundle Identity、Manifest Digest、`rollback`はExpected Registry Generation ID／Revision、
+選択Version IdentityとManifest Digest、`uninstall`はExpected Registry Generation ID／Revision、対象Version
+IdentityとManifest DigestをKind別必須
 Memberとする。Reader／Workerは対応外Schema、未知Member、欠落Member、非Canonical表現、後退または不正なStage
 遷移をFail-closedで拒否し、旧Writerが新Schemaを上書きしない。各Stageは耐久書込みとAtomic Replace後にだけ
 進め、Workerは自身が対応するSchemaとOperation Kindだけを再開する。破損または非互換JournalはEvidenceとして
 Quarantineし、Payload／Registryを推測で変更しない。意味変更と移行は専用Issueで新Schemaと明示Migrationを
 定義し、暗黙Upgradeしない。
 
-`registryRecovery`はExpected Registry Revision、単一Version／Bundle Identity、単一Manifest Digestを持たない。
+`registryRecovery`はExpected Registry Generation ID／Revision、単一Version／Bundle Identity、単一Manifest
+Digestを持たない。
 代わりに`sourceRegistryEvidence`を`prepared`から必須とする。既存破損Fileは`kind: corrupt`、退避Evidence
 Identity、Size、SHA-256を記録し、Fileが存在しない場合は`kind: missing`を記録するCanonical Discriminated
 Objectとする。
 `candidatesValidated`以降は検証済み候補をVersion Identity、Bundle Identity、Manifest Digest、Payload完了Marker
 Digest、Probe成功Marker DigestのCanonical配列としてJournalへ耐久記録する。Recovery再開時は候補配列と現行
-Payload／Markerを全件再検証し、一致しない場合は再構築を進めない。
+Payload／Markerを全件再検証し、一致しない場合は再構築を進めない。Registry Publish直前にも排他Lease下で
+現行Registryを再読込し、`kind: corrupt`では退避前ByteのSize／SHA-256、`kind: missing`では不在が
+`sourceRegistryEvidence`と一致する場合だけ続行する。Valid Registryへの置換、別の破損Byte、File出現を検出したら
+Conflict Errorとして中止する。再構築RegistryはRecovery Operation IDを新しい`generationId`、`revision: 1`とし、
+破損Registryから旧Revisionを推測しない。以後の通常操作はこの新しいGeneration ID／Revision組を期待値に使う。
 
 Journal v1のStageは「最後に完了した耐久副作用」を表し、次の表以外の値と遷移を許可しない。
 
