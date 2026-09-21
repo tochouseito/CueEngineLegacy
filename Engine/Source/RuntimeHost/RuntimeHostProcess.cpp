@@ -812,17 +812,8 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
     bool wasWindowCloseRequested = false;
     bool hasRuntimeFrameFailure = false;
     bool hasLoggedPresentationFrame = false;
-
 #if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
-    if (a_options.isPackageScenePixelSmoke &&
-        !cue::arm_d3d12_scene_pixel_capture_for_probe(*presentation))
-    {
-        frameError.emplace(make_scene_pixel_smoke_error(
-            a_assertContext, "Runtime Package Scene pixel capture could not be armed"));
-        loopErrorMessage = "Runtime Package Scene pixel capture setup failed";
-        loopErrorExitCode = k_scenePixelSmokeFailed;
-        isShutdownRequested = true;
-    }
+    bool isScenePixelCaptureArmed = false;
 #endif
 
     while (!isShutdownRequested)
@@ -994,6 +985,23 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
+
+#if defined(CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT) && CUE_RUNTIME_SCENE_PIXEL_SMOKE_SUPPORT
+        // 初回Pumpで届くDPI/Resizeを反映したBack Bufferに対してのみFootprintを作る
+        if (a_options.isPackageScenePixelSmoke && !isScenePixelCaptureArmed)
+        {
+            if (!cue::arm_d3d12_scene_pixel_capture_for_probe(*presentation))
+            {
+                frameError.emplace(make_scene_pixel_smoke_error(
+                    a_assertContext, "Runtime Package Scene pixel capture could not be armed"));
+                loopErrorMessage = "Runtime Package Scene pixel capture setup failed";
+                loopErrorExitCode = k_scenePixelSmokeFailed;
+                break;
+            }
+
+            isScenePixelCaptureArmed = true;
+        }
+#endif
 
         cue::Result<cue::runtime_host::RuntimePresentationFrame> presentationFrame =
             cue::runtime_host::make_runtime_presentation_frame(application->render_snapshot(), presentation->width(),
