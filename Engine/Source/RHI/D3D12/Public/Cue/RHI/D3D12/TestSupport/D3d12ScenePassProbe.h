@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace cue
 {
 class AssertContext;
@@ -32,5 +34,6 @@ enum class D3d12SceneProbeResult
 /// @brief GPU上の固定Cube PassをOffscreen描画して色、Depth、裏面Cullの指定された画素を検証する
 [[nodiscard]] D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext,
                                                                        D3d12ScenePixelCase a_case,
-                                                                       D3d12SceneProbeAdapter a_adapter) noexcept;
+                                                                       D3d12SceneProbeAdapter a_adapter,
+                                                                       std::uint32_t a_surfaceSize) noexcept;
 } // namespace cue

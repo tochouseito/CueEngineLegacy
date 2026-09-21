@@ -16,8 +16,6 @@
 
 namespace
 {
-constexpr std::uint32_t k_pixelSurfaceSize = 64U;
-
 struct EventOwner final
 {
     HANDLE handle = nullptr;
@@ -42,9 +40,13 @@ struct EventOwner final
 namespace cue
 {
 D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext,
-                                                         D3d12ScenePixelCase a_case,
-                                                         D3d12SceneProbeAdapter a_adapter) noexcept
+                                                         D3d12ScenePixelCase a_case, D3d12SceneProbeAdapter a_adapter,
+                                                         std::uint32_t a_surfaceSize) noexcept
 {
+    if (a_surfaceSize < 32U || a_surfaceSize > 256U)
+    {
+        return D3d12SceneProbeResult::Failed;
+    }
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf()))))
     {
@@ -113,8 +115,8 @@ D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_
 
     D3D12_RESOURCE_DESC textureDescriptor = {};
     textureDescriptor.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    textureDescriptor.Width = k_pixelSurfaceSize;
-    textureDescriptor.Height = k_pixelSurfaceSize;
+    textureDescriptor.Width = a_surfaceSize;
+    textureDescriptor.Height = a_surfaceSize;
     textureDescriptor.DepthOrArraySize = 1U;
     textureDescriptor.MipLevels = 1U;
     textureDescriptor.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -175,8 +177,7 @@ D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_
     }
 
     D3d12ScenePass pass;
-    if (!pass.initialize(device.Get(), textureDescriptor.Format, k_pixelSurfaceSize, k_pixelSurfaceSize,
-                         a_assertContext))
+    if (!pass.initialize(device.Get(), textureDescriptor.Format, a_surfaceSize, a_surfaceSize, a_assertContext))
     {
         return D3d12SceneProbeResult::Failed;
     }
@@ -203,7 +204,7 @@ D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_
     const PresentationSceneFrameDescriptor scene = {
         {0.0F, 0.0F, 0.0F, 1.0F}, identity, std::span<const PresentationSceneCube>(firstCube, cubeCount)};
     commandList->ClearRenderTargetView(rtv, scene.clearColor.data(), 0U, nullptr);
-    pass.record(commandList.Get(), rtv, 0U, k_pixelSurfaceSize, k_pixelSurfaceSize, scene);
+    pass.record(commandList.Get(), rtv, 0U, a_surfaceSize, a_surfaceSize, scene);
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = renderTarget.Get();
@@ -231,7 +232,7 @@ D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_
         stop_without_gpu_completion();
     }
     const std::size_t pixelOffset =
-        footprint.Offset + (k_pixelSurfaceSize / 2U) * footprint.Footprint.RowPitch + (k_pixelSurfaceSize / 2U) * 4U;
+        footprint.Offset + (a_surfaceSize / 2U) * footprint.Footprint.RowPitch + (a_surfaceSize / 2U) * 4U;
     const std::size_t cornerOffset = footprint.Offset + 2U * footprint.Footprint.RowPitch + 2U * 4U;
     const D3D12_RANGE readRange = {cornerOffset, pixelOffset + 4U};
     void *mapped = nullptr;

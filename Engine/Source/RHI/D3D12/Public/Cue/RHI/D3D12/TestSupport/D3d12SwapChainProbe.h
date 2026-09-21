@@ -23,6 +23,13 @@ enum class D3d12PresentFailureProbeMode
     RegularSignalDeviceRemoved,
 };
 
+enum class D3d12ResizeScenePixelResult
+{
+    Passed,
+    Failed,
+    HardwareUnavailable,
+};
+
 struct D3d12SwapChainProbeReport final
 {
     std::uint32_t width;
@@ -55,6 +62,8 @@ struct D3d12PresentationProbeReport final
     std::uint32_t sceneDepthWidth;
     std::uint32_t sceneDepthHeight;
     bool hasSceneDepthDsv;
+    std::uintptr_t sceneDepthIdentity;
+    bool hasSceneNativeObjects;
 };
 
 struct D3d12BackendOwnerProbeReport final
@@ -122,6 +131,16 @@ struct D3d12DredOwnerProbeReport final
 [[nodiscard]] bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
                                                               std::uint32_t a_height,
                                                               AssertContext &a_assertContext) noexcept;
+
+/// @brief Resize後のDepthまたはDSV生成失敗で部分Scene Resourceを解放し、次Frameを再試行できることを検証する
+[[nodiscard]] bool verify_d3d12_scene_resize_creation_failure_for_probe(const void *a_nativeWindow,
+                                                                        std::uint32_t a_width, std::uint32_t a_height,
+                                                                        AssertContext &a_assertContext) noexcept;
+
+/// @brief 実PresentationのScene画素とDepthをResize前後にWARPまたはHardwareで検証する
+[[nodiscard]] D3d12ResizeScenePixelResult verify_d3d12_scene_resize_pixel_for_probe(
+    const void *a_nativeWindow, std::uint32_t a_width, std::uint32_t a_height, bool a_useHardware,
+    AssertContext &a_assertContext) noexcept;
 
 /// @brief Terminal Signal Errorで停止したProduction PresentationをResizeが再開しないことを検証する
 [[nodiscard]] bool verify_d3d12_terminal_resize_rejection_for_probe(const void *a_nativeWindow, std::uint32_t a_width,

@@ -130,6 +130,7 @@ target_compile_definitions(
         $<$<CONFIG:Debug>:CUE_D3D12_DIAGNOSTICS_ALLOWED=1>
         $<$<CONFIG:Development>:CUE_D3D12_DIAGNOSTICS_ALLOWED=1>
         $<$<CONFIG:Release>:CUE_D3D12_DIAGNOSTICS_ALLOWED=0>
+        CUE_D3D12_TESTING=$<BOOL:${BUILD_TESTING}>
         NOMINMAX
         WIN32_LEAN_AND_MEAN
 )

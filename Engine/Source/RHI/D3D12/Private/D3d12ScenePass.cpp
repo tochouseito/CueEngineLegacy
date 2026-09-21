@@ -94,6 +94,13 @@ D3d12ScenePass::~D3d12ScenePass() noexcept
     release();
 }
 
+#if CUE_D3D12_TESTING
+void D3d12ScenePass::set_creation_fault_for_probe(D3d12SceneCreationFault a_fault) noexcept
+{
+    m_creationFault = a_fault;
+}
+#endif
+
 Result<void> D3d12ScenePass::initialize(ID3D12Device *a_device, DXGI_FORMAT a_format, std::uint32_t a_width,
                                         std::uint32_t a_height, const AssertContext &a_assertContext) noexcept
 {
@@ -183,9 +190,18 @@ Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMA
     depthClear.DepthStencil.Depth = 1.0F;
     D3D12_HEAP_PROPERTIES depthHeap = {};
     depthHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    result = a_device->CreateCommittedResource(&depthHeap, D3D12_HEAP_FLAG_NONE, &depthDescriptor,
-                                               D3D12_RESOURCE_STATE_DEPTH_WRITE, &depthClear,
-                                               IID_PPV_ARGS(m_depth.GetAddressOf()));
+#if CUE_D3D12_TESTING
+    if (m_creationFault == D3d12SceneCreationFault::Depth)
+    {
+        result = E_OUTOFMEMORY;
+    }
+    else
+#endif
+    {
+        result = a_device->CreateCommittedResource(&depthHeap, D3D12_HEAP_FLAG_NONE, &depthDescriptor,
+                                                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &depthClear,
+                                                   IID_PPV_ARGS(m_depth.GetAddressOf()));
+    }
     if (FAILED(result))
     {
         return Result<void>::failure(d3d12_private::make_native_error(a_assertContext, k_sceneDepthCreationFailed,
@@ -194,7 +210,16 @@ Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMA
     D3D12_DESCRIPTOR_HEAP_DESC dsvDescriptor = {};
     dsvDescriptor.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     dsvDescriptor.NumDescriptors = 1U;
-    result = a_device->CreateDescriptorHeap(&dsvDescriptor, IID_PPV_ARGS(m_dsvHeap.GetAddressOf()));
+#if CUE_D3D12_TESTING
+    if (m_creationFault == D3d12SceneCreationFault::DsvHeap)
+    {
+        result = E_OUTOFMEMORY;
+    }
+    else
+#endif
+    {
+        result = a_device->CreateDescriptorHeap(&dsvDescriptor, IID_PPV_ARGS(m_dsvHeap.GetAddressOf()));
+    }
     if (FAILED(result))
     {
         return Result<void>::failure(d3d12_private::make_native_error(a_assertContext, k_sceneDsvHeapCreationFailed,
@@ -314,6 +339,11 @@ std::array<std::uint32_t, 2> D3d12ScenePass::depth_extent() const noexcept
 bool D3d12ScenePass::has_depth_dsv() const noexcept
 {
     return m_depth && m_dsvHeap;
+}
+
+std::uintptr_t D3d12ScenePass::depth_identity_for_probe() const noexcept
+{
+    return reinterpret_cast<std::uintptr_t>(m_depth.Get());
 }
 
 void D3d12ScenePass::record(ID3D12GraphicsCommandList *a_commandList, D3D12_CPU_DESCRIPTOR_HANDLE a_rtv,

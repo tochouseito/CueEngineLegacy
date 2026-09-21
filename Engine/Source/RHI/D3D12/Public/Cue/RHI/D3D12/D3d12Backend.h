@@ -46,6 +46,7 @@ class D3d12WindowsPresentationAccess;
 struct D3d12BackendOwnerProbeReport;
 struct D3d12DredOwnerProbeReport;
 enum class D3d12PresentFailureProbeMode;
+enum class D3d12ResizeScenePixelResult;
 
 /// @brief D3D12固有のBackend型識別境界
 ///
@@ -68,12 +69,16 @@ class D3d12Backend : public GraphicsBackend
     friend Result<D3d12BackendOwnerProbeReport> probe_d3d12_backend_owners_for_probe(D3d12Backend &) noexcept;
     friend Result<D3d12DredOwnerProbeReport> probe_d3d12_dred_owners_for_probe(D3d12Backend &) noexcept;
     friend bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *, std::uint32_t, std::uint32_t,
-                                                            AssertContext &) noexcept;
+                                                           AssertContext &) noexcept;
+    friend bool verify_d3d12_scene_resize_creation_failure_for_probe(const void *, std::uint32_t, std::uint32_t,
+                                                                     AssertContext &) noexcept;
+    friend D3d12ResizeScenePixelResult verify_d3d12_scene_resize_pixel_for_probe(const void *, std::uint32_t,
+                                                                                 std::uint32_t, bool,
+                                                                                 AssertContext &) noexcept;
     friend bool verify_d3d12_terminal_resize_rejection_for_probe(const void *, std::uint32_t, std::uint32_t,
-                                                                  AssertContext &) noexcept;
+                                                                 AssertContext &) noexcept;
     friend bool verify_d3d12_present_signal_recovery_for_probe(const void *, std::uint32_t, std::uint32_t,
-                                                                D3d12PresentFailureProbeMode,
-                                                                AssertContext &) noexcept;
+                                                               D3d12PresentFailureProbeMode, AssertContext &) noexcept;
     friend bool verify_d3d12_resize_unavailable_retention_for_probe(const void *, std::uint32_t, std::uint32_t,
                                                                     AssertContext &) noexcept;
 
