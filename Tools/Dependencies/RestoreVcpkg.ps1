@@ -537,9 +537,10 @@ try
 {
     if ($rootMode)
     {
-        if (Test-Path -LiteralPath $finalDependencyRoot -PathType Container)
+        if (Test-Path -LiteralPath $finalDependencyRoot)
         {
-            if (Test-CompletedDependencyRoot -Root $finalDependencyRoot)
+            if ((Test-Path -LiteralPath $finalDependencyRoot -PathType Container) -and
+                (Test-CompletedDependencyRoot -Root $finalDependencyRoot))
             {
                 return
             }

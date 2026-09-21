@@ -137,3 +137,49 @@ finally
         Remove-Item -LiteralPath $quarantineParent -Recurse -Force
     }
 }
+
+$fileCollisionParent = Join-Path ([IO.Path]::GetTempPath()) `
+    "CueEngine-RestoreContract-FileCollision-$([Guid]::NewGuid().ToString('N'))"
+$fileCollisionDependencyRoot = Join-Path $fileCollisionParent $dependencyId
+$fileCollisionTool = Join-Path $fileCollisionDependencyRoot "Tool\vcpkg"
+$fileCollisionInstall = Join-Path $fileCollisionDependencyRoot "Installed"
+try
+{
+    New-Item -ItemType Directory -Path $fileCollisionParent | Out-Null
+    [IO.File]::WriteAllText($fileCollisionDependencyRoot, "invalid dependency root")
+    $failingExecutable = Join-Path ([Environment]::GetFolderPath('System')) "where.exe"
+    $output = (& $powerShell -NoProfile -File $restoreScript `
+        -ToolRoot $fileCollisionTool `
+        -InstallRoot $fileCollisionInstall `
+        -GitExecutable $failingExecutable `
+        -InstalledVersionRoot $versionRoot `
+        -DependencyRootId $dependencyId `
+        -DependencyDefinitionId $definitionId `
+        -DependencyBuildIdentityJson $buildIdentity 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0)
+    {
+        throw "Restore with a file collision unexpectedly succeeded."
+    }
+    if (Test-Path -LiteralPath $fileCollisionDependencyRoot)
+    {
+        throw "File collision remained at the final Dependency Root path."
+    }
+    $quarantinedFiles = @(Get-ChildItem -LiteralPath $fileCollisionParent -File `
+        -Filter ".invalid-$dependencyId-*")
+    if ($quarantinedFiles.Count -ne 1)
+    {
+        throw "File collision was not preserved in exactly one quarantine path. Output: $output"
+    }
+    $staging = @(Get-ChildItem -LiteralPath $fileCollisionParent -Directory -Filter ".staging-*")
+    if ($staging.Count -ne 0)
+    {
+        throw "Failed Dependency staging after a file collision was not cleaned up."
+    }
+}
+finally
+{
+    if (Test-Path -LiteralPath $fileCollisionParent -PathType Container)
+    {
+        Remove-Item -LiteralPath $fileCollisionParent -Recurse -Force
+    }
+}
