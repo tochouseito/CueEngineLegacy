@@ -32,9 +32,12 @@ Repository snapshot
   -> bundle validation
   -> per-user install staging
   -> immutable version directory
+  -> Release Tool launch probe
   -> installed-version registry
   -> Project Hub version selection
-  -> Editor / project build using one engine root
+  -> explicit Engine Install Root handoff
+  -> external dependency / project build workspace
+  -> configuration-matched Editor Play / Shipping build
 ```
 
 更新はSide-by-side Installで行い、既存Versionを上書きしない。Rollbackは以前のVersionを
@@ -45,7 +48,7 @@ Source Asset、Build Artifactを削除しない。
 
 含めるもの:
 
-- Release Project Hub、Editor、開発用RuntimeHost、First-party Installer Tool
+- Release Project Hub、Editor、Release開発用RuntimeHost、First-party Installer Tool／Version外Worker
 - Project Buildに必要なEngine Source、HLSL、CMake定義、Template
 - VC++ Runtime不足時にも診断できるFirst-party静的Bootstrapと`Tools/Dependencies/RestoreVcpkg.ps1`
 - `ThirdParty`のvcpkg Manifest／Configuration／Tool Pin、Notice、License Copy
@@ -63,14 +66,20 @@ VC++ Runtimeは存在検査と案内だけをM18に含める。Redistributable B
 未署名Bundleは同一開発者のLocal Fixed Driveから明示許可された入力だけを受け付け、真正性ではなく
 偶発破損の検出だけを保証する。
 
+Installed VersionはManifest Inventoryを含めて不変とする。Dependency RestoreのTool／Install Tree、
+Project Build Tree、Debug／DevelopmentのRuntimeHostはVersion外のDependency／Project Workspaceへ生成する。
+Project Hubは検証済みInstall RootをEditorへ明示的に渡し、Installed ModeでBuild時埋込みのRepository Pathを
+使用しない。`.git`を含めない代わりにDistribution ManifestのEngine Source RevisionとSource Inventory Hashを
+Shipping Provenanceとして使用する。
+
 ## Implementation Issues to Create
 
-1. #375 Distribution Manifest v1、Path／Role／Hash検証、Source Allowlistを実装する
-2. #376 Release Tool／Source SDK／Third-party NoticeをStagingからAtomic Publishする
-3. #377 Process間Writer排他を持つPer-user Install Transaction、Immutable Version Registry、Recoveryを実装する
-4. #378 共通Version Execution Leaseを持つSide-by-side Update、Version再選択Rollback、安全なUninstallを実装する
-5. #379 Project HubへInstalled Engine一覧、Project Compatibility、Version指定起動を接続する
-6. #380 VC++ Runtime／Toolchain Prerequisite、License Inventory、配布禁止File監査を実装する
+1. #375 Canonical Identity、Source Revision／Inventoryを持つDistribution Manifest v1とAllowlistを実装する
+2. #376 Release Tool／Source SDK／Third-party Noticeを公開し、Dependency出力をVersion外へ分離する
+3. #377 Process間Writer排他、Schema v1 Registry、Probe-before-publish、Recoveryを実装する
+4. #378 Version外Workerと共通Execution LeaseでUpdate、Rollback、安全な自己Uninstallを実装する
+5. #379 Install Root明示引渡し、Configuration一致Host、`.git`非依存ProvenanceをProject Hub／Editorへ接続する
+6. #380 VC++ Runtime／Git／Toolchain Prerequisite、License Inventory、配布禁止File監査を実装する
 7. #381 M18 Completion GateでProcess E2E、3構成Build／CTest、失敗時保全を検証する
 
 各IssueはSまたはMに限定し、永続ManifestとInstall RegistryのVersionは先行Issueで固定する。
@@ -80,9 +89,13 @@ Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混�
 
 - Update失敗で旧Version、Project、User Dataを変更しない
 - Registryだけが先行して未完成Versionを選択可能にしない
+- 新Schema Registryを旧Writerが上書きせず、破損RecoveryがVersion Inventoryを再検証する
 - CLIとProject Hubの並行Install／UninstallでRegistry Updateを失わない
 - 起動検証とUninstallの間にTOCTOUでVersion Directoryを回収しない
+- 対象Version自身のProcessから自己Uninstallして実行中Fileを削除しない
 - 異なるEngine VersionのDLL／Library／Third-party Install Treeを一つのProcessへ混在させない
+- Debug／Development Game ModuleをRelease RuntimeHostへLoadしない
+- Dependency Restore、Project Build、Shipping Provenance生成でImmutable Versionを書き換えない
 - Source Allowlistの拡大でTest、Credential、Build出力を配布しない
 - Noticeの存在だけでなく、採用Versionと実Payloadが一致することを検証する
 - Unsigned Local Bundleを公開署名済みまたはPublic Distribution Readyと表示しない

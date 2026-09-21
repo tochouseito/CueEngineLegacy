@@ -34,8 +34,10 @@ M17の`ShippingProduct`はプレイヤー向け製品のTrust契約であり、M
   Compatibility Metadataは既存の安定接続契約として維持する。延期するのはEngine C++
   `.lib`のBinary SDKとPlugin SDKであり、配布済みDynamic RuntimeHostとSource SDKから
   BuildしたGame Moduleの接続契約はM18でも検証する
-- Debug／Development／ReleaseはProject Buildの選択肢として維持するが、配布するTool
-  自体はReleaseとする
+- Debug／Development／ReleaseはProject Buildの選択肢として維持するが、配布する固定Tool
+  自体はReleaseとする。Game Moduleを動的Loadする`CueRuntimeHost.exe`はModuleとConfigurationを
+  一致させる必要があるため、Debug／Development用HostはInstalled Source SDKからProject Build Rootへ
+  Buildして使用する。Release Hostへ異なるConfigurationのModuleをLoadしない
 - `CueRuntimeHost.exe`は開発用Dynamic実行に必要な場合だけTool Payloadへ含める。
   プレイヤー向け`CueGameProduct.exe`とRuntime PackageはDeveloper Source SDKへ含めない
 - Installed CMake Package、`find_package(CueEngine)`、Plugin SDK、安定Binary ABIは、
@@ -72,9 +74,15 @@ CueEngine-<version>-windows-x64/
 ```
 
 `CueEngineDistribution.json`はVersion付きCanonical JSONとし、Bundle Identity、Engine
-Version、Host OS／Architecture、最低Toolchain、Entry Point、全Payload FileのRole、
-Size、SHA-256を記録する。Manifest自身、署名用予約File、DirectoryはInventoryへ含めない。
+Version、Engine Source Revision、Source Inventory Hash、Dependency Set ID、Host OS／Architecture、
+最低Toolchain、Entry Point、全Payload FileのRole、Size、SHA-256を記録する。Manifest自身、
+署名用予約File、DirectoryはInventoryへ含めない。
 未知Role、重複Path、非Canonical Path、Root外参照、未登録File、Size／Hash不一致を拒否する。
+
+Engine Versionは先頭Zeroを持たない`MAJOR.MINOR.PATCH`のCanonical ASCIIに限定し、Bundle IDは
+lowercase canonical UUID v4に固定する。Version Directory名は検証済み値から
+`v<MAJOR>.<MINOR>.<PATCH>--<uuid>`として生成し、入力文字列をPathへ直接連結しない。生成後のPathを
+Canonical化し、`Versions`直下の単一要素であることを再検証する。
 
 Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし、全Inventoryを
 検証した後だけBundleを公開する。Repository Rootからの場当たり的な再帰Copyは行わない。
@@ -87,12 +95,17 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
   `CMake/CueVcpkgToolchain.cmake`の診断が指す明示Restore Entry PointをBundle内で有効にする
 - vcpkg Manifest、Registry Baseline、Tool Pinは配布するが、`ThirdParty/.tools`、
   `ThirdParty/vcpkg_installed`、Download Cacheは配布しない
-- 初回Buildは既存の明示Dependency Restoreを使用し、取得元、Version、Hash、Licenseを
-  Repositoryと同じControl Planeで検証する
+- 初回Buildは明示Dependency Restoreを使用し、取得元、Version、Hash、LicenseをRepositoryと同じ
+  Control Planeで検証する。Restore Scriptは`Dependency Set ID`で分離した明示`Tool Root`と
+  `Install Root`を必須入力とし、Installed Version配下への出力を拒否する
+- vcpkg Tool、Download、Install Treeは`%LOCALAPPDATA%/CueEngine/Dependencies/<dependency-set-id>/`
+  配下またはProjectが明示した外部Workspaceへ配置し、Immutable VersionのInventoryを変更しない。
+  CMake Toolchainへ`VCPKG_ROOT`と`VCPKG_INSTALLED_DIR`を明示的に渡す
 - 新しいLibrary、Installer Framework、Archive Library、署名ToolをM18の暗黙依存にしない。
   導入が必要なら対象、用途、License、Version、取得元、配布影響を提示してUser承認を得る
-- Windows SDK、CMake、MSVC、vcpkg ToolはDeveloper PrerequisiteとしてVersion診断する。
-  Toolchain SourceやBinaryをEngine Bundleへ複製しない
+- Windows SDK、CMake、MSVC、Git for Windows 2.44.0以上はDeveloper PrerequisiteとしてVersion診断する。
+  vcpkg ToolはPin済みRestoreで外部Dependency Rootへ取得する。Toolchain SourceやBinaryをEngine
+  Bundleへ複製しない
 
 ### Install Root and Ownership
 
@@ -100,21 +113,30 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 
 ```text
 %LOCALAPPDATA%/CueEngine/
-  Versions/<engine-version>-<bundle-id>/
+  Versions/v<MAJOR>.<MINOR>.<PATCH>--<uuid>/
   State/InstalledVersions.json
   Operations/
+    Workers/<worker-version>/CueEngineInstallWorker.exe
+  Dependencies/<dependency-set-id>/
   Logs/
 ```
 
 - `Versions`配下はInstall完了後にImmutableとする
 - Project、Recent Project、Editor Preference、Cache、Build ArtifactはInstall Root外に置き、
   Uninstall対象にしない
-- RegistryへMachine-wideな所有権を作らず、初期版はVersion RegistryをCanonical JSONで保持する
+- RegistryへMachine-wideな所有権を作らず、初期版は`schemaVersion: 1`、単調増加`revision`、
+  Version Entryを持つCanonical JSONで保持する。Readerは対応外Majorと未知MemberをFail-closedで拒否し、
+  新しいSchemaを旧Writerで上書きしない。破損時だけVersion Manifestと完了MarkerからRegistry v1を
+  明示Recoveryし、元FileをEvidenceとして退避する。意味変更はMigration Issueと新Schemaで行う
 - Project HubはInstalled Version RegistryからVersionを列挙し、Project Compatibilityと一致する
   Editor Entry Pointを明示選択する。単一の可変`current` Directoryへ依存しない
 - Process起動前に選択VersionのManifestとEntry Point Inventoryを再検証する
 - Install RootごとにProcess間Control Lockを一つ、VersionごとにExecution Lease Fileを一つ持つ。
   Registry WriterはControl Lockの排他Lease、起動側は短時間の共有Control Leaseを使用する
+- Project Hubは選択Version Rootを`--engine-install-root`とDistribution IdentityでEditorへ渡す。
+  EditorとBuild ServiceはManifest検証済みRootから`Engine/Source`、`CMake`、Templateを実行時解決し、
+  Build時に埋め込まれたRepository絶対PathをInstalled Modeで使用しない。Build Tree、生成物、vcpkg出力は
+  ProjectまたはPer-user Workspaceへ置き、Installed Versionへ書き戻さない
 
 ### Install Transaction
 
@@ -127,8 +149,8 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 3. Stagingの全Fileを再Hashし、Entry PointのPE Architectureを検証する
 4. 完了Markerを最後に耐久書込みする
 5. 同一Volume上のRenameでVersion Directoryを公開する
-6. Installed Version RegistryをAtomic Replaceする
-7. Release Toolの起動Probeが成功したVersionだけをSelectableにする
+6. 公開済みVersion DirectoryのRelease Toolを起動Probeし、失敗時はRegistryへ追加せず隔離する
+7. Probe成功後にだけInstalled Version RegistryをAtomic Replaceし、VersionをSelectableにする
 
 失敗時はStagingだけを隔離または削除し、既存VersionとRegistryを変更しない。同じBundle IDの
 再実行は内容が一致すれば冪等成功、不一致なら改ざんまたは衝突として拒否する。
@@ -149,6 +171,11 @@ Registry Revisionと期待Revisionを照合してから変更する。別Process
   Execution Lease HandleをChild Processへ継承してProcess終了まで保持する
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
+- 自分自身を含むVersionのUninstallは対象Version内のProcessから直接削除しない。Install時にInventory検証して
+  `Operations/Workers`へ配置したVersion外のFirst-party WorkerへOperation Journalと起動Process Handleを渡し、
+  起動側が終了して共有Leaseを解放した後にWorkerが排他Control／Execution Leaseを取得する。WorkerはRegistryを
+  `pendingRemoval`へAtomic Publishして新規起動を止め、Versionを同一VolumeのQuarantineへRenameし、Registryから
+  Entryを削除する。各段階をJournalからRollbackまたは再開できる場合だけQuarantineを最終削除する
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
 - Project、Source Asset、Recent Registry、Editor Preference、Build／Package成果物は削除しない
 - Crash後はOperation Journalと完了Markerから、未公開Stagingの回収またはRegistry再構築を行う
@@ -185,6 +212,11 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
   Install／UpdateがProject Dataを自動変更しない
 - Installer、Project Hub、Editorを同じVersion Directoryから起動し、異なるBundleのLibraryや
   Third-party DLLを検索Pathから混在させない
+- Source Control Metadataを含まないInstalled SDKからShipping ProductをBuildする場合、検証済みDistribution
+  ManifestのEngine Source RevisionとSource Inventory HashをProvenanceとして使用する。Repository Modeは
+  従来どおりGit HEAD／Dirty Stateを検証し、Installed Modeは`.git`を要求せず、Manifest Inventory不一致を拒否する
+- Editor Playは選択Configurationと同じGame Module、RuntimeHost、Engine Buildを同じ外部Build Rootから使う。
+  固定Release Tool PayloadはDebug／Development ModuleのHostとして代用しない
 - LogにはSecret、User Source内容、Credentialを記録せず、Operation ID、Path分類、Error Code、
   検証段階を記録する
 
@@ -207,6 +239,9 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
 - Release Tool起動、異なるWorking Directory、Unicode／Long Pathを確認する
 - VC++ Runtime不足、Toolchain不一致、Architecture不一致を診断する
+- Git for Windows不足／Version不一致、Dependency出力先がImmutable Version配下の場合を診断する
+- Installed RootからDebug／Development／ReleaseそれぞれのConfiguration一致HostをBuild・起動する
+- `.git`なしInstalled RootからManifest由来Provenanceを持つShipping ProductをBuildする
 - Distribution InventoryにBuild Tree、`.git`、PDB、Test、vcpkg Install Tree、Credential、
   Player Productが混入しないことを確認する
 - Third-party NoticeとLicense、Manifest Pinが存在し、Inventoryに登録されることを確認する
