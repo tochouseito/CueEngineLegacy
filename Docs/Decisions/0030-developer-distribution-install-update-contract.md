@@ -57,6 +57,7 @@ CueEngine-<version>-windows-x64/
     CueEditorTool.exe
     CueRuntimeHost.exe
     CueEngineInstallerTool.exe
+    CueEngineInstallWorker.exe
   Engine/
     Source/
     Documents/
@@ -74,7 +75,8 @@ CueEngine-<version>-windows-x64/
 ```
 
 `CueEngineDistribution.json`はVersion付きCanonical JSONとし、Bundle Identity、Engine
-Version、Engine Source Revision、Source Inventory Hash、Dependency Set ID、Host OS／Architecture、
+Version、Engine Source Revision、`clean`に固定したEngine Source State、Source Inventory Hash、
+Dependency Set ID、Host OS／Architecture、
 最低Toolchain、Entry Point、全Payload FileのRole、Size、SHA-256を記録する。Manifest自身、
 署名用予約File、DirectoryはInventoryへ含めない。
 未知Role、重複Path、非Canonical Path、Root外参照、未登録File、Size／Hash不一致を拒否する。
@@ -84,8 +86,14 @@ lowercase canonical UUID v4に固定する。Version Directory名は検証済み
 `v<MAJOR>.<MINOR>.<PATCH>--<uuid>`として生成し、入力文字列をPathへ直接連結しない。生成後のPathを
 Canonical化し、`Versions`直下の単一要素であることを再検証する。
 
+Dependency Set IDは、Canonical化したvcpkg Manifest／Configuration／Tool Pinから生成する
+64文字のlowercase SHA-256 hexに固定する。検証前の値をPathへ使用せず、生成したDirectoryが
+`Dependencies`直下の単一要素であることをCanonical化後に再検証する。
+
 Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし、全Inventoryを
 検証した後だけBundleを公開する。Repository Rootからの場当たり的な再帰Copyは行わない。
+PublisherはGit HEADとWorktreeを検証し、Tracked／Untracked変更があるRepositoryからのBundle生成を
+拒否する。検証済みRevision、`clean` Source State、Source Inventory HashをManifestへ記録する。
 配布物からProject SourceやUser Dataへ書き戻さない。
 
 ### Third-Party and Toolchain
@@ -101,6 +109,10 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 - vcpkg Tool、Download、Install Treeは`%LOCALAPPDATA%/CueEngine/Dependencies/<dependency-set-id>/`
   配下またはProjectが明示した外部Workspaceへ配置し、Immutable VersionのInventoryを変更しない。
   CMake Toolchainへ`VCPKG_ROOT`と`VCPKG_INSTALLED_DIR`を明示的に渡す
+- 共有Dependency Rootの初回RestoreはDependency Set IDごとのProcess間排他Leaseを取得し、
+  Operation固有StagingへTool／Install Treeを生成・検証してから同一Volume Renameで公開する。
+  公開済みRootは完了MarkerとPinを再検証し、Immutableとして再利用する。Configure／Buildは共有Leaseを
+  保持し、Manifest自動Installを無効化して公開Rootへ書き戻さない。異なる依存定義は新しいIDへ分離する
 - 新しいLibrary、Installer Framework、Archive Library、署名ToolをM18の暗黙依存にしない。
   導入が必要なら対象、用途、License、Version、取得元、配布影響を提示してUser承認を得る
 - Windows SDK、CMake、MSVC、Git for Windows 2.44.0以上はDeveloper PrerequisiteとしてVersion診断する。
@@ -126,8 +138,10 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
   Uninstall対象にしない
 - RegistryへMachine-wideな所有権を作らず、初期版は`schemaVersion: 1`、単調増加`revision`、
   Version Entryを持つCanonical JSONで保持する。Readerは対応外Majorと未知MemberをFail-closedで拒否し、
-  新しいSchemaを旧Writerで上書きしない。破損時だけVersion Manifestと完了MarkerからRegistry v1を
-  明示Recoveryし、元FileをEvidenceとして退避する。意味変更はMigration Issueと新Schemaで行う
+  新しいSchemaを旧Writerで上書きしない。破損時だけVersion Manifest、Payload完了Marker、
+  Probe成功Markerの三つが同じBundle／Manifest Digestを示すVersionからRegistry v1を明示Recoveryし、
+  元FileをEvidenceとして退避する。Probe成功MarkerがないVersionはSelectableへ復活させず隔離または
+  明示再Probeする。意味変更はMigration Issueと新Schemaで行う
 - Project HubはInstalled Version RegistryからVersionを列挙し、Project Compatibilityと一致する
   Editor Entry Pointを明示選択する。単一の可変`current` Directoryへ依存しない
 - Process起動前に選択VersionのManifestとEntry Point Inventoryを再検証する
@@ -147,13 +161,19 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 1. Bundle Manifest、Canonical表現、Inventory、Host／Toolchain互換を読取専用で検証する
 2. Operation IDごとのInstall Root内StagingへPayloadをCopyする
 3. Stagingの全Fileを再Hashし、Entry PointのPE Architectureを検証する
-4. 完了Markerを最後に耐久書込みする
+4. Payload完了Markerを最後に耐久書込みする
 5. 同一Volume上のRenameでVersion Directoryを公開する
-6. 公開済みVersion DirectoryのRelease Toolを起動Probeし、失敗時はRegistryへ追加せず隔離する
-7. Probe成功後にだけInstalled Version RegistryをAtomic Replaceし、VersionをSelectableにする
+6. 公開済みVersion DirectoryのRelease Toolを専用Install Probe Modeで起動し、失敗時はRegistryへ追加せず隔離する
+7. Probe成功後、Bundle IDとManifest Digestを持つProbe成功Markerを耐久書込みする
+8. Probe成功Marker検証後にだけInstalled Version RegistryをAtomic Replaceし、VersionをSelectableにする
 
 失敗時はStagingだけを隔離または削除し、既存VersionとRegistryを変更しない。同じBundle IDの
 再実行は内容が一致すれば冪等成功、不一致なら改ざんまたは衝突として拒否する。
+
+専用Install Probe Modeは通常のProject Hub起動経路を使用せず、Installerが保持する排他Control Leaseの
+所有下でだけ実行する。InstallerはOperation Journal、Version Identity、Manifest Digestと結び付いた
+継承HandleをChildへ渡し、Childは共有Control Leaseや未公開Registry Entryを再取得しない。Probeは
+Manifest検証済みVersion Rootの読取とRelease Tool自己診断だけを行い、RegistryやProject状態を変更しない。
 
 Install、Update、Rollback、Uninstall、Registry RecoveryはProcess間Control Lockの排他Leaseを
 操作開始から最終Registry Publishまで保持する。Lease取得後にRegistryを再読込し、単調増加する
@@ -172,7 +192,8 @@ Registry Revisionと期待Revisionを照合してから変更する。別Process
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
 - 自分自身を含むVersionのUninstallは対象Version内のProcessから直接削除しない。Install時にInventory検証して
-  `Operations/Workers`へ配置したVersion外のFirst-party WorkerへOperation Journalと起動Process Handleを渡し、
+  Distribution Manifestの`installWorker` Roleから`Operations/Workers`へHash検証後に配置したVersion外の
+  `CueEngineInstallWorker.exe`へOperation Journalと起動Process Handleを渡し、
   起動側が終了して共有Leaseを解放した後にWorkerが排他Control／Execution Leaseを取得する。WorkerはRegistryを
   `pendingRemoval`へAtomic Publishして新規起動を止め、Versionを同一VolumeのQuarantineへRenameし、Registryから
   Entryを削除する。各段階をJournalからRollbackまたは再開できる場合だけQuarantineを最終削除する
@@ -213,8 +234,9 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Installer、Project Hub、Editorを同じVersion Directoryから起動し、異なるBundleのLibraryや
   Third-party DLLを検索Pathから混在させない
 - Source Control Metadataを含まないInstalled SDKからShipping ProductをBuildする場合、検証済みDistribution
-  ManifestのEngine Source RevisionとSource Inventory HashをProvenanceとして使用する。Repository Modeは
-  従来どおりGit HEAD／Dirty Stateを検証し、Installed Modeは`.git`を要求せず、Manifest Inventory不一致を拒否する
+  ManifestのEngine Source Revision、`clean` Source State、Source Inventory HashをProvenanceとして使用する。
+  Repository Modeは従来どおりGit HEAD／Dirty Stateを検証し、Installed Modeは`.git`を要求せず、
+  `clean`以外のSource StateまたはManifest Inventory不一致を拒否する
 - Editor Playは選択Configurationと同じGame Module、RuntimeHost、Engine Buildを同じ外部Build Rootから使う。
   固定Release Tool PayloadはDebug／Development ModuleのHostとして代用しない
 - LogにはSecret、User Source内容、Credentialを記録せず、Operation ID、Path分類、Error Code、
@@ -234,8 +256,12 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 ## Verification
 
 - Allowlist外File、Path Traversal、重複、欠落、Size／Hash、非Canonical Manifestを拒否する
+- Dirty RepositoryからのBundle生成、非Canonical Dependency Set ID、Dependencies Root外Pathを拒否する
 - Staging失敗、Copy失敗、Hash不一致、Registry Publish失敗で旧Versionを維持する
 - Install、同一Bundle再実行、Side-by-side Update、Rollback、Uninstall、Crash RecoveryをProcess Testする
+- 排他Control Lease中の専用Probeが完了し、通常起動経路が同じ状態では待機することをProcess Testする
+- Probe前Crashから未Probe VersionをSelectableへ復活させず、Probe成功MarkerだけをRecovery対象にする
+- 同一Dependency Setの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
 - Release Tool起動、異なるWorking Directory、Unicode／Long Pathを確認する
 - VC++ Runtime不足、Toolchain不一致、Architecture不一致を診断する

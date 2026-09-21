@@ -32,7 +32,8 @@ Repository snapshot
   -> bundle validation
   -> per-user install staging
   -> immutable version directory
-  -> Release Tool launch probe
+  -> exclusive-install-lease-aware Release Tool launch probe
+  -> durable probe-success marker
   -> installed-version registry
   -> Project Hub version selection
   -> explicit Engine Install Root handoff
@@ -48,7 +49,7 @@ Source Asset、Build Artifactを削除しない。
 
 含めるもの:
 
-- Release Project Hub、Editor、Release開発用RuntimeHost、First-party Installer Tool／Version外Worker
+- Release Project Hub、Editor、Release開発用RuntimeHost、First-party Installer Tool／`CueEngineInstallWorker.exe`
 - Project Buildに必要なEngine Source、HLSL、CMake定義、Template
 - VC++ Runtime不足時にも診断できるFirst-party静的Bootstrapと`Tools/Dependencies/RestoreVcpkg.ps1`
 - `ThirdParty`のvcpkg Manifest／Configuration／Tool Pin、Notice、License Copy
@@ -69,8 +70,10 @@ VC++ Runtimeは存在検査と案内だけをM18に含める。Redistributable B
 Installed VersionはManifest Inventoryを含めて不変とする。Dependency RestoreのTool／Install Tree、
 Project Build Tree、Debug／DevelopmentのRuntimeHostはVersion外のDependency／Project Workspaceへ生成する。
 Project Hubは検証済みInstall RootをEditorへ明示的に渡し、Installed ModeでBuild時埋込みのRepository Pathを
-使用しない。`.git`を含めない代わりにDistribution ManifestのEngine Source RevisionとSource Inventory Hashを
-Shipping Provenanceとして使用する。
+使用しない。Bundle Publisherはdirty Repositoryを拒否し、`.git`を含めない代わりにDistribution Manifestの
+Engine Source Revision、`clean` Source State、Source Inventory HashをShipping Provenanceとして使用する。
+Dependency Set IDはCanonical Manifest群のSHA-256へ固定し、ID単位のProcess間LeaseとStaging Publishで
+共有Rootの並行Restoreを直列化する。
 
 ## Implementation Issues to Create
 
@@ -89,13 +92,15 @@ Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混�
 
 - Update失敗で旧Version、Project、User Dataを変更しない
 - Registryだけが先行して未完成Versionを選択可能にしない
-- 新Schema Registryを旧Writerが上書きせず、破損RecoveryがVersion Inventoryを再検証する
+- 排他Install Leaseを保持したまま専用Probeが循環待ちせず完了する
+- 新Schema Registryを旧Writerが上書きせず、破損RecoveryがProbe成功Markerまで再検証する
 - CLIとProject Hubの並行Install／UninstallでRegistry Updateを失わない
 - 起動検証とUninstallの間にTOCTOUでVersion Directoryを回収しない
 - 対象Version自身のProcessから自己Uninstallして実行中Fileを削除しない
 - 異なるEngine VersionのDLL／Library／Third-party Install Treeを一つのProcessへ混在させない
 - Debug／Development Game ModuleをRelease RuntimeHostへLoadしない
 - Dependency Restore、Project Build、Shipping Provenance生成でImmutable Versionを書き換えない
+- 同じDependency Setへの並行RestoreでTool／Install Treeを部分公開しない
 - Source Allowlistの拡大でTest、Credential、Build出力を配布しない
 - Noticeの存在だけでなく、採用Versionと実Payloadが一致することを検証する
 - Unsigned Local Bundleを公開署名済みまたはPublic Distribution Readyと表示しない
