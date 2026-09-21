@@ -266,7 +266,7 @@ Journal v1のStageは「最後に完了した耐久副作用」を表し、次�
 | Operation Kind | 許可する単調Stage遷移 | Stageが証明する耐久副作用 |
 | --- | --- | --- |
 | `install`／`update` | `prepared` → `payloadStaged` → `versionPublished` → `probeSucceeded` → `workerPublished` → `registryPublished` | Journal作成 → Staging完了Marker → Version Rename → Probe成功Marker → Version外Worker Atomic Publish → Selectable Registry Publish |
-| `rollback` | `prepared` → `selectionPublished` | Journal作成 → 既存Version選択のRegistry Publish |
+| `rollback` | `prepared` → `selectionPublished` | Journal作成 → Manifest／Payload／Probe／公開Worker証拠を再検証した既存Version選択のRegistry Publish |
 | `uninstall` | `prepared` → `removalBlocked` → `versionQuarantined` → `registryEntryRemoved` | Journal作成 → `pendingRemoval` Registry Publish → Version Quarantine Rename → Registry Entry削除Publish |
 | `registryRecovery` | `prepared` → `candidatesValidated` → `registryPublished` | Source Evidence記録済みJournal作成 → 未完了Journal列挙／除外とManifest／Payload／Probe Marker／Worker ID／Worker executable Digest／Worker完了Marker Digest候補配列検証 → Registry再構築Publish |
 
@@ -283,10 +283,14 @@ Journal削除だけを再実行する。
 
 - Updateは既存Versionへの上書きPatchではなく、新しいImmutable VersionのSide-by-side Installとする
 - 新Versionは検証と起動Probeの成功後に選択可能にし、旧Versionを自動削除しない
-- RollbackはProject Hubで以前のInstalled Versionを再選択する操作であり、Payloadを逆Patchしない
-- Editor／Tool起動は共有Control Leaseを取得し、RegistryとManifestを検証した後、対象Versionの
-  共有Execution Leaseを取得する。取得後にRegistryを再確認してからControl Leaseを解放し、
-  Execution Lease HandleをChild Processへ継承してProcess終了まで保持する
+- RollbackはProject Hubで以前のInstalled Versionを再選択する操作であり、Payloadを逆Patchしない。排他Control
+  Lease下でRegistry Entry、Manifest、Payload／Probe完了Marker、Manifest Identity／Inventoryから導出したWorker ID、
+  固定PathのWorker executableとVersion付き完了Markerを再検証し、すべて一致したVersionだけを選択Publishする。
+  Worker証拠の欠落／不一致は対象をUnavailableとしてRollbackをFail-closedで拒否する
+- Editor／Tool起動は共有Control Leaseを取得し、Registry、Manifest、Payload／Probe完了Marker、導出Worker ID、
+  Worker executable、Worker完了MarkerのIdentity／Inventory／Digestを検証した後、対象Versionの共有Execution Leaseを
+  取得する。取得後にRegistryと同じWorker証拠を再確認してからControl Leaseを解放し、Execution Lease Handleを
+  Child Processへ継承してProcess終了まで保持する。不一致Versionは起動せずSelectableとして表示しない
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
 - 自分自身を含むVersionのUninstallは対象Version内のProcessから直接削除しない。Install時にInventory検証して
