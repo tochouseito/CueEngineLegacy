@@ -317,7 +317,7 @@ constexpr std::array k_expectedToolPaths = {
         !is_tool_version_at_least(a_manifest.minimumToolchain.gitVersion, "2.44.0") ||
         a_manifest.minimumToolchain.compilerVendor != "msvc" ||
         !is_tool_version(a_manifest.minimumToolchain.compilerVersion) ||
-        !is_tool_version(a_manifest.minimumToolchain.windowsSdkVersion))
+        !is_tool_version_at_least(a_manifest.minimumToolchain.windowsSdkVersion, "10.0.26100.0"))
     {
         return cue::Result<void>::failure(make_distribution_error(a_assertContext, DistributionError::InvalidManifest,
                                                                   "Minimum Toolchain identity is invalid"));
@@ -400,9 +400,15 @@ constexpr std::array k_expectedToolPaths = {
                                     "Required source-managed Distribution payload is missing from Manifest"));
     }
     constexpr std::array requiredSourcePaths = {
-        std::string_view("Tools/Dependencies/RestoreVcpkg.ps1"), std::string_view("ThirdParty/vcpkg.json"),
-        std::string_view("ThirdParty/vcpkg-configuration.json"), std::string_view("ThirdParty/vcpkg-tool.json"),
-        std::string_view("ThirdParty/THIRD_PARTY_NOTICES.md"),   std::string_view("LICENSE.txt"),
+        std::string_view("CMakeLists.txt"),
+        std::string_view("Tools/Dependencies/RestoreVcpkg.ps1"),
+        std::string_view("ThirdParty/vcpkg.json"),
+        std::string_view("ThirdParty/vcpkg-configuration.json"),
+        std::string_view("ThirdParty/vcpkg-tool.json"),
+        std::string_view("ThirdParty/THIRD_PARTY_NOTICES.md"),
+        std::string_view("ThirdParty/Licenses/DearImGui-LICENSE.txt"),
+        std::string_view("ThirdParty/Licenses/vcpkg-LICENSE.txt"),
+        std::string_view("LICENSE.txt"),
     };
     if (std::ranges::any_of(requiredSourcePaths, [&a_manifest](std::string_view a_path) noexcept
                             { return !has_path(a_manifest.files, a_path); }))

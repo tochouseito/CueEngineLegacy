@@ -94,6 +94,8 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
                               hash('0')},
         DistributionFileEntry{DistributionFileRole::ThirdPartyLicense, "ThirdParty/Licenses/DearImGui-LICENSE.txt", 0U,
                               hash('1')},
+        DistributionFileEntry{DistributionFileRole::ThirdPartyLicense, "ThirdParty/Licenses/vcpkg-LICENSE.txt", 0U,
+                              hash('2')},
         DistributionFileEntry{DistributionFileRole::Bootstrap, manifest.entryPoints.bootstrap, 10U, hash('3')},
         DistributionFileEntry{DistributionFileRole::Editor, manifest.entryPoints.editor, 10U, hash('4')},
         DistributionFileEntry{DistributionFileRole::RuntimeHost, manifest.entryPoints.runtimeHost, 10U, hash('5')},
@@ -194,6 +196,7 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     manifest = make_manifest();
     manifest.minimumToolchain.cmakeVersion = "4.10.0";
     manifest.minimumToolchain.gitVersion = "2.100.0";
+    manifest.minimumToolchain.windowsSdkVersion = "10.0.30000.0";
     require(cue::distribution::write_distribution_manifest(manifest, a_assertContext).has_value());
 
     manifest = make_manifest();
@@ -202,6 +205,10 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 
     manifest = make_manifest();
     manifest.minimumToolchain.gitVersion = "2.43.9";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
+    manifest.minimumToolchain.windowsSdkVersion = "10.0.26099.0";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
@@ -238,6 +245,20 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(dependency != manifest.files.end());
     manifest.files.erase(dependency);
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    for (const std::string_view requiredPath : std::array{
+             std::string_view("CMakeLists.txt"),
+             std::string_view("ThirdParty/Licenses/DearImGui-LICENSE.txt"),
+             std::string_view("ThirdParty/Licenses/vcpkg-LICENSE.txt"),
+         })
+    {
+        manifest = make_manifest();
+        const auto required = std::ranges::find(manifest.files, requiredPath,
+                                                &cue::distribution::DistributionFileEntry::relativePath);
+        require(required != manifest.files.end());
+        manifest.files.erase(required);
+        require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+    }
 
     manifest = make_manifest();
     manifest.files.front().relativePath = "../outside";
