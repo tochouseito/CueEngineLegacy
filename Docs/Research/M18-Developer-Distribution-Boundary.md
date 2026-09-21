@@ -47,6 +47,7 @@ Source Asset、Build Artifactを削除しない。
 
 - Release Project Hub、Editor、開発用RuntimeHost、First-party Installer Tool
 - Project Buildに必要なEngine Source、HLSL、CMake定義、Template
+- VC++ Runtime不足時にも診断できるFirst-party静的Bootstrapと`Tools/Dependencies/RestoreVcpkg.ps1`
 - `ThirdParty`のvcpkg Manifest／Configuration／Tool Pin、Notice、License Copy
 - Engineの利用条件、Version、導入・復旧手順
 
@@ -59,13 +60,15 @@ Source Asset、Build Artifactを削除しない。
 
 VC++ Runtimeは存在検査と案内だけをM18に含める。Redistributable Binaryの同梱、MSI／MSIX、
 第三者Installer Framework、Code-signing Serviceは承認済み外部依存ではないため導入しない。
+未署名Bundleは同一開発者のLocal Fixed Driveから明示許可された入力だけを受け付け、真正性ではなく
+偶発破損の検出だけを保証する。
 
 ## Implementation Issues to Create
 
 1. #375 Distribution Manifest v1、Path／Role／Hash検証、Source Allowlistを実装する
 2. #376 Release Tool／Source SDK／Third-party NoticeをStagingからAtomic Publishする
-3. #377 Per-user Install Transaction、Immutable Version Registry、Recoveryを実装する
-4. #378 Side-by-side Update、Version再選択Rollback、安全なUninstallを実装する
+3. #377 Process間Writer排他を持つPer-user Install Transaction、Immutable Version Registry、Recoveryを実装する
+4. #378 共通Version Execution Leaseを持つSide-by-side Update、Version再選択Rollback、安全なUninstallを実装する
 5. #379 Project HubへInstalled Engine一覧、Project Compatibility、Version指定起動を接続する
 6. #380 VC++ Runtime／Toolchain Prerequisite、License Inventory、配布禁止File監査を実装する
 7. #381 M18 Completion GateでProcess E2E、3構成Build／CTest、失敗時保全を検証する
@@ -77,6 +80,8 @@ Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混�
 
 - Update失敗で旧Version、Project、User Dataを変更しない
 - Registryだけが先行して未完成Versionを選択可能にしない
+- CLIとProject Hubの並行Install／UninstallでRegistry Updateを失わない
+- 起動検証とUninstallの間にTOCTOUでVersion Directoryを回収しない
 - 異なるEngine VersionのDLL／Library／Third-party Install Treeを一つのProcessへ混在させない
 - Source Allowlistの拡大でTest、Credential、Build出力を配布しない
 - Noticeの存在だけでなく、採用Versionと実Payloadが一致することを検証する

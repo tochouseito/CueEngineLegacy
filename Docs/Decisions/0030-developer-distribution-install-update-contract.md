@@ -30,6 +30,10 @@ M17の`ShippingProduct`はプレイヤー向け製品のTrust契約であり、M
   ProjectをBuildするためのFirst-party Engine Source／HLSL／CMake定義を含む
 - Engineの`.lib`を公開Binary SDKとして契約せず、Project Buildは配布済みSourceを
   選択中ToolchainとConfigurationで再Buildする
+- ADR-0022の`Cue.GameModule.Abi` version 1 C互換DLL境界、ABI Header、Version Query、
+  Compatibility Metadataは既存の安定接続契約として維持する。延期するのはEngine C++
+  `.lib`のBinary SDKとPlugin SDKであり、配布済みDynamic RuntimeHostとSource SDKから
+  BuildしたGame Moduleの接続契約はM18でも検証する
 - Debug／Development／ReleaseはProject Buildの選択肢として維持するが、配布するTool
   自体はReleaseとする
 - `CueRuntimeHost.exe`は開発用Dynamic実行に必要な場合だけTool Payloadへ含める。
@@ -46,6 +50,7 @@ vcpkg Install Tree、Source Control Metadataは含めない。
 CueEngine-<version>-windows-x64/
   CueEngineDistribution.json
   Bin/
+    CueEngineBootstrap.exe
     CueProjectHubTool.exe
     CueEditorTool.exe
     CueRuntimeHost.exe
@@ -55,6 +60,8 @@ CueEngine-<version>-windows-x64/
     Documents/
   CMake/
   Templates/
+  Tools/
+    Dependencies/RestoreVcpkg.ps1
   ThirdParty/
     vcpkg.json
     vcpkg-configuration.json
@@ -76,6 +83,8 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 ### Third-Party and Toolchain
 
 - `ThirdParty/THIRD_PARTY_NOTICES.md`と採用License Copyを必ず配布する
+- `Tools/Dependencies/RestoreVcpkg.ps1`をRepositoryと同じ相対Pathで配布Allowlistへ含め、
+  `CMake/CueVcpkgToolchain.cmake`の診断が指す明示Restore Entry PointをBundle内で有効にする
 - vcpkg Manifest、Registry Baseline、Tool Pinは配布するが、`ThirdParty/.tools`、
   `ThirdParty/vcpkg_installed`、Download Cacheは配布しない
 - 初回Buildは既存の明示Dependency Restoreを使用し、取得元、Version、Hash、Licenseを
@@ -104,6 +113,8 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 - Project HubはInstalled Version RegistryからVersionを列挙し、Project Compatibilityと一致する
   Editor Entry Pointを明示選択する。単一の可変`current` Directoryへ依存しない
 - Process起動前に選択VersionのManifestとEntry Point Inventoryを再検証する
+- Install RootごとにProcess間Control Lockを一つ、VersionごとにExecution Lease Fileを一つ持つ。
+  Registry WriterはControl Lockの排他Lease、起動側は短時間の共有Control Leaseを使用する
 
 ### Install Transaction
 
@@ -122,13 +133,22 @@ Source SDK Publisherは固定Allowlistから不変SnapshotをStagingへCopyし�
 失敗時はStagingだけを隔離または削除し、既存VersionとRegistryを変更しない。同じBundle IDの
 再実行は内容が一致すれば冪等成功、不一致なら改ざんまたは衝突として拒否する。
 
+Install、Update、Rollback、Uninstall、Registry RecoveryはProcess間Control Lockの排他Leaseを
+操作開始から最終Registry Publishまで保持する。Lease取得後にRegistryを再読込し、単調増加する
+Registry Revisionと期待Revisionを照合してから変更する。別Processが更新済みなら古いSnapshotを
+上書きせず再試行またはConflict Errorとする。Abandoned WriterはOperation JournalとVersion Directoryを
+再検証してからRecoveryする。Atomic ReplaceだけをProcess間排他の代用にしない。
+
 ### Update, Rollback, and Uninstall
 
 - Updateは既存Versionへの上書きPatchではなく、新しいImmutable VersionのSide-by-side Installとする
 - 新Versionは検証と起動Probeの成功後に選択可能にし、旧Versionを自動削除しない
 - RollbackはProject Hubで以前のInstalled Versionを再選択する操作であり、Payloadを逆Patchしない
-- Uninstallは対象VersionのProcessが停止し、Operation Leaseを保持していないことを確認してから、
-  Registryから選択不可にし、Version Directoryを回収する
+- Editor／Tool起動は共有Control Leaseを取得し、RegistryとManifestを検証した後、対象Versionの
+  共有Execution Leaseを取得する。取得後にRegistryを再確認してからControl Leaseを解放し、
+  Execution Lease HandleをChild Processへ継承してProcess終了まで保持する
+- Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
+  Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
 - Project、Source Asset、Recent Registry、Editor Preference、Build／Package成果物は削除しない
 - Crash後はOperation Journalと完了Markerから、未公開Stagingの回収またはRegistry再構築を行う
@@ -139,10 +159,20 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 
 - 現在のEngine ToolとShipping ProductはMSVC Dynamic Runtimeを前提とする。M18 Installerは
   必要なVC++ Runtimeの存在とArchitectureを検査し、不足時は診断可能なErrorで停止する
+- Bundleの最初のEntry PointはEngine LibraryへLinkしないFirst-party `CueEngineBootstrap.exe`とし、
+  `/MT`で自己完結させる。BootstrapはHost Architecture、VC++ Runtime、InstallerのInventoryを検査し、
+  Runtimeが利用可能な場合だけ`CueEngineInstallerTool.exe`を起動する。BootstrapはCRT Security更新時に
+  再Build／再配布する。通常のEditor、Project Hub、RuntimeHost、Shipping Productは`/MD`を維持する
 - Microsoft VC++ Redistributable BinaryをRepositoryまたはBundleへ同梱しない。将来同梱する場合は、
   正確なVersion、Microsoftの再配布条件、取得元、署名、Silent Install、Reboot、更新責任を提示し、
   User承認を得る
 - Authenticode未署名BundleとToolは`LocalDeveloperOnly`として扱う
+- `LocalDeveloperOnly`のSize／SHA-256は偶発破損とOperation整合性だけを検出し、Publisher真正性を
+  保証しない。受付対象は同一開発者が管理するLocal Fixed Drive上で明示選択したBundleに限定する
+- CLIは`--allow-unsigned-local`の明示指定、Project Hubは同等の確認なしに未署名BundleをInstallしない。
+  UNC／Remote Drive、Mark-of-the-WebがInternet／Restricted ZoneのBundle、自動Download結果は拒否する
+- `CueEngineBootstrap.exe`も未署名Bundleの一部であるため信頼起点ではない。M18はNetwork配布や第三者から
+  受領したBundleを安全にする機能を提供しない
 - Test用Self-signed CertificateやBuild時Hashだけで`PublicDistributionReady`へ昇格しない
 - 公開Channelには実運用Certificate、Timestamp、Online Revocation、署名済みManifest、
   許可Publisherを強制する外部Trust Anchor、署名済みInstallerの実機検証が必要である
