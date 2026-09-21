@@ -254,6 +254,8 @@ function Invoke-VcpkgRestore
         $toolParent = Split-Path -Parent $toolRoot
         New-Item -ItemType Directory -Path $toolParent -Force | Out-Null
         Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
+            "-c",
+            "core.longpaths=true",
             "clone",
             "--filter=blob:none",
             "--no-checkout",
@@ -261,26 +263,28 @@ function Invoke-VcpkgRestore
             $toolRoot
         ) -WorkingDirectory $toolParent
         Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
+            "-c",
+            "core.longpaths=true",
             "checkout",
             "--detach",
             $configuration.commit
         ) -WorkingDirectory $toolRoot
     }
 
-    $trackedChanges = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no |
+    $trackedChanges = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no |
         Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $trackedChanges.Length -ne 0)
     {
         throw "Managed vcpkg checkout contains tracked changes."
     }
 
-    $actualRepository = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
+    $actualRepository = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
     if ($LASTEXITCODE -ne 0 -or $actualRepository -cne $configuration.repository)
     {
         throw "Managed vcpkg checkout origin does not match the pinned repository."
     }
 
-    $actualCommit = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
+    $actualCommit = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0)
     {
         throw "Managed vcpkg checkout commit could not be read."
@@ -288,6 +292,8 @@ function Invoke-VcpkgRestore
     if ($actualCommit -cne $configuration.commit)
     {
         Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
+            "-c",
+            "core.longpaths=true",
             "-c",
             "safe.directory=$toolRoot",
             "-C",
@@ -299,6 +305,8 @@ function Invoke-VcpkgRestore
         ) -WorkingDirectory $repositoryRoot
         Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
             "-c",
+            "core.longpaths=true",
+            "-c",
             "safe.directory=$toolRoot",
             "-C",
             $toolRoot,
@@ -308,7 +316,7 @@ function Invoke-VcpkgRestore
         ) -WorkingDirectory $repositoryRoot
     }
 
-    $actualCommit = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
+    $actualCommit = (& $gitExecutable -c "core.longpaths=true" -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $configuration.commit)
     {
         throw "Managed vcpkg checkout does not match the pinned commit."
@@ -359,7 +367,7 @@ try
         }
 
         $stagingDependencyRoot = Join-Path (Split-Path -Parent $finalDependencyRoot) `
-            ".$DependencyRootId.staging.$([Guid]::NewGuid().ToString('N'))"
+            ".staging-$([Guid]::NewGuid().ToString('N'))"
         New-Item -ItemType Directory -Path $stagingDependencyRoot | Out-Null
         $toolRoot = Join-Path $stagingDependencyRoot "Tool\vcpkg"
         $installedRoot = Join-Path $stagingDependencyRoot "Installed"
