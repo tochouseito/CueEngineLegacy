@@ -52,7 +52,8 @@ Plane Revision 1は原点中心、一辺1.0のXZ平面、Y=0、Normal +Y、Bound
 
 Sphere Revision 1は原点中心、半径0.5、16 Slice、8 StackのUV Sphere topologyとし、
 極を共有、各中間Ringは16頂点、合計114頂点、672個の16-bit Indexを持つ。Positionを正規化した
-方向をSmooth Normalとし、SeamとPoleのTriangle順をRevision契約としてTestする。
+方向をSmooth Normalとする。SeamとPoleを含むTopology、外向きTriangle集合、WindingをRevision契約として
+Testするが、同じ集合を表すTriangle、Face、Indexの配列順は固定しない。
 
 Revision 1のVertexはPositionとNormalだけを持つ。UV、Tangent、Material Slotを暗黙追加しない。
 必要になった場合は新Revisionまたは新しいCook済みRuntime Representationを別ADRで決定する。
@@ -110,6 +111,26 @@ Revision 1のVertexはPositionとNormalだけを持つ。UV、Tangent、Material
 
 M19時点でLoose Asset Fileは追加しない。Compiled PayloadからBundleへ移す判断は、M28のBundle Format、
 Compression、Streaming、Patch単位、Platform別Cook要件と同時に行う。
+
+### Reference Engine Comparison
+
+| 観点 | Unity | Unreal Engine | Godot | CueEngineでの判断 |
+| --- | --- | --- | --- | --- |
+| Usability | PrimitiveをEditor操作から即生成できる | Basic ShapeをPlace Actorsから即配置できる | PrimitiveMesh ResourceをInspectorから選択できる | 同等のCreate Primitive体験をTyped Catalogの成立後に提供する |
+| Runtime Performance | Engine内蔵Meshを通常のRenderer入力として扱う | Static Mesh／Engine Contentを既存Render Pathへ統合する | PrimitiveMeshをResourceとして生成・描画する | 特別な遅い経路を作らず、抽出済みRender DataとD3D12所有Resourceへ接続する |
+| Iteration Speed | Projectへ手動Importせず利用できる | Engine ContentをProject作業中に再利用できる | Source Asset作成なしでResourceを構成できる | Source Fileを要求せず、Save／Reload／Play／Standaloneを同じIDで往復する |
+| Extensibility | Package／Editor APIとAsset Databaseが広い | Content Browser、Module、Pluginの拡張面が広い | Resource／EditorPluginが比較的軽量 | 万能Asset型やPlugin Overrideを先取りせず、Kind別Descriptorを段階追加する |
+| Portability | Platform別Build PipelineがAssetを変換する | CookerがTarget Platform向けPayloadを生成する | Import済みResourceをPlatform Exportへ含める | M19はCPU Geometryを共通契約とし、Platform CookはM28へ延期する |
+| Data Safety | GUID／MetaとSerialized Referenceを使う | Package／Object PathとRedirect等を使う | Resource Path／UIDを使う | File Pathではない予約Stable IDと不変Revisionで既存Sceneを再現する |
+| Compatibility | Engine Version更新時にAsset／Serialization移行が必要になり得る | Engine ContentとPackage Versionの互換管理が必要 | Resource Format／Importer Versionの互換管理が必要 | 公開IDの意味を変更せず、新Geometryは新IDとして旧Payloadも維持する |
+| Diagnostics | Inspector／ConsoleでMissing Referenceを示す | Content Browser／Log／Validationが豊富 | Inspector／DebuggerでResource Errorを示す | 不正、未知、Kind不一致、Revision不一致を区別し、ShippingはFail-closedとする |
+| Testability | Editor／Play／Buildをまたぐ統合Testが必要 | Cooker／Automation／RHIをまたぐ検証が必要 | Resource／Scene／Exportをまたぐ検証が必要 | Catalog、Scene、Renderer、Dynamic／Static Product、Hardware／WARPを段階Testする |
+| Complexity | Asset DatabaseとImporter契約を常時背負う | Engine Content、Package、Cookerの機構が大規模 | 単純だがResource Pathと生成Resourceの差を扱う | M28のAsset Database／Cookerを前倒しせず、M19のPrimitive要件だけを実装する |
+
+Unityの即時生成体験、Unreal EngineのEngine ContentとCook Closure、Godotの軽量なPrimitive Resourceは
+比較上の長所である。一方、それぞれのAsset Database、Package／Cooker、Resource継承Modelまで導入すると、
+M19の範囲を越えて永続形式、Plugin境界、Platform Cookを固定する代償がある。このためCueEngineは体験と
+参照Closureだけを要件として採用し、実装構造は現在のAuthoring Scene／Runtime World／Renderer境界に合わせる。
 
 ## Alternatives
 
