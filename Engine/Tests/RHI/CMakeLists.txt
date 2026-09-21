@@ -301,6 +301,9 @@ if(WIN32)
         Cue.RHI.D3D12.SwapChain.DirectPresentDeviceRemoved
         Cue.RHI.D3D12.SwapChain.RecoverySignalDeviceRemoved
         Cue.RHI.D3D12.SwapChain.RegularSignalDeviceRemoved
+        Cue.RHI.D3D12.SwapChain.SceneBeginFrameUnavailableRetention
+        Cue.RHI.D3D12.SwapChain.SceneSignalUnavailableRetention
+        Cue.RHI.D3D12.SwapChain.SceneDirectPresentDeviceRemoved
         Cue.RHI.D3D12.SwapChain.CreationFaults
         Cue.RHI.D3D12.SwapChain.LogFailure
         Cue.RHI.D3D12.SwapChain.Validation
@@ -309,6 +312,7 @@ if(WIN32)
         Cue.RHI.D3D12.SwapChain.SceneSmoke
         Cue.RHI.D3D12.SwapChain.SceneDeviceRemoval
         Cue.RHI.D3D12.SwapChain.SceneResize
+        Cue.RHI.D3D12.SwapChain.SceneResizeHardware
         Cue.RHI.D3D12.SwapChain.SceneResizeCreationFailure
         Cue.RHI.D3D12.SwapChain.SceneResizePixelWarp
         Cue.RHI.D3D12.SwapChain.SceneResizePixelHardware
@@ -316,6 +320,7 @@ if(WIN32)
         Cue.RHI.D3D12.SwapChain.ResizeLifecycle
         Cue.RHI.D3D12.SwapChain.ResizeFailure
         Cue.RHI.D3D12.SwapChain.RtvRebuildFailure
+        Cue.RHI.D3D12.SwapChain.SceneRtvRebuildFailure
         Cue.RHI.D3D12.SwapChain.TerminalResizeRejection
         Cue.RHI.D3D12.SwapChain.ResizeUnavailableRetention
         Cue.RHI.D3D12.SwapChain.DeviceRemovalLifecycle
@@ -854,18 +859,23 @@ if(WIN32)
     )
     foreach(
         swapChainMode
-        IN ITEMS SmokeVsync SmokeImmediate InfoQueue TearingMatrix PresentMatrix PresentSignalRecovery BeginFrameUnavailableRetention CloseFrameDeviceRemoved PresentUnavailableRetention SignalUnavailableRetention DirectPresentDeviceRemoved RecoverySignalDeviceRemoved RegularSignalDeviceRemoved CreationFaults LogFailure Validation ProductionOwnership ClearSmoke SceneSmoke SceneDeviceRemoval SceneResize SceneResizeCreationFailure SceneResizePixelWarp SceneResizePixelHardware PresentFrames300 ResizeLifecycle ResizeFailure RtvRebuildFailure TerminalResizeRejection ResizeUnavailableRetention DeviceRemovalLifecycle DeviceRemovalResize DeviceRemovalDredFailure
+        IN ITEMS SmokeVsync SmokeImmediate InfoQueue TearingMatrix PresentMatrix PresentSignalRecovery BeginFrameUnavailableRetention CloseFrameDeviceRemoved PresentUnavailableRetention SignalUnavailableRetention DirectPresentDeviceRemoved RecoverySignalDeviceRemoved RegularSignalDeviceRemoved SceneBeginFrameUnavailableRetention SceneSignalUnavailableRetention SceneDirectPresentDeviceRemoved CreationFaults LogFailure Validation ProductionOwnership ClearSmoke SceneSmoke SceneDeviceRemoval SceneResize SceneResizeHardware SceneResizeCreationFailure SceneResizePixelWarp SceneResizePixelHardware PresentFrames300 ResizeLifecycle ResizeFailure RtvRebuildFailure SceneRtvRebuildFailure TerminalResizeRejection ResizeUnavailableRetention DeviceRemovalLifecycle DeviceRemovalResize DeviceRemovalDredFailure
     )
         add_test(
             NAME Cue.RHI.D3D12.SwapChain.${swapChainMode}
             COMMAND CueRhiD3d12SwapChainProcess ${swapChainMode}
         )
     endforeach()
-    set_tests_properties(Cue.RHI.D3D12.SwapChain.SceneResizePixelHardware PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(
+        Cue.RHI.D3D12.SwapChain.SceneResizePixelHardware
+        Cue.RHI.D3D12.SwapChain.SceneResizeHardware
+        PROPERTIES SKIP_RETURN_CODE 77
+    )
     set_tests_properties(
         Cue.RHI.D3D12.SwapChain.DirectPresentDeviceRemoved
         Cue.RHI.D3D12.SwapChain.RecoverySignalDeviceRemoved
         Cue.RHI.D3D12.SwapChain.RegularSignalDeviceRemoved
+        Cue.RHI.D3D12.SwapChain.SceneDirectPresentDeviceRemoved
         Cue.RHI.D3D12.SwapChain.SceneDeviceRemoval
         Cue.RHI.D3D12.SwapChain.DeviceRemovalLifecycle
         Cue.RHI.D3D12.SwapChain.DeviceRemovalDredFailure

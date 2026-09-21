@@ -57,6 +57,10 @@ class D3d12ScenePass final
     /// @brief Probe用にDepthの非所有Identityを返し、同一Resourceの保持を判定できるようにする
     [[nodiscard]] std::uintptr_t depth_identity_for_probe() const noexcept;
 #if CUE_D3D12_TESTING
+    /// @brief Probe用に固定Cubeの頂点・Index Resourceが共に保持されているかを返す
+    [[nodiscard]] bool has_geometry_for_probe() const noexcept;
+    /// @brief Probe用に全Frame SlotのConstant Resourceが保持されているかを返す
+    [[nodiscard]] bool has_constants_for_probe() const noexcept;
     /// @brief TestSupport構成でこのPassの生成故障を指定し、Probeが再試行前に解除する
     void set_creation_fault_for_probe(D3d12SceneCreationFault a_fault) noexcept;
 #endif

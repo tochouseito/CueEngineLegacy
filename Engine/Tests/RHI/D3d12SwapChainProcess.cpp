@@ -297,12 +297,12 @@ class ForeignWindow final : public cue::Window
 }
 
 /// @brief SceneのDepth／DSVをGPU Idle証明後のSize変更で退役し、新寸法で再生成する
-[[nodiscard]] bool run_scene_resize(cue::Window &a_window, ProcessLogSink &a_logSink,
-                                    cue::AssertContext &a_assertContext) noexcept
+[[nodiscard]] int run_scene_resize(cue::Window &a_window, ProcessLogSink &a_logSink, bool a_useHardware,
+                                   cue::AssertContext &a_assertContext) noexcept
 {
     const std::uint32_t initialErrorCount = a_logSink.error_count();
     cue::D3d12BackendDescriptor backendDescriptor = {
-        cue::D3d12AdapterPolicy::Warp,
+        a_useHardware ? cue::D3d12AdapterPolicy::HighPerformanceHardware : cue::D3d12AdapterPolicy::Warp,
         cue::are_d3d12_diagnostics_allowed_for_probe() ? cue::D3d12ValidationMode::Standard
                                                        : cue::D3d12ValidationMode::Disabled,
         false,
@@ -312,20 +312,23 @@ class ForeignWindow final : public cue::Window
         cue::create_d3d12_backend(backendDescriptor, a_assertContext);
     if (!backendResult)
     {
-        return false;
+        return a_useHardware &&
+                       (has_error_code(backendResult.try_error(), 24) || has_error_code(backendResult.try_error(), 25))
+                   ? 77
+                   : 42;
     }
     std::unique_ptr<cue::D3d12Backend> backend = std::move(*backendResult.try_value());
     if (!a_window.show())
     {
         static_cast<void>(backend->shutdown());
-        return false;
+        return 42;
     }
     cue::Result<std::unique_ptr<cue::PresentationContext>> presentationResult =
         cue::create_d3d12_windows_presentation(*backend, a_window, cue::PresentationDescriptor{true});
     if (!presentationResult)
     {
         static_cast<void>(backend->shutdown());
-        return false;
+        return 42;
     }
     std::unique_ptr<cue::PresentationContext> presentation = std::move(*presentationResult.try_value());
     const std::uint32_t initialWidth = presentation->width();
@@ -363,22 +366,23 @@ class ForeignWindow final : public cue::Window
     const cue::D3d12PresentationProbeReport changedSizeRestoredReport = cue::probe_d3d12_presentation(*presentation);
     cue::Result<cue::PresentationFrameStatus> changedSizeRestoredFrame = presentation->present_scene_frame(scene);
     const cue::D3d12PresentationProbeReport finalReport = cue::probe_d3d12_presentation(*presentation);
-    const bool initialValid = firstFrame && firstReport.hasSceneDepthDsv &&
+    const bool initialValid = firstFrame && firstReport.hasSceneNativeObjects && firstReport.hasSceneDepthDsv &&
                               firstReport.sceneDepthWidth == initialWidth &&
                               firstReport.sceneDepthHeight == initialHeight && firstReport.sceneDepthIdentity != 0U &&
                               firstReport.lastSubmittedFence == 1U;
     const bool sameSizeCycleValid =
-        minimizeResult && wasMinimizePending && minimizedReport.hasSceneDepthDsv &&
-        minimizedReport.sceneDepthIdentity == firstReport.sceneDepthIdentity &&
+        minimizeResult && wasMinimizePending && minimizedReport.hasSceneNativeObjects &&
+        minimizedReport.hasSceneDepthDsv && minimizedReport.sceneDepthIdentity == firstReport.sceneDepthIdentity &&
         minimizedReport.sceneDepthWidth == initialWidth && minimizedReport.sceneDepthHeight == initialHeight &&
         !minimizedReport.isAcceptingFrames && !minimizedFrame && has_error_code(minimizedFrame.try_error(), 88) &&
-        sameSizeRestoreResult && !wasSameSizeRestorePending && restoredReport.hasSceneDepthDsv &&
-        restoredReport.sceneDepthIdentity == firstReport.sceneDepthIdentity &&
+        sameSizeRestoreResult && !wasSameSizeRestorePending && restoredReport.hasSceneNativeObjects &&
+        restoredReport.hasSceneDepthDsv && restoredReport.sceneDepthIdentity == firstReport.sceneDepthIdentity &&
         restoredReport.sceneDepthWidth == initialWidth && restoredReport.sceneDepthHeight == initialHeight &&
         restoredReport.isAcceptingFrames && restoredFrame && restoredReport.lastSubmittedFence == 1U;
     const bool sizeChangeValid =
-        resizeResult && !resizedReport.hasSceneDepthDsv && resizedReport.sceneDepthIdentity == 0U &&
-        resizedReport.sceneDepthWidth == 0U && resizedReport.sceneDepthHeight == 0U && secondFrame &&
+        resizeResult && !resizedReport.hasSceneNativeObjects && !resizedReport.hasSceneDepthDsv &&
+        resizedReport.sceneDepthIdentity == 0U && resizedReport.sceneDepthWidth == 0U &&
+        resizedReport.sceneDepthHeight == 0U && secondFrame && secondReport.hasSceneNativeObjects &&
         secondReport.hasSceneDepthDsv && secondReport.sceneDepthIdentity != 0U &&
         secondReport.sceneDepthWidth == resizedWidth && secondReport.sceneDepthHeight == resizedHeight &&
         secondReport.lastSubmittedFence == 3U;
@@ -388,16 +392,17 @@ class ForeignWindow final : public cue::Window
         secondMinimizedReport.sceneDepthWidth == resizedWidth &&
         secondMinimizedReport.sceneDepthHeight == resizedHeight && !secondMinimizedReport.isAcceptingFrames &&
         !secondMinimizedFrame && has_error_code(secondMinimizedFrame.try_error(), 88) && changedSizeRestoreResult &&
-        !wasChangedSizeRestorePending && !changedSizeRestoredReport.hasSceneDepthDsv &&
-        changedSizeRestoredReport.sceneDepthIdentity == 0U && changedSizeRestoredReport.sceneDepthWidth == 0U &&
-        changedSizeRestoredReport.sceneDepthHeight == 0U && changedSizeRestoredFrame && finalReport.hasSceneDepthDsv &&
+        !wasChangedSizeRestorePending && !changedSizeRestoredReport.hasSceneNativeObjects &&
+        !changedSizeRestoredReport.hasSceneDepthDsv && changedSizeRestoredReport.sceneDepthIdentity == 0U &&
+        changedSizeRestoredReport.sceneDepthWidth == 0U && changedSizeRestoredReport.sceneDepthHeight == 0U &&
+        changedSizeRestoredFrame && finalReport.hasSceneNativeObjects && finalReport.hasSceneDepthDsv &&
         finalReport.sceneDepthIdentity != 0U && finalReport.sceneDepthWidth == nextWidth &&
         finalReport.sceneDepthHeight == nextHeight && finalReport.lastSubmittedFence == 4U;
     const bool valid = initialValid && sameSizeCycleValid && sizeChangeValid && changedSizeCycleValid;
     cue::Result<void> presentationShutdown = presentation->shutdown();
     presentation.reset();
     cue::Result<void> backendShutdown = backend->shutdown();
-    return valid && presentationShutdown && backendShutdown && a_logSink.error_count() == initialErrorCount;
+    return valid && presentationShutdown && backendShutdown && a_logSink.error_count() == initialErrorCount ? 0 : 42;
 }
 
 /// @brief 遅延Scene初期化で未分類Device Removalを検出したときの状態とDREDを検証する
@@ -867,10 +872,10 @@ int main(int a_argumentCount, char **a_arguments)
         failureCode = run_scene_device_removal(*window, assertContext);
         valid = failureCode == 0;
     }
-    else if (mode == "SceneResize")
+    else if (mode == "SceneResize" || mode == "SceneResizeHardware")
     {
-        valid = run_scene_resize(*window, *processSinkView, assertContext);
-        failureCode = valid ? 0 : 42;
+        failureCode = run_scene_resize(*window, *processSinkView, mode == "SceneResizeHardware", assertContext);
+        valid = failureCode == 0 || failureCode == 77;
     }
     else if (mode == "SceneResizeCreationFailure")
     {
@@ -944,6 +949,24 @@ int main(int a_argumentCount, char **a_arguments)
             nativeWindow, 640, 360, cue::D3d12PresentFailureProbeMode::RegularSignalDeviceRemoved, assertContext);
         failureCode = valid ? 0 : (cue::was_d3d12_present_device_removal_probe_unavailable() ? 77 : 35);
     }
+    else if (mode == "SceneBeginFrameUnavailableRetention")
+    {
+        valid = cue::verify_d3d12_present_signal_recovery_for_probe(
+            nativeWindow, 640, 360, cue::D3d12PresentFailureProbeMode::SceneBeginFrameUnavailable, assertContext);
+        failureCode = valid ? 0 : 45;
+    }
+    else if (mode == "SceneSignalUnavailableRetention")
+    {
+        valid = cue::verify_d3d12_present_signal_recovery_for_probe(
+            nativeWindow, 640, 360, cue::D3d12PresentFailureProbeMode::SceneSignalUnavailable, assertContext);
+        failureCode = valid ? 0 : 46;
+    }
+    else if (mode == "SceneDirectPresentDeviceRemoved")
+    {
+        valid = cue::verify_d3d12_present_signal_recovery_for_probe(
+            nativeWindow, 640, 360, cue::D3d12PresentFailureProbeMode::SceneDirectPresentDeviceRemoved, assertContext);
+        failureCode = valid ? 0 : (cue::was_d3d12_present_device_removal_probe_unavailable() ? 77 : 47);
+    }
     else if (mode == "ResizeLifecycle")
     {
         valid = run_resize_lifecycle(*window, *processSinkView, assertContext);
@@ -958,6 +981,11 @@ int main(int a_argumentCount, char **a_arguments)
     {
         valid = cue::verify_d3d12_rtv_rebuild_failure_for_probe(nativeWindow, 640, 360, assertContext);
         failureCode = valid ? 0 : 21;
+    }
+    else if (mode == "SceneRtvRebuildFailure")
+    {
+        valid = cue::verify_d3d12_scene_rtv_rebuild_failure_for_probe(nativeWindow, 640, 360, assertContext);
+        failureCode = valid ? 0 : 48;
     }
     else if (mode == "TerminalResizeRejection")
     {

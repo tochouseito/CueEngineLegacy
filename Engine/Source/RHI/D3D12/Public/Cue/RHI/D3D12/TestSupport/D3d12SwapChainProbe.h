@@ -21,6 +21,9 @@ enum class D3d12PresentFailureProbeMode
     DirectPresentDeviceRemoved,
     RecoverySignalDeviceRemoved,
     RegularSignalDeviceRemoved,
+    SceneBeginFrameUnavailable,
+    SceneSignalUnavailable,
+    SceneDirectPresentDeviceRemoved,
 };
 
 enum class D3d12ResizeScenePixelResult
@@ -131,6 +134,11 @@ struct D3d12DredOwnerProbeReport final
 [[nodiscard]] bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
                                                               std::uint32_t a_height,
                                                               AssertContext &a_assertContext) noexcept;
+
+/// @brief Scene投入後のRTV再構築失敗でGPU Idle証明済みResourceだけが解放されることを検証する
+[[nodiscard]] bool verify_d3d12_scene_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                                    std::uint32_t a_height,
+                                                                    AssertContext &a_assertContext) noexcept;
 
 /// @brief Resize後のDepthまたはDSV生成失敗で部分Scene Resourceを解放し、次Frameを再試行できることを検証する
 [[nodiscard]] bool verify_d3d12_scene_resize_creation_failure_for_probe(const void *a_nativeWindow,

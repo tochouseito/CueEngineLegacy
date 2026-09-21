@@ -346,6 +346,25 @@ std::uintptr_t D3d12ScenePass::depth_identity_for_probe() const noexcept
     return reinterpret_cast<std::uintptr_t>(m_depth.Get());
 }
 
+#if CUE_D3D12_TESTING
+bool D3d12ScenePass::has_geometry_for_probe() const noexcept
+{
+    return m_vertices && m_indices;
+}
+
+bool D3d12ScenePass::has_constants_for_probe() const noexcept
+{
+    for (const Microsoft::WRL::ComPtr<ID3D12Resource> &constant : m_constants)
+    {
+        if (!constant)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
 void D3d12ScenePass::record(ID3D12GraphicsCommandList *a_commandList, D3D12_CPU_DESCRIPTOR_HANDLE a_rtv,
                             std::uint32_t a_frameIndex, std::uint32_t a_width, std::uint32_t a_height,
                             const PresentationSceneFrameDescriptor &a_descriptor) noexcept

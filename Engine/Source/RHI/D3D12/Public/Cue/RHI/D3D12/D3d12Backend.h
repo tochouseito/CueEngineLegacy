@@ -68,6 +68,8 @@ class D3d12Backend : public GraphicsBackend
     friend Result<std::uint32_t> d3d12_dred_attempt_count_for_probe(D3d12Backend &) noexcept;
     friend Result<D3d12BackendOwnerProbeReport> probe_d3d12_backend_owners_for_probe(D3d12Backend &) noexcept;
     friend Result<D3d12DredOwnerProbeReport> probe_d3d12_dred_owners_for_probe(D3d12Backend &) noexcept;
+    friend bool verify_d3d12_rtv_rebuild_failure_impl(const void *, std::uint32_t, std::uint32_t, bool,
+                                                      AssertContext &) noexcept;
     friend bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *, std::uint32_t, std::uint32_t,
                                                            AssertContext &) noexcept;
     friend bool verify_d3d12_scene_resize_creation_failure_for_probe(const void *, std::uint32_t, std::uint32_t,
