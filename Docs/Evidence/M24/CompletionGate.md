@@ -37,6 +37,37 @@ Dynamic／Static Package Trust、D3D12 固定 Scene Pass の所有権を統合�
 Repository 指定の `scripts/codex_build.ps1` はこの Checkout に存在しないため、正式な CMake Preset を直接使用した。
 NuGet restore と第三者 Library の追加／更新は行っていない。
 
+### Manual Hardware Package Probe Preparation
+
+Hardware Package Probeは、Release CTestが生成する無視対象の`out`配下のFixtureだけを使用した。
+`Cue.RuntimeHost.Package.Process`は終了時にDynamic Sceneをv1 Empty Sceneへ戻し、
+`Cue.RuntimeHost.StaticScenePackage.Process`は改ざん拒否の確認としてStatic Scene末尾へ`x`を追加する。
+そのため、次の手順で両FixtureをCTest時と同じCanonical v2 Camera／Cube Sceneへ復元してから実行した。
+
+1. Repository Rootから次を実行し、Release Fixtureを作り直した。
+   `ctest --preset windows-vs2026-release -R "^Cue.RuntimeHost.(Package|StaticScenePackage).Process$" --output-on-failure`
+2. Static Scene
+   `out/build/windows-vs2026/Engine/Tests/RuntimeHost/RuntimeStaticScenePackage/Release/RelocatedStaticPackage/Data/Scenes/51234567-89ab-4cde-8f01-23456789abcd.cueruntime.json`
+   の末尾1 byte `x`だけを除去した。復元後は853 byte、SHA-256
+   `1583c29fd070c0e1da10579479af1f2caefa201f73333e61bb39881f8b0d4c9d`となり、同Directoryの
+   `CuePackage.json`にCTestが記録した`startupSceneRuntimeData`のSize／Hashと一致することを確認した。
+3. 復元したStatic SceneをDynamic Scene
+   `out/build/windows-vs2026/Engine/Tests/RuntimeHost/RuntimePackageProcess/Release/RelocatedPackage/Data/Scenes/51234567-89ab-4cde-8f01-23456789abcd.cueruntime.json`
+   へCopyした。Dynamic `CuePackage.json`の`startupSceneRuntimeData`を853 byteと上記SHA-256へ更新し、
+   実行前に実Fileと一致することを確認した。
+4. Dynamic Probeは
+   `out/build/windows-vs2026/Engine/Tests/RuntimeHost/RuntimePackageProcess/Release/UnrelatedWorkingDirectory`
+   をWorking Directoryとして、
+   `../RelocatedPackage/CueRuntimeHost.exe --package-scene-smoke-test hardware`を実行した。
+5. Static Probeは
+   `out/build/windows-vs2026/Engine/Tests/RuntimeHost/RuntimeStaticScenePackage/Release/UnrelatedWorkingDirectory`
+   をWorking Directoryとして、
+   `../RelocatedStaticPackage/CueGameProduct.exe --package-scene-smoke-test hardware`を実行した。
+
+両ProbeはNVIDIA GeForce RTX 3060でExit Code 0となり、`MainCamera=Ready, MeshCount=1`、
+`Mode=Scene, CubeCount=1`、`Runtime Package Scene Pixel Probe: Passed`、`WindowClosed FrameCount=1`を出力した。
+Fixtureの復元は`out`配下だけへ行い、Source、Test、配布物定義には変更を加えていない。
+
 ## Local Validation Results
 
 - Debug: 全Target Build成功、298/298 Test成功、244.24秒
