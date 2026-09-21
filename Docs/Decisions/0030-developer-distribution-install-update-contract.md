@@ -195,27 +195,41 @@ Registry Revisionと期待Revisionを照合してから変更する。別Process
 上書きせず再試行またはConflict Errorとする。Abandoned WriterはOperation JournalとVersion Directoryを
 再検証してからRecoveryする。Atomic ReplaceだけをProcess間排他の代用にしない。
 
-Operation Journalは`schemaVersion: 1`のCanonical JSONとし、Operation ID、Operation Kind、単調なStage、
-Expected Registry Revision、対象Version／Bundle Identity、Manifest Digest、Worker Identityを必須Memberとして
-記録する。Reader／Workerは対応外Schema、未知Member、欠落Member、非Canonical表現、後退または不正なStage
+Operation Journalは`schemaVersion: 1`のCanonical JSONとし、全KindでOperation ID、Operation Kind、単調な
+Stage、Worker Identityを必須Memberとして記録する。`install`／`update`はExpected Registry Revision、対象
+Version／Bundle Identity、Manifest Digest、`rollback`はExpected Registry Revision、選択Version Identityと
+Manifest Digest、`uninstall`はExpected Registry Revision、対象Version IdentityとManifest DigestをKind別必須
+Memberとする。Reader／Workerは対応外Schema、未知Member、欠落Member、非Canonical表現、後退または不正なStage
 遷移をFail-closedで拒否し、旧Writerが新Schemaを上書きしない。各Stageは耐久書込みとAtomic Replace後にだけ
 進め、Workerは自身が対応するSchemaとOperation Kindだけを再開する。破損または非互換JournalはEvidenceとして
 Quarantineし、Payload／Registryを推測で変更しない。意味変更と移行は専用Issueで新Schemaと明示Migrationを
 定義し、暗黙Upgradeしない。
 
+`registryRecovery`はExpected Registry Revision、単一Version／Bundle Identity、単一Manifest Digestを持たない。
+代わりに`sourceRegistryEvidence`を`prepared`から必須とする。既存破損Fileは`kind: corrupt`、退避Evidence
+Identity、Size、SHA-256を記録し、Fileが存在しない場合は`kind: missing`を記録するCanonical Discriminated
+Objectとする。
+`candidatesValidated`以降は検証済み候補をVersion Identity、Bundle Identity、Manifest Digest、Payload完了Marker
+Digest、Probe成功Marker DigestのCanonical配列としてJournalへ耐久記録する。Recovery再開時は候補配列と現行
+Payload／Markerを全件再検証し、一致しない場合は再構築を進めない。
+
 Journal v1のStageは「最後に完了した耐久副作用」を表し、次の表以外の値と遷移を許可しない。
 
 | Operation Kind | 許可する単調Stage遷移 | Stageが証明する耐久副作用 |
 | --- | --- | --- |
-| `install`／`update` | `prepared` → `payloadStaged` → `versionPublished` → `probeSucceeded` → `registryPublished` → `completed` | Journal作成 → Staging完了Marker → Version Rename → Probe成功Marker → Selectable Registry Publish → Staging／Journal Cleanup完了 |
-| `rollback` | `prepared` → `selectionPublished` → `completed` | Journal作成 → 既存Version選択のRegistry Publish → Journal Cleanup完了 |
-| `uninstall` | `prepared` → `removalBlocked` → `versionQuarantined` → `registryEntryRemoved` → `completed` | Journal作成 → `pendingRemoval` Registry Publish → Version Quarantine Rename → Registry Entry削除Publish → Quarantine削除とCleanup完了 |
-| `registryRecovery` | `prepared` → `candidatesValidated` → `registryPublished` → `completed` | Journal作成 → Manifest／Payload／Probe Marker候補検証 → Registry再構築Publish → Journal Cleanup完了 |
+| `install`／`update` | `prepared` → `payloadStaged` → `versionPublished` → `probeSucceeded` → `registryPublished` | Journal作成 → Staging完了Marker → Version Rename → Probe成功Marker → Selectable Registry Publish |
+| `rollback` | `prepared` → `selectionPublished` | Journal作成 → 既存Version選択のRegistry Publish |
+| `uninstall` | `prepared` → `removalBlocked` → `versionQuarantined` → `registryEntryRemoved` | Journal作成 → `pendingRemoval` Registry Publish → Version Quarantine Rename → Registry Entry削除Publish |
+| `registryRecovery` | `prepared` → `candidatesValidated` → `registryPublished` | Evidence記録済みJournal作成 → Manifest／Payload／Probe Marker候補配列検証 → Registry再構築Publish |
 
 Writerは副作用を耐久化して再読込検証した後だけ次StageをAtomic Replaceする。副作用後かつStage更新前にCrashした
 場合、Recoveryは現在Stageの直後に期待されるFile／Marker／RegistryだけをOperation IdentityとDigestで照合し、
 完全一致時だけ同じ副作用を冪等完了してStageを進める。欠落、別Identity、想定外の先行副作用、複数候補、
 Stage後退を検出した場合は再開もRollbackも推測せず、Journalと対象をEvidenceへ隔離して明示診断する。
+表の最終Stageを耐久化し、その共有状態を再読込検証した後にだけOperation固有Staging／Quarantineを冪等Cleanupして
+Journalを削除する。Journalには削除後の`completed` Stageを持たせず、最終Stageの検証とCleanupを終えたJournal
+不在をOperation完了状態とする。最終Stage後かつJournal削除前にCrashした場合は、共有状態を再検証してCleanupと
+Journal削除だけを再実行する。
 
 ### Update, Rollback, and Uninstall
 
