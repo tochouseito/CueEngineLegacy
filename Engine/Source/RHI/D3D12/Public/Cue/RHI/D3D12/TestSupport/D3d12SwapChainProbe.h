@@ -194,4 +194,11 @@ struct D3d12DredOwnerProbeReport final
 /// @brief Production PresentationのCurrent Back Bufferを指定色でClearしてSubmitする
 [[nodiscard]] bool submit_d3d12_clear_frame_for_probe(PresentationContext &a_presentation,
                                                       const std::array<float, 4> &a_color) noexcept;
+
+/// @brief Production Presentationの次回Scene Frameを画素検証用Readbackへ記録する
+[[nodiscard]] bool arm_d3d12_scene_pixel_capture_for_probe(PresentationContext &a_presentation) noexcept;
+
+/// @brief ShutdownでGPU完了済みのScene CaptureがClear色と非Clear画素を含むことを検証する
+[[nodiscard]] bool validate_d3d12_scene_pixel_capture_for_probe(
+    PresentationContext &a_presentation, const std::array<float, 4> &a_clearColor) noexcept;
 } // namespace cue

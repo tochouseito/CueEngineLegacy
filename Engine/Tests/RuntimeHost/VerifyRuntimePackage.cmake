@@ -147,20 +147,23 @@ set(secondCameraComponent
 set(meshComponent
     "{\"instanceId\":\"30000000-0000-4000-8000-000000000002\",\"typeId\":\"70000000-0000-4000-8000-000000000002\",\"schemaVersion\":1,\"fields\":[{\"fieldId\":1,\"value\":\"cue://engine/mesh/cube\"}]}"
 )
-set(objectPrefix
-    "{\"objectId\":\"20000000-0000-4000-8000-000000000001\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":["
+set(meshObject
+    "{\"objectId\":\"20000000-0000-4000-8000-000000000001\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[${meshComponent}]}"
 )
-set(secondObject
-    "{\"objectId\":\"20000000-0000-4000-8000-000000000002\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,0,0],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[${secondCameraComponent}]}"
+set(cameraObject
+    "{\"objectId\":\"20000000-0000-4000-8000-000000000002\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,1,-5],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[${cameraComponent}]}"
+)
+set(secondCameraObject
+    "{\"objectId\":\"20000000-0000-4000-8000-000000000003\",\"parentObjectId\":null,\"active\":true,\"transform\":{\"translation\":[0,1,-4],\"rotation\":[0,0,0,1],\"scale\":[1,1,1]},\"components\":[${secondCameraComponent}]}"
 )
 set(missingCameraScene
-    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${meshComponent}]}]}${runtimeLf}"
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${meshObject}]}${runtimeLf}"
 )
 set(readyCameraScene
-    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${cameraComponent},${meshComponent}]}]}${runtimeLf}"
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${meshObject},${cameraObject}]}${runtimeLf}"
 )
 set(multipleCameraScene
-    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${cameraComponent},${meshComponent}]},${secondObject}]}${runtimeLf}"
+    "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${meshObject},${cameraObject},${secondCameraObject}]}${runtimeLf}"
 )
 function(verify_render_snapshot_scene sceneBytes expectedStatus expectedPresentationMode)
     write_runtime_data("${scenePackagePath}" "${sceneBytes}")
@@ -189,6 +192,56 @@ verify_render_snapshot_scene("${missingCameraScene}" "Missing" "DiagnosticClear"
 verify_render_snapshot_scene("${readyCameraScene}" "Ready" "Scene")
 verify_render_snapshot_scene("${multipleCameraScene}" "Multiple" "DiagnosticClear")
 verify_render_snapshot_scene("${readyCameraScene}" "Ready" "Scene")
+
+# 実PackageのMain CameraとCubeをWARPへ提出し、最終Back BufferのClear角画素とScene画素を検証する
+write_runtime_data("${scenePackagePath}" "${readyCameraScene}")
+write_package_manifest("${packageRoot}" "" "")
+execute_process(
+    COMMAND "${packageRoot}/CueRuntimeHost.exe" --package-scene-smoke-test warp
+    WORKING_DIRECTORY "${workingRoot}"
+    RESULT_VARIABLE scenePixelResult
+    OUTPUT_VARIABLE scenePixelOutput
+    ERROR_VARIABLE scenePixelError
+    TIMEOUT 15
+)
+set(scenePixelCombined "${scenePixelOutput}\n${scenePixelError}")
+foreach(requiredMessage IN ITEMS
+    "Runtime Render Snapshot: MainCamera=Ready, MeshCount=1"
+    "Runtime Presentation Frame: Mode=Scene, CubeCount=1"
+    "Runtime Package Scene Pixel Probe: Passed"
+)
+    string(FIND "${scenePixelCombined}" "${requiredMessage}" messagePosition)
+    if(messagePosition EQUAL -1)
+        message(FATAL_ERROR "Runtime Package Scene pixel output is missing: ${requiredMessage}\n${scenePixelCombined}")
+    endif()
+endforeach()
+if(NOT scenePixelResult EQUAL 0)
+    message(FATAL_ERROR "Runtime Package Scene pixel verification exited with ${scenePixelResult}\n${scenePixelCombined}")
+endif()
+
+# Camera不成立Sceneは通常起動では診断Clearを許すが、Scene画素Gateでは明示的な失敗にする
+write_runtime_data("${scenePackagePath}" "${missingCameraScene}")
+write_package_manifest("${packageRoot}" "" "")
+execute_process(
+    COMMAND "${packageRoot}/CueRuntimeHost.exe" --package-scene-smoke-test warp
+    WORKING_DIRECTORY "${workingRoot}"
+    RESULT_VARIABLE missingCameraPixelResult
+    OUTPUT_VARIABLE missingCameraPixelOutput
+    ERROR_VARIABLE missingCameraPixelError
+    TIMEOUT 15
+)
+set(missingCameraPixelCombined "${missingCameraPixelOutput}\n${missingCameraPixelError}")
+string(FIND "${missingCameraPixelCombined}" "Runtime Render Snapshot: MainCamera=Missing, MeshCount=1"
+    missingCameraSnapshotPosition)
+string(FIND "${missingCameraPixelCombined}" "Runtime Presentation Frame: Mode=DiagnosticClear, CubeCount=1"
+    missingCameraFramePosition)
+string(FIND "${missingCameraPixelCombined}" "Runtime Package Scene pixel verification failed"
+    missingCameraFailurePosition)
+if(missingCameraPixelResult EQUAL 0 OR missingCameraSnapshotPosition EQUAL -1 OR
+   missingCameraFramePosition EQUAL -1 OR missingCameraFailurePosition EQUAL -1)
+    message(FATAL_ERROR "Missing Main Camera did not fail the Scene pixel Gate\n${missingCameraPixelCombined}")
+endif()
+
 write_runtime_data("${scenePackagePath}" "${readyCameraScene}")
 write_package_manifest("${packageRoot}" "" "")
 execute_process(

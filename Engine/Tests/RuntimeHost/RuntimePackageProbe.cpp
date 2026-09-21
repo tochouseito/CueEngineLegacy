@@ -8,8 +8,10 @@
 #include <new>
 #include <string_view>
 
-/// @brief Game ModuleのManifest登録済みApp-local依存を実Loadさせる
+#if !defined(CUE_RUNTIME_PACKAGE_STATIC_PROBE)
+/// @brief Dynamic Game ModuleのManifest登録済みApp-local依存を実Loadさせる
 extern "C" __declspec(dllimport) int cue_runtime_package_dependency_probe() noexcept;
+#endif
 
 namespace
 {
@@ -60,10 +62,12 @@ CueGameModuleResult CUE_GAME_MODULE_CALL create_module(
     {
         return CUE_GAME_MODULE_RESULT_INVALID_ARGUMENT;
     }
+#if !defined(CUE_RUNTIME_PACKAGE_STATIC_PROBE)
     if (cue_runtime_package_dependency_probe() != 42)
     {
         return CUE_GAME_MODULE_RESULT_LIFECYCLE_FAILED;
     }
+#endif
     if (is_probe_mode("create-module-failure"))
     {
         if (a_diagnostic != nullptr && a_diagnostic->structSize >= sizeof(CueGameModuleDiagnosticV1) &&
