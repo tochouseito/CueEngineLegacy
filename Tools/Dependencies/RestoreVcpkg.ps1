@@ -20,6 +20,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$global:LASTEXITCODE = 0
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $thirdPartyRoot = Join-Path $repositoryRoot "ThirdParty"
