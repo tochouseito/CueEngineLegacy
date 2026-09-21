@@ -134,7 +134,10 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/.env", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/signing.p12", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Templates/.env", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Templates/.env.production", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Templates/credentials.json", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Templates/credentials.yaml", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Templates/secrets.yaml", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Templates/signing.p12", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Tests/Foo.cpp", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Tools/GameCoreBenchmark/CMakeLists.txt",

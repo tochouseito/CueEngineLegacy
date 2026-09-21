@@ -714,6 +714,11 @@ Result<std::string> write_distribution_manifest(const DistributionManifest &a_ma
             output.push_back('}');
         }
         output.append("]}\n");
+        if (output.size() > k_maximumManifestBytes)
+        {
+            return Result<std::string>::failure(make_distribution_error(
+                a_assertContext, DistributionError::ResourceLimitExceeded, "Distribution Manifest size is invalid"));
+        }
         return Result<std::string>::success(std::move(output));
     }
     catch (const std::bad_alloc &)

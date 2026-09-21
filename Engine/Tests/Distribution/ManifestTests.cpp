@@ -118,6 +118,24 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     return rewritten.has_value() && *rewritten.try_value() == *written.try_value();
 }
 
+[[nodiscard]] bool test_manifest_writer_resource_limit(const cue::AssertContext &a_assertContext)
+{
+    cue::distribution::DistributionManifest manifest = make_manifest();
+    constexpr std::size_t extraEntryCount = 18'000U;
+    constexpr std::size_t pathPaddingLength = 850U;
+    manifest.files.reserve(manifest.files.size() + extraEntryCount);
+    for (std::size_t index = 0U; index < extraEntryCount; ++index)
+    {
+        std::string path = "Engine/Source/Foundation/";
+        path.append(pathPaddingLength, 'a');
+        path.append(std::to_string(index));
+        path.append(".cpp");
+        manifest.files.push_back({cue::distribution::DistributionFileRole::EngineSource, std::move(path), 0U,
+                                  hash('1')});
+    }
+    return !cue::distribution::write_distribution_manifest(manifest, a_assertContext);
+}
+
 [[nodiscard]] bool test_noncanonical_and_unknown_rejected(const cue::AssertContext &a_assertContext)
 {
     auto written = cue::distribution::write_distribution_manifest(make_manifest(), a_assertContext);
@@ -290,6 +308,9 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(otherRoot.has_value() && *root.try_value() != *otherRoot.try_value());
     build.targetTriplet = "x86-windows";
     require(!cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext));
+    build.targetTriplet = "x64-windows";
+    build.crtLinkage = "static";
+    require(!cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext));
 
     auto versionDirectory = cue::distribution::make_distribution_version_directory(
         "1.2.3", "12345678-1234-4abc-8def-1234567890ab", a_assertContext);
@@ -307,6 +328,7 @@ int main()
     cue::Logger logger(fatalHandler, std::move(sinks));
     cue::AssertContext assertContext(logger, fatalHandler);
     require(test_manifest_round_trip(assertContext));
+    require(test_manifest_writer_resource_limit(assertContext));
     require(test_noncanonical_and_unknown_rejected(assertContext));
     require(test_manifest_identity_and_inventory_rejected(assertContext));
     require(test_identity_derivation(assertContext));

@@ -90,9 +90,11 @@ namespace
     const std::size_t separator = lower.rfind('/');
     const std::string_view fileName = std::string_view(lower).substr(
         separator == std::string::npos ? 0U : separator + 1U);
-    return lower.ends_with("cuegameproduct") || lower.ends_with("cuegameproduct.exe") || fileName == ".env" ||
-           fileName == "credentials.json" || fileName == "secrets.json" || fileName == "secrets.toml" ||
-           fileName == "id_rsa" || fileName == "id_ed25519";
+    const bool isEnvironmentFile = fileName == ".env" || fileName.starts_with(".env.");
+    const bool isCredentialsFile = fileName == "credentials" || fileName.starts_with("credentials.");
+    const bool isSecretsFile = fileName == "secrets" || fileName.starts_with("secrets.");
+    return lower.ends_with("cuegameproduct") || lower.ends_with("cuegameproduct.exe") || isEnvironmentFile ||
+           isCredentialsFile || isSecretsFile || fileName == "id_rsa" || fileName == "id_ed25519";
 }
 
 /// @brief Engine/Source配下でDeveloper Source SDKへ収録できる既知のFirst-party File種別か返す

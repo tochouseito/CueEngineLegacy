@@ -377,7 +377,7 @@ bool is_valid_dependency_build_identity(const DependencyBuildIdentity &a_identit
            a_identity.targetArchitecture == DistributionArchitecture::X64 &&
            a_identity.targetTriplet == "x64-windows" && is_identity_token(a_identity.compilerVendor) &&
            is_identity_token(a_identity.compilerVersion) && is_identity_token(a_identity.toolsetVersion) &&
-           is_identity_token(a_identity.crtLinkage) && is_identity_token(a_identity.crtVersion) &&
+           a_identity.crtLinkage == "dynamic" && is_identity_token(a_identity.crtVersion) &&
            is_identity_token(a_identity.windowsSdkTargetVersion);
 }
 
