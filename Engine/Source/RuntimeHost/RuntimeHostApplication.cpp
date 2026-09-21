@@ -6,6 +6,8 @@
 #include <Cue/GameCore/World.h>
 #include <Cue/Input/Windows/WindowsInputMessageSink.h>
 #include <Cue/Platform/Windows/WindowsMessageSink.h>
+#include <Cue/Renderer/RendererRuntimeSystem.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Runtime/Error.h>
 #include <Cue/Runtime/RuntimeSchema.h>
 #include <Cue/RuntimeHost/GameModuleQueryProvider.h>
@@ -24,7 +26,7 @@ constexpr std::string_view k_startupSceneAssetId = "70000000-0000-4000-8000-0000
 constexpr std::uint64_t k_sessionGeneration = 1U;
 constexpr std::int64_t k_maxDeltaNanoseconds = 100'000'000;
 
-/// @brief Standalone RuntimeのTransformとSceneObjectStateを持つ不変Registryを生成する
+/// @brief Standalone RuntimeのCore／Renderer Typeを持つ不変Registryを生成する
 [[nodiscard]] cue::Result<std::unique_ptr<cue::schema::SchemaRegistry>> make_schema_registry(
     cue::schema::SchemaRegistryIdentitySource &a_identitySource, const cue::AssertContext &a_assertContext) noexcept
 {
@@ -33,6 +35,12 @@ constexpr std::int64_t k_maxDeltaNanoseconds = 100'000'000;
     if (!added)
     {
         return cue::Result<std::unique_ptr<cue::schema::SchemaRegistry>>::failure(std::move(*added.try_error()));
+    }
+    cue::Result<void> rendererAdded = cue::renderer::add_renderer_schema_types(builder, a_assertContext);
+    if (!rendererAdded)
+    {
+        return cue::Result<std::unique_ptr<cue::schema::SchemaRegistry>>::failure(
+            std::move(*rendererAdded.try_error()));
     }
     return builder.seal();
 }
@@ -71,6 +79,7 @@ class RuntimeHostApplication::State final
     std::shared_ptr<GameModuleConnection> gameModule;
     std::unique_ptr<schema::SchemaRegistryIdentitySource> schemaIdentitySource;
     std::unique_ptr<schema::SchemaRegistry> schemaRegistry;
+    renderer::RenderSnapshotStore renderSnapshotStore;
     std::unique_ptr<runtime::RuntimeApplicationSession> session;
     std::unique_ptr<WindowsInputMessageSink> inputSink;
     bool isInputSinkAttached = false;
@@ -123,6 +132,19 @@ Result<std::unique_ptr<RuntimeHostApplication>> RuntimeHostApplication::start(
             return Result<std::unique_ptr<RuntimeHostApplication>>::failure(std::move(*session.try_error()));
         }
         state->session = std::move(*session.try_value());
+        renderer::RendererRuntimeSystemFactory rendererFactory(state->renderSnapshotStore);
+        Result<runtime::RuntimeSystemRegistration> rendererSystem = rendererFactory.create_system(a_assertContext);
+        if (!rendererSystem)
+        {
+            return Result<std::unique_ptr<RuntimeHostApplication>>::failure(std::move(*rendererSystem.try_error()));
+        }
+        Result<void> rendererRegistered = state->session->register_system(
+            std::move(rendererSystem.try_value()->descriptor), std::move(rendererSystem.try_value()->system),
+            std::move(rendererSystem.try_value()->componentBuilderFactories));
+        if (!rendererRegistered)
+        {
+            return Result<std::unique_ptr<RuntimeHostApplication>>::failure(std::move(*rendererRegistered.try_error()));
+        }
         for (runtime::RuntimeSystemRegistration &system : systems)
         {
             Result<void> registered = state->session->register_system(
@@ -304,6 +326,11 @@ std::uint64_t RuntimeHostApplication::world_id() const noexcept
 std::uint64_t RuntimeHostApplication::frame_count() const noexcept
 {
     return m_state->session->next_frame_index();
+}
+
+const renderer::RenderSnapshot &RuntimeHostApplication::render_snapshot() const noexcept
+{
+    return m_state->renderSnapshotStore.snapshot();
 }
 
 runtime::RuntimeApplicationStopReason RuntimeHostApplication::stop_reason() const noexcept

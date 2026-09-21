@@ -4,6 +4,7 @@
 #include <Cue/Foundation/Error.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/GameCore/Clock.h>
+#include <Cue/Renderer/RendererSchema.h>
 #include <Cue/Runtime/Error.h>
 #include <Cue/Runtime/RuntimeSchema.h>
 
@@ -647,6 +648,11 @@ Result<PreparedGameModule> connect_game_module(
         if (!coreSchemas)
         {
             return Result<PreparedGameModule>::failure(std::move(*coreSchemas.try_error()));
+        }
+        Result<void> rendererSchemas = renderer::add_renderer_schema_types(builder, a_assertContext);
+        if (!rendererSchemas)
+        {
+            return Result<PreparedGameModule>::failure(std::move(*rendererSchemas.try_error()));
         }
         Result<std::unique_ptr<schema::SchemaRegistry>> registry = builder.seal();
         if (!registry)

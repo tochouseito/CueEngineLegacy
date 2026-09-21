@@ -148,6 +148,10 @@ CueGameModuleResult CUE_GAME_MODULE_CALL start_system(
     {
         return CUE_GAME_MODULE_RESULT_LIFECYCLE_FAILED;
     }
+    if (is_probe_mode("system-start-failure"))
+    {
+        return CUE_GAME_MODULE_RESULT_LIFECYCLE_FAILED;
+    }
     state->isStarted = true;
     return CUE_GAME_MODULE_RESULT_SUCCESS;
 }
@@ -220,6 +224,13 @@ CueGameModuleResult CUE_GAME_MODULE_CALL register_systems(
         invalidSystem.stableId = {sizeof(CueGameUtf8ViewV1), CUE_GAME_MODULE_STRUCTURE_VERSION_1,
                                   k_invalidSystemIdText, sizeof(k_invalidSystemIdText) - 1U};
         static_cast<void>(a_sink->registerSystem(a_sink->context, &invalidSystem, a_diagnostic));
+    }
+    if (is_probe_mode("system-start-failure"))
+    {
+        CueGameSystemDescriptorV1 failingSystem = k_system;
+        failingSystem.phase = CUE_GAME_MODULE_SYSTEM_PHASE_POST_UPDATE;
+        failingSystem.order = 2000;
+        return a_sink->registerSystem(a_sink->context, &failingSystem, a_diagnostic);
     }
     return a_sink->registerSystem(a_sink->context, &k_system, a_diagnostic);
 }
