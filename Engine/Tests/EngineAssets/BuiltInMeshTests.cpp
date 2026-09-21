@@ -151,6 +151,26 @@ using MeshTriangleSignature = std::array<MeshVertexSignature, 3U>;
     return vertices;
 }
 
+/// @brief Vertex値から配列順に依存せず一意なMesh Indexを返す
+[[nodiscard]] std::uint16_t find_unique_vertex_index(
+    const cue::engine_assets::MeshView &a_mesh, const cue::engine_assets::MeshVertex &a_expected) noexcept
+{
+    const MeshVertexSignature expected = make_mesh_vertex_signature(a_expected);
+    std::size_t matchCount = 0U;
+    std::uint16_t matchIndex = 0U;
+    for (std::size_t vertexIndex = 0U; vertexIndex < a_mesh.vertices.size(); ++vertexIndex)
+    {
+        if (make_mesh_vertex_signature(a_mesh.vertices[vertexIndex]) == expected)
+        {
+            ++matchCount;
+            matchIndex = static_cast<std::uint16_t>(vertexIndex);
+        }
+    }
+
+    require(matchCount == 1U);
+    return matchIndex;
+}
+
 /// @brief Sphere Revision 1の順序非依存Triangle集合を作成する
 [[nodiscard]] std::array<MeshTriangleSignature, 224U> make_expected_sphere_triangle_set() noexcept
 {
@@ -483,11 +503,9 @@ void test_sphere_mesh() noexcept
     require(nearly_equal(maximum.y, 0.5F));
     require(nearly_equal(maximum.z, 0.5F));
 
-    const std::uint16_t bottomIndex = static_cast<std::uint16_t>(sphere.vertices.size() - 1U);
-    require(sphere.vertices.front().position == cue::math::Vector3{0.0F, 0.5F, 0.0F});
-    require(sphere.vertices.front().normal == cue::math::Vector3{0.0F, 1.0F, 0.0F});
-    require(sphere.vertices.back().position == cue::math::Vector3{0.0F, -0.5F, 0.0F});
-    require(sphere.vertices.back().normal == cue::math::Vector3{0.0F, -1.0F, 0.0F});
+    const auto expectedVertices = make_expected_sphere_vertices();
+    const std::uint16_t topIndex = find_unique_vertex_index(sphere, expectedVertices.front());
+    const std::uint16_t bottomIndex = find_unique_vertex_index(sphere, expectedVertices.back());
 
     std::size_t topTriangleCount = 0U;
     std::size_t bottomTriangleCount = 0U;
@@ -517,7 +535,7 @@ void test_sphere_mesh() noexcept
         require(cue::math::dot(triangleNormal, centroid) > 0.0F);
         triangleSet[triangleIndex++] = make_mesh_triangle_signature(first, second, third);
 
-        if (firstIndex == 0U || secondIndex == 0U || thirdIndex == 0U)
+        if (firstIndex == topIndex || secondIndex == topIndex || thirdIndex == topIndex)
         {
             ++topTriangleCount;
         }
@@ -536,18 +554,19 @@ void test_sphere_mesh() noexcept
 
     for (std::size_t ringIndex = 0U; ringIndex < ringCount; ++ringIndex)
     {
-        const std::uint16_t ringStart = static_cast<std::uint16_t>(1U + ringIndex * sliceCount);
-        const std::uint16_t ringEnd = static_cast<std::uint16_t>(ringStart + sliceCount - 1U);
-        require(count_edge_uses(sphere, ringEnd, ringStart) == 2U);
-
-        for (std::size_t firstSlice = 0U; firstSlice < sliceCount; ++firstSlice)
+        const std::size_t expectedRingStart = 1U + ringIndex * sliceCount;
+        std::array<std::uint16_t, sliceCount> ringIndices{};
+        for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
         {
-            for (std::size_t secondSlice = firstSlice + 1U; secondSlice < sliceCount; ++secondSlice)
-            {
-                require(sphere.vertices[ringStart + firstSlice].position !=
-                        sphere.vertices[ringStart + secondSlice].position);
-            }
+            ringIndices[sliceIndex] =
+                find_unique_vertex_index(sphere, expectedVertices[expectedRingStart + sliceIndex]);
         }
+
+        const std::uint16_t ringStart = ringIndices.front();
+        const std::uint16_t ringEnd = ringIndices.back();
+        require(count_edge_uses(sphere, ringEnd, ringStart) == 2U);
+        std::ranges::sort(ringIndices);
+        require(std::ranges::adjacent_find(ringIndices) == ringIndices.end());
     }
 }
 
@@ -559,7 +578,9 @@ void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
     using cue::engine_assets::EngineAssetsError;
 
     const auto catalog = cue::engine_assets::built_in_mesh_catalog();
+    const auto authoringProviders = cue::engine_assets::built_in_authoring_mesh_providers();
     require(catalog.size() == 3U);
+    require(authoringProviders.size() == 3U);
     require(catalog.front().assetId == cue::engine_assets::k_cubeMeshAssetId);
     require(catalog.front().kind == BuiltInAssetKind::Mesh);
     require(catalog.front().revision == cue::engine_assets::k_cubeMeshRevision);
@@ -571,7 +592,8 @@ void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
 
     auto descriptor =
         cue::engine_assets::resolve_builtin_mesh_descriptor(cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
-    auto mesh = cue::engine_assets::resolve_builtin_mesh(cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
+    auto mesh = cue::engine_assets::resolve_builtin_mesh(authoringProviders,
+                                                         cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
     require(descriptor.has_value() && *descriptor.try_value() == &catalog.front());
     require(mesh.has_value());
     require(mesh.try_value()->vertices.data() == cue::engine_assets::built_in_cube_mesh().vertices.data());
@@ -581,8 +603,10 @@ void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
         cue::engine_assets::resolve_builtin_mesh_descriptor(cue::engine_assets::k_planeMeshAssetId, a_assertContext);
     auto sphereDescriptor =
         cue::engine_assets::resolve_builtin_mesh_descriptor(cue::engine_assets::k_sphereMeshAssetId, a_assertContext);
-    auto plane = cue::engine_assets::resolve_builtin_mesh(cue::engine_assets::k_planeMeshAssetId, a_assertContext);
-    auto sphere = cue::engine_assets::resolve_builtin_mesh(cue::engine_assets::k_sphereMeshAssetId, a_assertContext);
+    auto plane = cue::engine_assets::resolve_builtin_mesh(
+        authoringProviders, cue::engine_assets::k_planeMeshAssetId, a_assertContext);
+    auto sphere = cue::engine_assets::resolve_builtin_mesh(
+        authoringProviders, cue::engine_assets::k_sphereMeshAssetId, a_assertContext);
     require(planeDescriptor.has_value());
     require((*planeDescriptor.try_value())->revision == cue::engine_assets::k_planeMeshRevision);
     require((*planeDescriptor.try_value())->displayName == "Plane");
@@ -599,6 +623,14 @@ void test_mesh_catalog(const cue::AssertContext &a_assertContext) noexcept
     require(sphere.has_value());
     require(plane.try_value()->vertices.data() == cue::engine_assets::built_in_plane_mesh().vertices.data());
     require(sphere.try_value()->vertices.data() == cue::engine_assets::built_in_sphere_mesh().vertices.data());
+
+    const std::array cubeOnlyProviders = {cue::engine_assets::built_in_cube_mesh_provider()};
+    auto selectedCube = cue::engine_assets::resolve_builtin_mesh(
+        cubeOnlyProviders, cue::engine_assets::k_cubeMeshAssetId, a_assertContext);
+    auto unselectedPlane = cue::engine_assets::resolve_builtin_mesh(
+        cubeOnlyProviders, cue::engine_assets::k_planeMeshAssetId, a_assertContext);
+    require(selectedCube.has_value());
+    require(has_engine_assets_error(unselectedPlane, EngineAssetsError::PayloadUnavailable));
 
     auto unknown = cue::engine_assets::resolve_builtin_mesh_descriptor("cue://engine/mesh/unknown", a_assertContext);
     auto kindMismatch =

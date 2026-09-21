@@ -70,7 +70,15 @@ struct BuiltInMeshDescriptor final
 [[nodiscard]] Result<const BuiltInMeshDescriptor *> resolve_builtin_mesh_descriptor(
     std::string_view a_assetId, const AssertContext &a_assertContext) noexcept;
 
-/// @brief Canonical IDをProcess寿命のAllocationなしMesh Viewへ解決する
-[[nodiscard]] Result<MeshView> resolve_builtin_mesh(std::string_view a_assetId,
+/// @brief Editor／Developer Tool向けに全Built-in Mesh Payload Providerを返す
+///
+/// Release Shipping Productはこの集合を使用せず、Reference Closureから必要なProviderだけを明示構成する。
+[[nodiscard]] std::span<const BuiltInMeshProvider> built_in_authoring_mesh_providers() noexcept;
+
+/// @brief Product Buildが明示選択したProvider集合からAllocationなしMesh Viewを解決する
+///
+/// Provider集合にないCanonical IDはPayloadUnavailableとして失敗し、未選択Payloadを暗黙Linkしない。
+[[nodiscard]] Result<MeshView> resolve_builtin_mesh(std::span<const BuiltInMeshProvider> a_providers,
+                                                    std::string_view a_assetId,
                                                     const AssertContext &a_assertContext) noexcept;
 } // namespace cue::engine_assets

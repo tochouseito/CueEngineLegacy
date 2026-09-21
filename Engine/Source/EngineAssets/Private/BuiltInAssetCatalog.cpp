@@ -202,7 +202,8 @@ Result<const BuiltInMeshDescriptor *> resolve_builtin_mesh_descriptor(std::strin
                                  "Built-in Mesh Asset ID is not present in the Engine Catalog"));
 }
 
-Result<MeshView> resolve_builtin_mesh(std::string_view a_assetId, const AssertContext &a_assertContext) noexcept
+Result<MeshView> resolve_builtin_mesh(std::span<const BuiltInMeshProvider> a_providers, std::string_view a_assetId,
+                                     const AssertContext &a_assertContext) noexcept
 {
     Result<const BuiltInMeshDescriptor *> descriptor = resolve_builtin_mesh_descriptor(a_assetId, a_assertContext);
     if (!descriptor)
@@ -210,17 +211,27 @@ Result<MeshView> resolve_builtin_mesh(std::string_view a_assetId, const AssertCo
         return Result<MeshView>::failure(std::move(*descriptor.try_error()));
     }
 
-    if ((*descriptor.try_value())->assetId == k_cubeMeshAssetId)
+    for (const BuiltInMeshProvider &provider : a_providers)
     {
-        return Result<MeshView>::success(built_in_cube_mesh());
-    }
-    if ((*descriptor.try_value())->assetId == k_planeMeshAssetId)
-    {
-        return Result<MeshView>::success(built_in_plane_mesh());
-    }
-    if ((*descriptor.try_value())->assetId == k_sphereMeshAssetId)
-    {
-        return Result<MeshView>::success(built_in_sphere_mesh());
+        if (provider.assetId != a_assetId)
+        {
+            continue;
+        }
+        if (provider.revision != (*descriptor.try_value())->revision || provider.load == nullptr)
+        {
+            return Result<MeshView>::failure(make_engine_assets_error(
+                a_assertContext, EngineAssetsError::PayloadUnavailable,
+                "Selected Built-in Mesh Provider does not match the Canonical Descriptor"));
+        }
+
+        MeshView mesh = provider.load();
+        if (mesh.assetId != provider.assetId || mesh.revision != provider.revision)
+        {
+            return Result<MeshView>::failure(make_engine_assets_error(
+                a_assertContext, EngineAssetsError::PayloadUnavailable,
+                "Selected Built-in Mesh Provider returned a mismatched Payload"));
+        }
+        return Result<MeshView>::success(std::move(mesh));
     }
 
     return Result<MeshView>::failure(make_engine_assets_error(a_assertContext, EngineAssetsError::PayloadUnavailable,

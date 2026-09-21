@@ -4,8 +4,11 @@ target_sources(
     Cue.EngineAssets
     PRIVATE
         Private/BuiltInAssetCatalog.cpp
-        Private/BuiltInMesh.cpp
+        Private/BuiltInAuthoringMeshCatalog.cpp
+        Private/CubeMesh.cpp
         Private/Error.cpp
+        Private/PlaneMesh.cpp
+        Private/SphereMesh.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public
