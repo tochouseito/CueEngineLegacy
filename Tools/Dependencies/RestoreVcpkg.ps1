@@ -297,6 +297,44 @@ function Test-VcpkgExecutable
     }
 }
 
+function Test-VcpkgCheckout
+{
+    if (-not (Test-Path -LiteralPath $toolRoot -PathType Container))
+    {
+        return $false
+    }
+    try
+    {
+        $commonArguments = @(
+            "-c", "core.longpaths=true", "-c", "safe.directory=$toolRoot", "-C", $toolRoot
+        )
+        $trackedChanges = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList (
+            $commonArguments + @("status", "--porcelain", "--untracked-files=no")
+        ) -WorkingDirectory $repositoryRoot).Trim()
+        $actualRepository = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList (
+            $commonArguments + @("remote", "get-url", "origin")
+        ) -WorkingDirectory $repositoryRoot).Trim()
+        $actualCommit = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList (
+            $commonArguments + @("rev-parse", "HEAD")
+        ) -WorkingDirectory $repositoryRoot).Trim()
+        $longPaths = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList (
+            $commonArguments + @("config", "--local", "--get", "core.longpaths")
+        ) -WorkingDirectory $repositoryRoot).Trim()
+        $metadataPath = Join-Path $toolRoot "scripts\vcpkg-tool-metadata.txt"
+        $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-StringData
+        return $trackedChanges.Length -eq 0 -and
+            $actualRepository -ceq $configuration.repository -and
+            $actualCommit -ceq $configuration.commit -and
+            $longPaths -ceq "true" -and
+            $metadata.VCPKG_TOOL_RELEASE_TAG -ceq $configuration.release -and
+            $metadata.VCPKG_TOOL_SOURCE_SHA -ceq $configuration.sourceSha512
+    }
+    catch
+    {
+        return $false
+    }
+}
+
 function Test-CompletedDependencyRoot
 {
     if (-not $rootMode -or -not (Test-Path -LiteralPath $finalDependencyRoot -PathType Container))
@@ -309,7 +347,7 @@ function Test-CompletedDependencyRoot
         return $false
     }
     $actualMarker = [IO.File]::ReadAllText($markerPath)
-    if ($actualMarker -cne $expectedMarker -or -not (Test-VcpkgExecutable))
+    if ($actualMarker -cne $expectedMarker -or -not (Test-VcpkgCheckout) -or -not (Test-VcpkgExecutable))
     {
         return $false
     }
@@ -343,6 +381,10 @@ function Invoke-VcpkgRestore
             $configuration.commit
         ) -WorkingDirectory $toolRoot
     }
+
+    Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
+        "-c", "safe.directory=$toolRoot", "-C", $toolRoot, "config", "core.longpaths", "true"
+    ) -WorkingDirectory $repositoryRoot
 
     $trackedChanges = (Invoke-CapturedProcess -FilePath $gitExecutable -ArgumentList @(
         "-c", "core.longpaths=true", "-c", "safe.directory=$toolRoot", "-C", $toolRoot,
