@@ -19,7 +19,45 @@ if(
     )
 endif()
 
+find_program(
+    cueD3d12Fxc
+    NAMES fxc.exe
+    HINTS
+        "$ENV{WindowsSdkDir}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+    NO_DEFAULT_PATH
+    REQUIRED
+)
+
+set(cueD3d12ShaderDirectory "${CMAKE_CURRENT_BINARY_DIR}/Generated")
+set(cueD3d12VertexShader "${cueD3d12ShaderDirectory}/SceneVertexShader.h")
+set(cueD3d12PixelShader "${cueD3d12ShaderDirectory}/ScenePixelShader.h")
+
+add_custom_command(
+    OUTPUT "${cueD3d12VertexShader}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${cueD3d12ShaderDirectory}"
+    COMMAND "${cueD3d12Fxc}" /nologo /T vs_5_1 /E vs_main /Fh "${cueD3d12VertexShader}" /Vn
+            g_cueSceneVertexShader "${CMAKE_CURRENT_SOURCE_DIR}/Private/SceneFrame.hlsl"
+    DEPENDS Private/SceneFrame.hlsl
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${cueD3d12PixelShader}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${cueD3d12ShaderDirectory}"
+    COMMAND "${cueD3d12Fxc}" /nologo /T ps_5_1 /E ps_main /Fh "${cueD3d12PixelShader}" /Vn
+            g_cueScenePixelShader "${CMAKE_CURRENT_SOURCE_DIR}/Private/SceneFrame.hlsl"
+    DEPENDS Private/SceneFrame.hlsl
+    VERBATIM
+)
+
+add_custom_target(
+    CueD3d12SceneShaders
+    DEPENDS "${cueD3d12VertexShader}" "${cueD3d12PixelShader}"
+)
+
 add_library(Cue.RHI.D3D12 STATIC)
+add_dependencies(Cue.RHI.D3D12 CueD3d12SceneShaders)
 
 set_property(
     TARGET Cue.RHI.D3D12
@@ -46,6 +84,8 @@ target_sources(
         Private/D3d12QueueState.h
         Private/D3d12RtvHeap.cpp
         Private/D3d12RtvHeap.h
+        Private/D3d12ScenePass.cpp
+        Private/D3d12ScenePass.h
         Private/D3d12SwapChainState.cpp
         Private/D3d12SwapChainState.h
     PUBLIC
@@ -61,6 +101,7 @@ target_link_libraries(
         Cue.RHI
     PRIVATE
         Cue.Foundation.Windows
+        Cue.EngineAssets
         D3D12
         DXGI
         DXGUID
@@ -83,6 +124,7 @@ target_include_directories(
         Public
     PRIVATE
         Private
+        "${cueD3d12ShaderDirectory}"
 )
 
 if(BUILD_TESTING)
@@ -97,6 +139,7 @@ if(BUILD_TESTING)
             Private/TestSupport/D3d12ProbeUtilities.h
             Private/TestSupport/D3d12QueueStateProbe.cpp
             Private/TestSupport/D3d12RtvHeapProbe.cpp
+            Private/TestSupport/D3d12ScenePassProbe.cpp
             Private/TestSupport/D3d12SwapChainProbe.cpp
         PUBLIC
             FILE_SET HEADERS
@@ -107,6 +150,7 @@ if(BUILD_TESTING)
                 Public/Cue/RHI/D3D12/TestSupport/D3d12FrameCommandProbe.h
                 Public/Cue/RHI/D3D12/TestSupport/D3d12QueueStateProbe.h
                 Public/Cue/RHI/D3D12/TestSupport/D3d12RtvHeapProbe.h
+                Public/Cue/RHI/D3D12/TestSupport/D3d12ScenePassProbe.h
                 Public/Cue/RHI/D3D12/TestSupport/D3d12SwapChainProbe.h
     )
 endif()

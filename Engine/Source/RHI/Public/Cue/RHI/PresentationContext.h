@@ -4,9 +4,13 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 namespace cue
 {
+/// M24固定Scene Frameで一度に受理するCube数の上限
+inline constexpr std::uint32_t k_presentationSceneMaxCubeCount = 4096U;
+
 /// @brief Native Resource の保持段階と Owner の破棄可否を表す Presentation Context の Lifecycle 状態
 enum class PresentationContextState
 {
@@ -35,6 +39,24 @@ struct PresentationFrameDescriptor final
 {
     /// @brief Back Buffer へ書き込む RGBA Clear Color
     std::array<float, 4> clearColor;
+};
+
+/// @brief 固定Scene Frameで描画するBuilt-in Cube一つ分の非Native入力
+struct PresentationSceneCube final
+{
+    /// @brief Row-majorかつRow-vector規約のLocal-to-World Matrix
+    std::array<float, 16> localToWorld;
+};
+
+/// @brief M24の固定Cube描画だけを受け取るRenderer非依存のFrame入力
+struct PresentationSceneFrameDescriptor final
+{
+    /// @brief Back BufferのRGBA Clear Color
+    std::array<float, 4> clearColor;
+    /// @brief Row-majorかつRow-vector規約のWorld-to-Clip Matrix
+    std::array<float, 16> viewProjection;
+    /// @brief 呼出し中だけ借用するCube列。件数はk_presentationSceneMaxCubeCount以下
+    std::span<const PresentationSceneCube> cubes;
 };
 
 /// @brief Frame 投入の成功を表示可否と分けて通知する Presentation 結果
@@ -102,6 +124,12 @@ class PresentationContext
     /// Ready 以外、Backend が Ready 以外、または 0 Size の Resize 延期中は Frame を投入しない
     [[nodiscard]] virtual Result<PresentationFrameStatus> present_frame(
         const PresentationFrameDescriptor &a_descriptor) noexcept = 0;
+
+    /// @brief 固定Cube Sceneを既存の単一Submit／Present／Signal経路で投入する
+    /// @details 入力をCommand記録前に検証し、借用Cube列とNative Commandを呼出し後に保持しない
+    /// Clear専用present_frameの契約は変更せず、非対応Contextは状態変更前に診断Errorを返す
+    [[nodiscard]] virtual Result<PresentationFrameStatus> present_scene_frame(
+        const PresentationSceneFrameDescriptor &a_descriptor) noexcept = 0;
 
     /// @brief Presentation Resource を指定 Size へ再構築する
     ///

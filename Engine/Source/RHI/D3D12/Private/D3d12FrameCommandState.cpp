@@ -5,6 +5,7 @@
 
 #include "D3d12Error.h"
 #include "D3d12QueueState.h"
+#include "D3d12ScenePass.h"
 
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Error.h>
@@ -40,6 +41,7 @@ constexpr std::int64_t k_invalidFrameResource = 65;
 constexpr std::int64_t k_invalidBackBufferTransition = 94;
 constexpr std::int64_t k_invalidBackBufferResource = 95;
 constexpr std::int64_t k_invalidBackBufferClear = 97;
+constexpr std::int64_t k_invalidSceneRecord = 307;
 constexpr std::int64_t k_fenceValueExhausted = 45;
 constexpr std::uint32_t k_invalidFrameIndexValue = (std::numeric_limits<std::uint32_t>::max)();
 
@@ -668,6 +670,36 @@ Result<void> D3d12FrameCommandState::clear_back_buffer(std::uint32_t a_frameInde
 
     m_functions.setMarker(m_commandList.Get(), "ClearBackBuffer");
     m_functions.clearRenderTargetView(m_commandList.Get(), *handleResult.try_value(), a_color.data(), 0, nullptr);
+    return Result<void>::success();
+}
+
+Result<void> D3d12FrameCommandState::record_scene(std::uint32_t a_frameIndex, D3d12RtvHeap &a_heap,
+                                                  D3d12ScenePass &a_pass, std::uint32_t a_width,
+                                                  std::uint32_t a_height,
+                                                  const PresentationSceneFrameDescriptor &a_descriptor) noexcept
+{
+    update_status_from_queue();
+    if (!m_acceptingFrames || m_status != D3d12FrameCommandStatus::Ready ||
+        a_frameIndex >= k_d3d12FrameContextCount || m_commandListState != D3d12CommandListState::Recording ||
+        a_frameIndex != m_activeFrameIndex)
+    {
+        return Result<void>::failure(make_error(*m_assertContext, k_invalidSceneRecord,
+                                                "D3D12 Scene recording requires the active Frame"));
+    }
+    const D3d12FrameContext &frame = m_frames[a_frameIndex];
+    if (frame.backBuffer == nullptr || frame.backBufferState != D3d12BackBufferState::RenderTarget ||
+        !frame.rtvSlot.has_value())
+    {
+        return Result<void>::failure(make_error(*m_assertContext, k_invalidSceneRecord,
+                                                "D3D12 Scene recording requires a Render Target and RTV"));
+    }
+    Result<D3D12_CPU_DESCRIPTOR_HANDLE> handle = a_heap.cpu_handle(*frame.rtvSlot);
+    if (!handle)
+    {
+        return Result<void>::failure(std::move(*handle.try_error()));
+    }
+    m_functions.setMarker(m_commandList.Get(), "SceneCubeDraw");
+    a_pass.record(m_commandList.Get(), *handle.try_value(), a_frameIndex, a_width, a_height, a_descriptor);
     return Result<void>::success();
 }
 
