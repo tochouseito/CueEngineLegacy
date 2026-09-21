@@ -319,6 +319,9 @@ function Test-CompletedDependencyRoot
 function Invoke-VcpkgRestore
 {
     $env:VCPKG_ROOT = $toolRoot
+    $env:GIT_CONFIG_COUNT = "1"
+    $env:GIT_CONFIG_KEY_0 = "core.longpaths"
+    $env:GIT_CONFIG_VALUE_0 = "true"
     if (-not (Test-Path -LiteralPath $toolRoot -PathType Container))
     {
         $toolParent = Split-Path -Parent $toolRoot
@@ -490,7 +493,7 @@ finally
         {
             try
             {
-                [IO.Directory]::Delete($stagingDependencyRoot, $true)
+                Remove-Item -LiteralPath $stagingDependencyRoot -Recurse -Force -ErrorAction Stop
                 $cleanupFailure = $null
                 break
             }
