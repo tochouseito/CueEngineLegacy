@@ -179,7 +179,10 @@ constexpr std::array k_expectedTools = {
             {
                 constexpr std::size_t maximumDiagnosticBytes = 2048U;
                 summary.append("; output: ");
-                for (const char value : diagnostic.substr(0U, maximumDiagnosticBytes))
+                const std::size_t offset = diagnostic.size() > maximumDiagnosticBytes
+                                               ? diagnostic.size() - maximumDiagnosticBytes
+                                               : 0U;
+                for (const char value : diagnostic.substr(offset, maximumDiagnosticBytes))
                 {
                     summary.push_back(value == '\r' || value == '\n' || value == '\t' || value == '\0' ? ' ' : value);
                 }

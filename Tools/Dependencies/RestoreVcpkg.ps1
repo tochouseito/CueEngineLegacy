@@ -399,7 +399,25 @@ finally
 {
     if ($null -ne $stagingDependencyRoot -and (Test-Path -LiteralPath $stagingDependencyRoot -PathType Container))
     {
-        [IO.Directory]::Delete($stagingDependencyRoot, $true)
+        $cleanupFailure = $null
+        for ($attempt = 0; $attempt -lt 8; ++$attempt)
+        {
+            try
+            {
+                [IO.Directory]::Delete($stagingDependencyRoot, $true)
+                $cleanupFailure = $null
+                break
+            }
+            catch
+            {
+                $cleanupFailure = $_
+                Start-Sleep -Milliseconds 125
+            }
+        }
+        if ($null -ne $cleanupFailure)
+        {
+            Write-Warning "Dependency staging cleanup failed: $($cleanupFailure.Exception.Message)"
+        }
     }
     if ($null -ne $dependencyLease)
     {
