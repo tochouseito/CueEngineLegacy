@@ -12,10 +12,12 @@ completion hidden, or Device Removal at the following Present. Unproven GPU
 completion must leave Presentation and Backend `Unavailable`: Shutdown fails
 and the native owners and Depth identity remain retained. The isolated process
 ends without invoking their destructors in those cases. Device Removal must
-set both owners to `DeviceRemoved`, record DRED owner presence while Scene
-resources still exist, and only then allow the safe removal cleanup to release
-them. A synthetic Device Removal proves state propagation and retention; it is
-not a substitute for a real GPU hang capture.
+explicitly enable DRED in diagnostics-capable builds, set both owners to
+`DeviceRemoved`, record DRED owner presence while Scene resources still exist,
+and only then allow the safe removal cleanup to release them. Builds that do
+not permit DRED, including Release, conditionally skip that probe. A synthetic
+Device Removal proves state propagation and retention; it is not a substitute
+for a real GPU hang capture.
 
 An RTV rebuild fault after a submitted Scene Frame checks the opposite path:
 the existing Resize Fence first proves GPU idle, then the Scene resources are
