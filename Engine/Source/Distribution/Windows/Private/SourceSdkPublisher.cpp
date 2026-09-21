@@ -173,20 +173,24 @@ constexpr std::array k_expectedTools = {
             {
                 summary.append(" (exit code ").append(std::to_string(*result.try_value()->exit_code())).push_back(')');
             }
-            const std::string_view diagnostic = capture.standardError.empty() ? std::string_view(capture.standardOutput)
-                                                                              : std::string_view(capture.standardError);
-            if (!diagnostic.empty())
+            const auto appendDiagnostic = [&summary](std::string_view a_label, std::string_view a_diagnostic)
             {
                 constexpr std::size_t maximumDiagnosticBytes = 2048U;
-                summary.append("; output: ");
-                const std::size_t offset = diagnostic.size() > maximumDiagnosticBytes
-                                               ? diagnostic.size() - maximumDiagnosticBytes
+                if (a_diagnostic.empty())
+                {
+                    return;
+                }
+                summary.append("; ").append(a_label).append(": ");
+                const std::size_t offset = a_diagnostic.size() > maximumDiagnosticBytes
+                                               ? a_diagnostic.size() - maximumDiagnosticBytes
                                                : 0U;
-                for (const char value : diagnostic.substr(offset, maximumDiagnosticBytes))
+                for (const char value : a_diagnostic.substr(offset, maximumDiagnosticBytes))
                 {
                     summary.push_back(value == '\r' || value == '\n' || value == '\t' || value == '\0' ? ' ' : value);
                 }
-            }
+            };
+            appendDiagnostic("stdout", capture.standardOutput);
+            appendDiagnostic("stderr", capture.standardError);
             return cue::Result<ProcessCapture>::failure(
                 make_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                            summary));
