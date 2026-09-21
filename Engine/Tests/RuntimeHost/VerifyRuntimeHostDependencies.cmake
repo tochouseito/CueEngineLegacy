@@ -20,7 +20,7 @@ foreach(
         "Process implementation target: Cue.RuntimeHost.Core"
         "Testing-only Core dependency: Cue.Platform.Windows.TestSupport"
         "Forbidden source dependencies: D3D12NativeTypes;Editor;ProjectFiles;ECS"
-        "Renderer source dependency allowed only in RuntimePackage.cpp;GameModuleQueryProvider.cpp;RuntimeHostApplication.cpp;RuntimeHostProcess.cpp;RuntimeHostApplication.h"
+        "Renderer source dependency allowed only in RuntimePackage.cpp;GameModuleQueryProvider.cpp;RuntimeHostApplication.cpp;RuntimeHostProcess.cpp;RuntimeHostApplication.h;RuntimeSceneFrame.cpp;RuntimeSceneFrame.h"
 )
     cue_require_report_line(
         dependencyReportLines
@@ -66,7 +66,9 @@ foreach(runtimeHostSource IN LISTS runtimeHostSources)
        NOT runtimeHostName STREQUAL "GameModuleQueryProvider.cpp" AND
        NOT runtimeHostName STREQUAL "RuntimeHostApplication.cpp" AND
        NOT runtimeHostName STREQUAL "RuntimeHostProcess.cpp" AND
-       NOT runtimeHostName STREQUAL "RuntimeHostApplication.h")
+       NOT runtimeHostName STREQUAL "RuntimeHostApplication.h" AND
+       NOT runtimeHostName STREQUAL "RuntimeSceneFrame.cpp" AND
+       NOT runtimeHostName STREQUAL "RuntimeSceneFrame.h")
         string(APPEND forbiddenPattern "|Renderer")
     endif()
     string(
