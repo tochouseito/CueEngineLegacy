@@ -34,6 +34,7 @@ clean Repository + pinned commit tree
   -> immutable version directory
   -> exclusive-install-lease-aware Release Tool launch probe
   -> durable probe-success marker
+  -> version-external install worker atomic publish
   -> installed-version registry
   -> Project Hub version selection
   -> explicit Engine Install Root handoff
@@ -84,12 +85,17 @@ Process間LeaseとStaging Publishで共有Rootの並行Restoreを直列化する
 Install／Update／Rollback／Uninstall／Registry RecoveryのOperation JournalはVersion付きCanonical JSONとし、
 Operation ID、Kind、単調なStage、Worker IdentityとKind別Memberを必須化する。通常操作はExpected Registry
 Generation ID／Revisionと対象Identity／Digestを照合する。Registry Recoveryはこの照合から除外し、破損Registry
-Evidenceと検証済み候補Identity／Digest配列を保持する。Publish直前にもSource Evidenceを再照合し、Recovery
+Evidence、未完了JournalのCanonical `blockedOperations`、検証済み候補Identity／Digest配列を保持する。
+候補列挙前に全Journalを検証し、未完了Install／Update／Uninstallの対象Versionを除外する。未完了Rollback、
+未知／破損／競合JournalがあればFail-closedで停止する。Publish直前にもSource EvidenceとBlocked Journalを再照合し、Recovery
 Operation IDを新しいGeneration ID、Revision 1として再構築する。ADR-0030でKind別のStage列挙、許可遷移、
 各Stageが証明する耐久副作用を固定し、最後の共有状態Publishを
 最終Stageとする。Cleanup後のJournal不在を完了状態とし、削除後の`completed` Stageは定義しない。
 初回InstallでRegistryが不在の場合も、先に`kind: missing`のRecoveryを空候補で完了し、新Generationの空Registryを
 Publishしてから通常Installを開始する。
+Install／UpdateはProbe成功後、Manifestの`installWorker`をOperation固有Stagingで再検証し、Version外Workerを
+Atomic Publishした`workerPublished` Stageを経てからRegistryを公開する。Crash後はWorker Identity／Digestと完了Markerを
+再検証し、欠落または不一致Workerを持つVersionをSelectableにしない。
 未知Schema／Member、列挙外Stage、不正遷移、旧Worker不一致、破損はFail-closedでEvidenceへ隔離し、Migrationは
 専用Issueで明示する。
 
@@ -112,6 +118,8 @@ Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混�
 - Registryだけが先行して未完成Versionを選択可能にしない
 - 排他Install Leaseを保持したまま専用Probeが循環待ちせず完了する
 - 新Schema Registryを旧Writerが上書きせず、破損RecoveryがProbe成功Markerまで再検証する
+- Registry Recoveryが未完了Uninstallの`pendingRemoval`対象を候補へ戻さず、Blocked Journalを保持する
+- Worker Copy／Publish中のCrashで欠落Workerを持つVersionをSelectableにしない
 - CLIとProject Hubの並行Install／UninstallでRegistry Updateを失わない
 - 起動検証とUninstallの間にTOCTOUでVersion Directoryを回収しない
 - 対象Version自身のProcessから自己Uninstallして実行中Fileを削除しない
