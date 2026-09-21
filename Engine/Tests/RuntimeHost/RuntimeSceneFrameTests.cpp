@@ -224,6 +224,7 @@ void test_invalid_snapshot(const cue::AssertContext &a_assertContext) noexcept
 }
 } // namespace
 
+/// @brief Runtime Scene Frameの変換、同期借用、拒否経路を検証する
 int main()
 {
     TestFatalHandler fatalHandler;
