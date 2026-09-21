@@ -105,9 +105,46 @@ Publisher Build IdentityとしてManifestへ記録する。生成Binaryは期待
 Size／SHA-256を検証し、`builtFromRevision`で固定Commitへ結び付ける。Source管理Payloadと生成Binaryの検証を
 同じ規則で代用しない。
 
+Manifest v1の共通Publisher Build Identityは通常Toolの`dynamic` CRT Linkageを記録する。Bootstrap Roleだけは
+同じIdentityの`crtLinkage`を`static`へ置換した固定例外としてPublisher Evidenceで検証し、他のTool Roleへ
+`static`を許可しない。Bootstrapが`/MT`で自己完結する契約はRoleから一意に導出する。
+
 Inventory生成後にHEAD、Index、Tracked／Untracked状態を再読込して開始時と変化していれば公開を拒否する。
 Repository Rootからの場当たり的な再帰Copyは行わず、検証済みRevision、`clean` Source State、Source
 Inventory HashをManifestへ記録する。配布物からProject SourceやUser Dataへ書き戻さない。
+
+#### Distribution Manifest v1 Module and Evidence Boundary
+
+`Cue.Distribution`をPlatform非依存なManifest／Identity／Publisher Evidence検証Moduleとして追加する。
+Public APIは標準C++型と`Cue.Foundation`の`Result`／`Error`だけを公開し、Filesystem、Process、Git CLI、Win32、
+Installer、Project Hubへ依存しない。#375では検証済みEvidenceからManifest Inventoryを構成する境界までを所有し、
+Git Commit Treeの列挙／Blob読込、隔離Build、Staging書込、PE検査、Atomic Publishを#376のPlatform Adapterが所有する。
+AdapterはLive WorktreeのFile ByteをEvidenceとして代用せず、固定Commit BlobとStagingのSize／SHA-256、生成Binaryの
+Target／Configuration／Publisher Build Identity／PE Architectureをこの境界へ渡す。
+
+`CueEngineDistribution.json` v1はUTF-8、BOMなし、Whitespaceなし、LF終端とし、Member順とFile Path順を固定する。
+Top-level Memberは`schemaVersion`、`distributionKind`、`bundleId`、`engineVersion`、`engineSourceRevision`、
+`engineSourceState`、`sourceInventoryHash`、`dependencyDefinitionId`、`publisherBuildIdentity`、`host`、
+`minimumToolchain`、`entryPoints`、`files`の順とする。Readerは順序違い、Whitespace、未知／欠落Member、未知Role、
+対応外Version、非Canonical数値、末尾Dataを拒否し、読み取った値をWriterで再生成したByte列と入力を一致検証する。
+
+Manifest v1のPayload Pathは、WindowsのUnicode case aliasと予約Device名をPlatform非依存Readerで一意に扱うため、
+portable printable ASCIIに限定する。Unicode Path対応はNormalization／case folding／各Host予約名の契約を定義する
+新Schemaまで延期し、旧Readerが曖昧なPathをMaterializeしないようFail-closedで拒否する。
+
+Source Inventory Hashは固定Commit BlobごとのRole、Bundle相対Path、Size、SHA-256、Git Blob IDをPath順に
+長さ付きで結合したByte列のSHA-256とする。Source管理PayloadのAllowlistは次に固定する。
+
+- `Engine/Source`配下のFirst-party Source／HLSL／Module CMake定義
+- Root `CMakeLists.txt`、`CMakePresets.json`、`CMake`配下
+- `Engine/Documents`、Root `README.md`／`LICENSE.txt`
+- `Templates`配下
+- `Tools/Dependencies/RestoreVcpkg.ps1`
+- `ThirdParty`のvcpkg Manifest／Configuration／Tool Pin、Notice、License Copy
+
+`.git`、`.codex`、`.github`、`.vs`、Test、Build／Out／Cache、`ThirdParty/.tools`、`vcpkg_installed`、
+PDB／OBJ／LIB／DLL／EXE、Credential／署名Key、Player ProductとAllowlist外Pathは拒否する。生成Binaryは
+`Bin`配下の固定Target／Role／Pathだけを別Evidenceとして受理し、Source Allowlistへ混在させない。
 
 ### Third-Party and Toolchain
 
