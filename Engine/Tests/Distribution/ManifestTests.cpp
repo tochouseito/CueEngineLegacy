@@ -204,9 +204,14 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     manifest.files.front().relativePath = "Bin/CON.exe";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
-    manifest = make_manifest();
-    manifest.files.front().relativePath = "Bin/Project?.exe";
-    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+    for (const char invalidCharacter : std::array{'<', '>', '|', '?', '*'})
+    {
+        manifest = make_manifest();
+        manifest.files.front().relativePath = "Bin/Project";
+        manifest.files.front().relativePath.push_back(invalidCharacter);
+        manifest.files.front().relativePath.append(".exe");
+        require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+    }
 
     manifest = make_manifest();
     manifest.files.push_back(
