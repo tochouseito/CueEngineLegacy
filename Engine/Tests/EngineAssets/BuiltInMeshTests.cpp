@@ -78,6 +78,62 @@ void require(bool a_condition) noexcept
     return count;
 }
 
+using SphereTriangleSignature = std::array<std::uint16_t, 3U>;
+
+/// @brief Triangle内のIndex順に依存しないSphere Triangle Signatureを作成する
+[[nodiscard]] SphereTriangleSignature make_sphere_triangle_signature(std::uint16_t a_first,
+                                                                      std::uint16_t a_second,
+                                                                      std::uint16_t a_third) noexcept
+{
+    SphereTriangleSignature signature = {a_first, a_second, a_third};
+    std::ranges::sort(signature);
+    return signature;
+}
+
+/// @brief Sphere Revision 1の順序非依存Triangle集合を作成する
+[[nodiscard]] std::array<SphereTriangleSignature, 224U> make_expected_sphere_triangle_set() noexcept
+{
+    constexpr std::size_t sliceCount = 16U;
+    constexpr std::size_t ringCount = 7U;
+    constexpr std::uint16_t bottomIndex = 113U;
+    std::array<SphereTriangleSignature, 224U> triangles{};
+    std::size_t triangleIndex = 0U;
+
+    for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+    {
+        const std::uint16_t current = static_cast<std::uint16_t>(1U + sliceIndex);
+        const std::uint16_t next = static_cast<std::uint16_t>(1U + (sliceIndex + 1U) % sliceCount);
+        triangles[triangleIndex++] = make_sphere_triangle_signature(0U, current, next);
+    }
+
+    for (std::size_t ringIndex = 0U; ringIndex + 1U < ringCount; ++ringIndex)
+    {
+        const std::size_t upperStart = 1U + ringIndex * sliceCount;
+        const std::size_t lowerStart = upperStart + sliceCount;
+        for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+        {
+            const std::size_t nextSlice = (sliceIndex + 1U) % sliceCount;
+            const std::uint16_t upperCurrent = static_cast<std::uint16_t>(upperStart + sliceIndex);
+            const std::uint16_t upperNext = static_cast<std::uint16_t>(upperStart + nextSlice);
+            const std::uint16_t lowerCurrent = static_cast<std::uint16_t>(lowerStart + sliceIndex);
+            const std::uint16_t lowerNext = static_cast<std::uint16_t>(lowerStart + nextSlice);
+            triangles[triangleIndex++] =
+                make_sphere_triangle_signature(upperCurrent, lowerNext, lowerCurrent);
+            triangles[triangleIndex++] = make_sphere_triangle_signature(upperCurrent, upperNext, lowerNext);
+        }
+    }
+
+    const std::size_t lastRingStart = 1U + (ringCount - 1U) * sliceCount;
+    for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+    {
+        const std::uint16_t current = static_cast<std::uint16_t>(lastRingStart + sliceIndex);
+        const std::uint16_t next = static_cast<std::uint16_t>(lastRingStart + (sliceIndex + 1U) % sliceCount);
+        triangles[triangleIndex++] = make_sphere_triangle_signature(current, next, bottomIndex);
+    }
+
+    return triangles;
+}
+
 /// @brief Cube Corner Positionを配列順に依存しない3-bit値へ変換する
 [[nodiscard]] std::uint8_t cube_corner_code(const cue::math::Vector3 &a_position) noexcept
 {
@@ -353,6 +409,8 @@ void test_sphere_mesh() noexcept
 
     std::size_t topTriangleCount = 0U;
     std::size_t bottomTriangleCount = 0U;
+    std::array<SphereTriangleSignature, 224U> triangleSet{};
+    std::size_t triangleIndex = 0U;
     for (std::size_t index = 0U; index < sphere.indices.size(); index += 3U)
     {
         const auto firstIndex = sphere.indices[index];
@@ -375,6 +433,8 @@ void test_sphere_mesh() noexcept
         };
         require(cue::math::dot(triangleNormal, triangleNormal) > 0.0000001F);
         require(cue::math::dot(triangleNormal, centroid) > 0.0F);
+        triangleSet[triangleIndex++] =
+            make_sphere_triangle_signature(firstIndex, secondIndex, thirdIndex);
 
         if (firstIndex == 0U || secondIndex == 0U || thirdIndex == 0U)
         {
@@ -387,6 +447,11 @@ void test_sphere_mesh() noexcept
     }
     require(topTriangleCount == sliceCount);
     require(bottomTriangleCount == sliceCount);
+
+    auto expectedTriangleSet = make_expected_sphere_triangle_set();
+    std::ranges::sort(triangleSet);
+    std::ranges::sort(expectedTriangleSet);
+    require(triangleSet == expectedTriangleSet);
 
     for (std::size_t ringIndex = 0U; ringIndex < ringCount; ++ringIndex)
     {
