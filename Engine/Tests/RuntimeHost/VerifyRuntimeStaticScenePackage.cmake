@@ -77,45 +77,47 @@ if(tamperedResult EQUAL 0 OR tamperedPosition EQUAL -1)
     message(FATAL_ERROR "Static Runtime Scene tamper was not rejected\n${tamperedCombined}")
 endif()
 
-if(DEFINED DUMPBIN AND EXISTS "${DUMPBIN}")
-    execute_process(
-        COMMAND "${DUMPBIN}" /DEPENDENTS "${packageRoot}/CueGameProduct.exe"
-        RESULT_VARIABLE dumpbinResult
-        OUTPUT_VARIABLE dumpbinOutput
-        ERROR_VARIABLE dumpbinError
-    )
-    if(NOT dumpbinResult EQUAL 0)
-        message(FATAL_ERROR "dumpbin failed for Static Product\n${dumpbinOutput}\n${dumpbinError}")
-    endif()
-
-    string(REGEX MATCHALL "[A-Za-z0-9_.-]+\\.[Dd][Ll][Ll]" importedLibraries "${dumpbinOutput}")
-    list(TRANSFORM importedLibraries TOLOWER)
-    list(REMOVE_DUPLICATES importedLibraries)
-    set(allowedLibraries
-        "api-ms-win-crt-heap-l1-1-0.dll"
-        "api-ms-win-crt-locale-l1-1-0.dll"
-        "api-ms-win-crt-math-l1-1-0.dll"
-        "api-ms-win-crt-runtime-l1-1-0.dll"
-        "api-ms-win-crt-stdio-l1-1-0.dll"
-        "api-ms-win-crt-string-l1-1-0.dll"
-        "bcrypt.dll"
-        "d3d12.dll"
-        "dxgi.dll"
-        "kernel32.dll"
-        "msvcp140.dll"
-        "ucrtbase.dll"
-        "user32.dll"
-        "vcruntime140.dll"
-        "vcruntime140_1.dll"
-    )
-    if(NOT importedLibraries)
-        message(FATAL_ERROR "dumpbin did not report any Static Product imports\n${dumpbinOutput}")
-    endif()
-    foreach(importedLibrary IN LISTS importedLibraries)
-        list(FIND allowedLibraries "${importedLibrary}" allowedLibraryIndex)
-        if(allowedLibraryIndex EQUAL -1)
-            message(FATAL_ERROR
-                "Static Product imports unapproved dependency ${importedLibrary}\n${dumpbinOutput}")
-        endif()
-    endforeach()
+if(NOT DEFINED DUMPBIN OR DUMPBIN STREQUAL "" OR NOT EXISTS "${DUMPBIN}")
+    message(FATAL_ERROR "DUMPBIN must identify the required Static Product import inspection tool")
 endif()
+
+execute_process(
+    COMMAND "${DUMPBIN}" /DEPENDENTS "${packageRoot}/CueGameProduct.exe"
+    RESULT_VARIABLE dumpbinResult
+    OUTPUT_VARIABLE dumpbinOutput
+    ERROR_VARIABLE dumpbinError
+)
+if(NOT dumpbinResult EQUAL 0)
+    message(FATAL_ERROR "dumpbin failed for Static Product\n${dumpbinOutput}\n${dumpbinError}")
+endif()
+
+string(REGEX MATCHALL "[A-Za-z0-9_.-]+\\.[Dd][Ll][Ll]" importedLibraries "${dumpbinOutput}")
+list(TRANSFORM importedLibraries TOLOWER)
+list(REMOVE_DUPLICATES importedLibraries)
+set(allowedLibraries
+    "api-ms-win-crt-heap-l1-1-0.dll"
+    "api-ms-win-crt-locale-l1-1-0.dll"
+    "api-ms-win-crt-math-l1-1-0.dll"
+    "api-ms-win-crt-runtime-l1-1-0.dll"
+    "api-ms-win-crt-stdio-l1-1-0.dll"
+    "api-ms-win-crt-string-l1-1-0.dll"
+    "bcrypt.dll"
+    "d3d12.dll"
+    "dxgi.dll"
+    "kernel32.dll"
+    "msvcp140.dll"
+    "ucrtbase.dll"
+    "user32.dll"
+    "vcruntime140.dll"
+    "vcruntime140_1.dll"
+)
+if(NOT importedLibraries)
+    message(FATAL_ERROR "dumpbin did not report any Static Product imports\n${dumpbinOutput}")
+endif()
+foreach(importedLibrary IN LISTS importedLibraries)
+    list(FIND allowedLibraries "${importedLibrary}" allowedLibraryIndex)
+    if(allowedLibraryIndex EQUAL -1)
+        message(FATAL_ERROR
+            "Static Product imports unapproved dependency ${importedLibrary}\n${dumpbinOutput}")
+    endif()
+endforeach()

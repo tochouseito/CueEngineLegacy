@@ -305,6 +305,15 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyRuntimePackage.cmake
 )
 
+get_filename_component(cueRuntimeHostToolDirectory "${CMAKE_LINKER}" DIRECTORY)
+find_program(
+    cueRuntimeHostDumpbin
+    NAMES dumpbin.exe
+    HINTS "${cueRuntimeHostToolDirectory}"
+    NO_DEFAULT_PATH
+    REQUIRED
+)
+
 add_test(
     NAME Cue.RuntimeHost.StaticScenePackage.Process
     COMMAND
@@ -312,7 +321,7 @@ add_test(
         -DTEST_EXECUTABLE=$<TARGET_FILE:CueRuntimeStaticSceneProduct>
         -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/RuntimeStaticScenePackage/$<CONFIG>
         -DCONFIGURATION=$<CONFIG>
-        -DDUMPBIN=${CMAKE_DUMPBIN}
+        "-DDUMPBIN=${cueRuntimeHostDumpbin}"
         -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyRuntimeStaticScenePackage.cmake
 )
 

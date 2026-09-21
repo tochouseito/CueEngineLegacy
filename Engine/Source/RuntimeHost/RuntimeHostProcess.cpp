@@ -1155,9 +1155,9 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
             {
                 frameError.emplace(make_scene_pixel_smoke_error(
                     a_assertContext, "Runtime Package Scene did not produce a clear corner and non-clear Scene pixel"));
+                loopErrorMessage = "Runtime Package Scene pixel verification failed";
+                loopErrorExitCode = k_scenePixelSmokeFailed;
             }
-            loopErrorMessage = "Runtime Package Scene pixel verification failed";
-            loopErrorExitCode = k_scenePixelSmokeFailed;
         }
         else
         {
