@@ -1,0 +1,88 @@
+# M18 Developer Distribution Boundary Research
+
+- Date: 2026-09-21
+- Issue: #365
+- Milestone: #19
+- Decision: ADR-0030
+
+## Verified Starting Point
+
+| Boundary | Current implementation | M18 gap |
+| --- | --- | --- |
+| Build definition | Root CMakeと3構成PresetがEngine／ToolをRepository内でBuildする | Install／Export、配布用Source Allowlist、配布Identity |
+| Tool binaries | Project Hub、Editor、RuntimeHostをReleaseで生成できる | Version付きBundle、Entry Point検証、導入後の探索 |
+| Engine libraries | Configuration別Static LibraryをBuild Treeへ出力する | 公開ABI／Binary SDK契約は未定 |
+| Project build | M15～M17のBuild／Package／Shipping WorkflowがRepositoryまたは選択Engine Rootを使用する | Installed Engine Versionの選択と再現可能なSource SDK |
+| Player package | ADR-0023／0024がRuntime Package、Monolithic Product、Trustを規定する | Developer Engine配布とのIdentity／Inventory分離 |
+| Third-party | vcpkg Manifest、Baseline、Tool Pin、Notice、LicenseをRepositoryで管理する | Noticeを含む配布、Install Tree／Cache除外、初回Restore |
+| Product trust | M17は`PublicDistributionReady = false`を明示する | Developer Toolの署名状態、Installer Trust、公開Channel |
+| Recovery | Build／PackageはStagingとAtomic Publishを持つ | Version Install、Update、Rollback、Uninstall Journal |
+
+現在のC++ LibraryはCompiler、CRT、Configuration、STL ABIを公開互換として固定していない。
+このためM18はBinary SDKを先取りせず、Release Toolと必要なFirst-party Sourceを組み合わせた
+`DeveloperSourceSdk`を採用する。Repository Cloneそのものは配布物にしない。
+
+## Selected Flow
+
+```text
+Repository snapshot
+  -> fixed source/tool/license allowlist
+  -> staged DeveloperSourceSdk bundle
+  -> canonical manifest + size/hash inventory
+  -> bundle validation
+  -> per-user install staging
+  -> immutable version directory
+  -> installed-version registry
+  -> Project Hub version selection
+  -> Editor / project build using one engine root
+```
+
+更新はSide-by-side Installで行い、既存Versionを上書きしない。Rollbackは以前のVersionを
+再選択する。UninstallはEngine Versionだけを対象とし、Project、Recent Project、Preference、
+Source Asset、Build Artifactを削除しない。
+
+## Distribution Inventory
+
+含めるもの:
+
+- Release Project Hub、Editor、開発用RuntimeHost、First-party Installer Tool
+- Project Buildに必要なEngine Source、HLSL、CMake定義、Template
+- `ThirdParty`のvcpkg Manifest／Configuration／Tool Pin、Notice、License Copy
+- Engineの利用条件、Version、導入・復旧手順
+
+含めないもの:
+
+- `.git`、`.codex`、Build Tree、CTest出力、Cache、PDB、内部Test／Evidence
+- `ThirdParty/.tools`、`ThirdParty/vcpkg_installed`、Download Cache
+- Game Project、Source Asset、User Preference、Credential
+- Player向けRuntime Package、`CueGameProduct.exe`、追加Game DLL
+
+VC++ Runtimeは存在検査と案内だけをM18に含める。Redistributable Binaryの同梱、MSI／MSIX、
+第三者Installer Framework、Code-signing Serviceは承認済み外部依存ではないため導入しない。
+
+## Implementation Issues to Create
+
+1. #375 Distribution Manifest v1、Path／Role／Hash検証、Source Allowlistを実装する
+2. #376 Release Tool／Source SDK／Third-party NoticeをStagingからAtomic Publishする
+3. #377 Per-user Install Transaction、Immutable Version Registry、Recoveryを実装する
+4. #378 Side-by-side Update、Version再選択Rollback、安全なUninstallを実装する
+5. #379 Project HubへInstalled Engine一覧、Project Compatibility、Version指定起動を接続する
+6. #380 VC++ Runtime／Toolchain Prerequisite、License Inventory、配布禁止File監査を実装する
+7. #381 M18 Completion GateでProcess E2E、3構成Build／CTest、失敗時保全を検証する
+
+各IssueはSまたはMに限定し、永続ManifestとInstall RegistryのVersionは先行Issueで固定する。
+Network Updater、Binary SDK、署名済み公開Installerを同じIssueへ混在させない。
+
+## Risks to Verify
+
+- Update失敗で旧Version、Project、User Dataを変更しない
+- Registryだけが先行して未完成Versionを選択可能にしない
+- 異なるEngine VersionのDLL／Library／Third-party Install Treeを一つのProcessへ混在させない
+- Source Allowlistの拡大でTest、Credential、Build出力を配布しない
+- Noticeの存在だけでなく、採用Versionと実Payloadが一致することを検証する
+- Unsigned Local Bundleを公開署名済みまたはPublic Distribution Readyと表示しない
+
+## Out of Scope
+
+プレイヤー向けInstaller、Store配布、Network Download、Delta Patch、Background Update、
+Machine-wide Install、Binary／Plugin SDK、実運用CertificateとPublic Trust Anchor。
