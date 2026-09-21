@@ -75,9 +75,11 @@ git branch --show-current
 ```powershell
 $toolRoot = Join-Path $PWD "ThirdParty/.tools/vcpkg"
 $installRoot = Join-Path $PWD "ThirdParty/vcpkg_installed"
+$gitExecutable = (Get-Command git).Source
 pwsh -NoProfile -File Tools/Dependencies/RestoreVcpkg.ps1 `
     -ToolRoot $toolRoot `
-    -InstallRoot $installRoot
+    -InstallRoot $installRoot `
+    -GitExecutable $gitExecutable
 ```
 
 このScriptは`ThirdParty/vcpkg-tool.json`と`ThirdParty/vcpkg-configuration.json`で固定したvcpkg Tool、Registry、

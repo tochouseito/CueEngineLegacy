@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 
 $restoreScript = Join-Path $RepositoryRoot "Tools\Dependencies\RestoreVcpkg.ps1"
 $powerShell = Join-Path $PSHOME "pwsh.exe"
+$gitExecutable = (Get-Command git).Source
 
 function Assert-RestoreRejected
 {
@@ -20,7 +21,8 @@ function Assert-RestoreRejected
         [string]$ExpectedMessage
     )
 
-    $output = (& $powerShell -NoProfile -File $restoreScript @Arguments 2>&1 | Out-String)
+    $output = (& $powerShell -NoProfile -File $restoreScript @Arguments -GitExecutable $gitExecutable 2>&1 |
+        Out-String)
     if ($LASTEXITCODE -eq 0)
     {
         throw "Restore unexpectedly succeeded: $($Arguments -join ' ')"

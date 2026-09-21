@@ -1041,6 +1041,8 @@ Result<SourceSdkPublishReport> publish_windows_source_sdk(const WindowsSourceSdk
              utf8_path(dependencyRoot / "Tool" / "vcpkg"),
              "-InstallRoot",
              utf8_path(dependencyRoot / "Installed"),
+             "-GitExecutable",
+             a_request.gitExecutable,
              "-InstalledVersionRoot",
              utf8_path(stagingAbsolute),
              "-DependencyRootId",

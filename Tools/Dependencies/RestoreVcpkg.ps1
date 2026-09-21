@@ -6,6 +6,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallRoot,
 
+    [Parameter(Mandatory = $true)]
+    [string]$GitExecutable,
+
     [string]$InstalledVersionRoot,
 
     [string]$DependencyRootId,
@@ -56,6 +59,12 @@ if (-not [IO.Path]::IsPathFullyQualified($ToolRoot) -or -not [IO.Path]::IsPathFu
 {
     throw "ToolRoot and InstallRoot must be absolute paths."
 }
+if (-not [IO.Path]::IsPathFullyQualified($GitExecutable) -or
+    -not [IO.File]::Exists([IO.Path]::GetFullPath($GitExecutable)))
+{
+    throw "GitExecutable must be an absolute path to an existing file."
+}
+$gitExecutable = [IO.Path]::GetFullPath($GitExecutable)
 $toolRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($ToolRoot))
 $installedRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($InstallRoot))
 
@@ -243,41 +252,41 @@ function Invoke-VcpkgRestore
     {
         $toolParent = Split-Path -Parent $toolRoot
         New-Item -ItemType Directory -Path $toolParent -Force | Out-Null
-        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+        Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
             "clone",
             "--filter=blob:none",
             "--no-checkout",
             $configuration.repository,
             $toolRoot
         ) -WorkingDirectory $toolParent
-        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+        Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
             "checkout",
             "--detach",
             $configuration.commit
         ) -WorkingDirectory $toolRoot
     }
 
-    $trackedChanges = (& git -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no |
+    $trackedChanges = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no |
         Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $trackedChanges.Length -ne 0)
     {
         throw "Managed vcpkg checkout contains tracked changes."
     }
 
-    $actualRepository = (& git -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
+    $actualRepository = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
     if ($LASTEXITCODE -ne 0 -or $actualRepository -cne $configuration.repository)
     {
         throw "Managed vcpkg checkout origin does not match the pinned repository."
     }
 
-    $actualCommit = (& git -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
+    $actualCommit = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0)
     {
         throw "Managed vcpkg checkout commit could not be read."
     }
     if ($actualCommit -cne $configuration.commit)
     {
-        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+        Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
             "-c",
             "safe.directory=$toolRoot",
             "-C",
@@ -287,7 +296,7 @@ function Invoke-VcpkgRestore
             "origin",
             $configuration.commit
         ) -WorkingDirectory $repositoryRoot
-        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+        Invoke-CheckedProcess -FilePath $gitExecutable -ArgumentList @(
             "-c",
             "safe.directory=$toolRoot",
             "-C",
@@ -298,7 +307,7 @@ function Invoke-VcpkgRestore
         ) -WorkingDirectory $repositoryRoot
     }
 
-    $actualCommit = (& git -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
+    $actualCommit = (& $gitExecutable -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $configuration.commit)
     {
         throw "Managed vcpkg checkout does not match the pinned commit."
