@@ -10,6 +10,7 @@
 #include <Cue/RHI/D3D12/Windows/D3d12WindowsPresentation.h>
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -223,10 +224,134 @@ class ForeignWindow final : public cue::Window
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
     valid = valid && presentationShutdownResult && backendShutdownResult &&
-            backend->state() == cue::GraphicsBackendState::Shutdown &&
-            a_logSink.error_count() == initialErrorCount;
+            backend->state() == cue::GraphicsBackendState::Shutdown && a_logSink.error_count() == initialErrorCount;
     backend.reset();
     return valid;
+}
+
+/// @brief WARPで固定Cube Frameの入力拒否、単一Submit、Clear経路への復帰を検証する
+[[nodiscard]] bool run_scene_smoke(cue::Window &a_window, ProcessLogSink &a_logSink,
+                                   cue::AssertContext &a_assertContext) noexcept
+{
+    const std::uint32_t initialErrorCount = a_logSink.error_count();
+    cue::D3d12BackendDescriptor backendDescriptor = {
+        cue::D3d12AdapterPolicy::Warp,
+        cue::are_d3d12_diagnostics_allowed_for_probe() ? cue::D3d12ValidationMode::Standard
+                                                       : cue::D3d12ValidationMode::Disabled,
+        false,
+        5'000,
+    };
+    cue::Result<std::unique_ptr<cue::D3d12Backend>> backendResult =
+        cue::create_d3d12_backend(backendDescriptor, a_assertContext);
+    if (!backendResult || !a_window.show())
+    {
+        return false;
+    }
+    std::unique_ptr<cue::D3d12Backend> backend = std::move(*backendResult.try_value());
+    cue::Result<std::unique_ptr<cue::PresentationContext>> presentationResult =
+        cue::create_d3d12_windows_presentation(*backend, a_window, cue::PresentationDescriptor{true});
+    if (!presentationResult)
+    {
+        static_cast<void>(backend->shutdown());
+        return false;
+    }
+    std::unique_ptr<cue::PresentationContext> presentation = std::move(*presentationResult.try_value());
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    cue::PresentationSceneCube cube = {identity};
+    cube.localToWorld[14] = 0.5F;
+    const std::array cubes = {cube};
+    cue::PresentationSceneFrameDescriptor scene = {{0.05F, 0.1F, 0.2F, 1.0F}, identity, cubes};
+    scene.viewProjection[0] = (std::numeric_limits<float>::quiet_NaN)();
+    cue::Result<cue::PresentationFrameStatus> invalidCamera = presentation->present_scene_frame(scene);
+    scene.viewProjection[0] = 1.0F;
+    scene.clearColor[0] = (std::numeric_limits<float>::infinity)();
+    cue::Result<cue::PresentationFrameStatus> invalidColor = presentation->present_scene_frame(scene);
+    scene.clearColor[0] = 0.05F;
+    cue::PresentationSceneCube invalidCube = cube;
+    invalidCube.localToWorld[0] = (std::numeric_limits<float>::quiet_NaN)();
+    const std::array invalidCubes = {invalidCube};
+    scene.cubes = invalidCubes;
+    cue::Result<cue::PresentationFrameStatus> invalidInstance = presentation->present_scene_frame(scene);
+    const std::vector<cue::PresentationSceneCube> tooManyCubes(cue::k_presentationSceneMaxCubeCount + 1U, cube);
+    scene.cubes = tooManyCubes;
+    cue::Result<cue::PresentationFrameStatus> invalidCount = presentation->present_scene_frame(scene);
+    const cue::D3d12PresentationProbeReport before = cue::probe_d3d12_presentation(*presentation);
+    bool valid = !invalidCamera && has_error_code(invalidCamera.try_error(), 308) && !invalidColor &&
+                 has_error_code(invalidColor.try_error(), 308) && !invalidInstance &&
+                 has_error_code(invalidInstance.try_error(), 308) && !invalidCount &&
+                 has_error_code(invalidCount.try_error(), 308) && before.lastSubmittedFence == 0U &&
+                 presentation->state() == cue::PresentationContextState::Ready;
+    scene.cubes = cubes;
+    cue::Result<cue::PresentationFrameStatus> sceneResult = presentation->present_scene_frame(scene);
+    const cue::D3d12PresentationProbeReport afterScene = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<cue::PresentationFrameStatus> clearResult =
+        presentation->present_frame(cue::PresentationFrameDescriptor{{0.1F, 0.1F, 0.1F, 1.0F}});
+    const cue::D3d12PresentationProbeReport afterClear = cue::probe_d3d12_presentation(*presentation);
+    valid = valid && sceneResult && afterScene.lastSubmittedFence == 1U && clearResult &&
+            afterClear.lastSubmittedFence == 2U && afterClear.isAcceptingFrames;
+    cue::Result<void> presentationShutdown = presentation->shutdown();
+    presentation.reset();
+    cue::Result<void> backendShutdown = backend->shutdown();
+    return valid && presentationShutdown && backendShutdown && a_logSink.error_count() == initialErrorCount;
+}
+
+/// @brief 遅延Scene初期化で未分類Device Removalを検出したときの状態とDREDを検証する
+[[nodiscard]] int run_scene_device_removal(cue::Window &a_window, cue::AssertContext &a_assertContext) noexcept
+{
+    cue::D3d12BackendDescriptor backendDescriptor = {
+        cue::D3d12AdapterPolicy::Warp,
+        cue::D3d12ValidationMode::Disabled,
+        false,
+        5'000,
+    };
+    cue::Result<std::unique_ptr<cue::D3d12Backend>> backendResult =
+        cue::create_d3d12_backend(backendDescriptor, a_assertContext);
+    if (!backendResult)
+    {
+        return 39;
+    }
+    std::unique_ptr<cue::D3d12Backend> backend = std::move(*backendResult.try_value());
+    cue::Result<std::unique_ptr<cue::PresentationContext>> presentationResult =
+        cue::create_d3d12_windows_presentation(*backend, a_window, cue::PresentationDescriptor{true});
+    if (!presentationResult)
+    {
+        static_cast<void>(backend->shutdown());
+        return 40;
+    }
+    std::unique_ptr<cue::PresentationContext> presentation = std::move(*presentationResult.try_value());
+    cue::Result<void> removalResult = cue::remove_d3d12_device_without_classification_for_probe(*backend);
+    if (has_error_code(removalResult.try_error(), 89))
+    {
+        static_cast<void>(presentation->shutdown());
+        presentation.reset();
+        static_cast<void>(backend->shutdown());
+        return 77;
+    }
+    cue::Result<std::uint32_t> beforeCount = cue::d3d12_dred_attempt_count_for_probe(*backend);
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    cue::PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, {}};
+    cue::Result<cue::PresentationFrameStatus> frameResult = presentation->present_scene_frame(scene);
+    cue::Result<std::uint32_t> afterCount = cue::d3d12_dred_attempt_count_for_probe(*backend);
+    const cue::D3d12PresentationProbeReport report = cue::probe_d3d12_presentation(*presentation);
+    const cue::Error *frameError = frameResult.try_error();
+    const bool retainedSceneCause = frameError != nullptr && !frameError->causes().empty() &&
+                                    frameError->causes().front().code().domain() == "Cue.RHI.D3D12" &&
+                                    frameError->causes().front().code().value() >= 302 &&
+                                    frameError->causes().front().code().value() <= 306;
+    const bool classified = removalResult && beforeCount && *beforeCount.try_value() == 0U && !frameResult &&
+                            has_error_code(frameError, 52) && retainedSceneCause &&
+                            presentation->state() == cue::PresentationContextState::DeviceRemoved &&
+                            backend->state() == cue::GraphicsBackendState::DeviceRemoved && afterCount &&
+                            *afterCount.try_value() == 1U && report.lastSubmittedFence == 0U;
+    cue::Result<void> presentationShutdown = presentation->shutdown();
+    presentation.reset();
+    cue::Result<void> backendShutdown = backend->shutdown();
+    return classified && presentationShutdown && backendShutdown &&
+                   backend->state() == cue::GraphicsBackendState::Shutdown
+               ? 0
+               : 41;
 }
 
 /// @brief D3d12SwapChainProcess Test の Present Frames 300Scenario を実行し、検証結果を返す
@@ -279,8 +404,7 @@ class ForeignWindow final : public cue::Window
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
     valid = valid && presentationShutdownResult && backendShutdownResult &&
-            backend->state() == cue::GraphicsBackendState::Shutdown &&
-            a_logSink.error_count() == initialErrorCount;
+            backend->state() == cue::GraphicsBackendState::Shutdown && a_logSink.error_count() == initialErrorCount;
     backend.reset();
     return valid;
 }
@@ -325,8 +449,8 @@ class ForeignWindow final : public cue::Window
     valid = valid && presentation->resize(0, 360) && presentation->is_resize_pending() &&
             presentation->width() == 640 && presentation->height() == 360;
     cue::D3d12PresentationProbeReport suspendedReport = cue::probe_d3d12_presentation(*presentation);
-    valid = valid && suspendedReport.rtvCount == 2 && suspendedReport.formatsMatch &&
-            !suspendedReport.isAcceptingFrames;
+    valid =
+        valid && suspendedReport.rtvCount == 2 && suspendedReport.formatsMatch && !suspendedReport.isAcceptingFrames;
     valid = valid && presentation->resize(640, 360) && !presentation->is_resize_pending();
 
     for (std::uint32_t iteration = 0; iteration < 50 && valid; ++iteration)
@@ -350,8 +474,7 @@ class ForeignWindow final : public cue::Window
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
     valid = valid && presentationShutdownResult && backendShutdownResult &&
-            backend->state() == cue::GraphicsBackendState::Shutdown &&
-            a_logSink.error_count() == initialErrorCount;
+            backend->state() == cue::GraphicsBackendState::Shutdown && a_logSink.error_count() == initialErrorCount;
     backend.reset();
     return valid;
 }
@@ -454,24 +577,21 @@ class ForeignWindow final : public cue::Window
     cue::Result<std::uint32_t> firstCountResult = cue::d3d12_dred_attempt_count_for_probe(*backend);
     cue::Result<void> resizeResult = presentation->resize(641, 361);
     cue::Result<std::uint32_t> resizeCountResult = cue::d3d12_dred_attempt_count_for_probe(*backend);
-    cue::Result<cue::D3d12DredOwnerProbeReport> dredOwnerResult =
-        cue::probe_d3d12_dred_owners_for_probe(*backend);
+    cue::Result<cue::D3d12DredOwnerProbeReport> dredOwnerResult = cue::probe_d3d12_dred_owners_for_probe(*backend);
     const cue::D3d12DredOwnerProbeReport *dredOwners = dredOwnerResult.try_value();
-    const bool resizeValid = removalResult && firstCountResult && *firstCountResult.try_value() == 0 &&
-                             !resizeResult && has_error_code(resizeResult.try_error(), 34) && resizeCountResult &&
-                             *resizeCountResult.try_value() == 1 &&
-                             dredOwners != nullptr && dredOwners->hasCommandList &&
-                             dredOwners->allocatorCount == 2 && dredOwners->backBufferCount == 2 &&
-                             dredOwners->rtvCount == 2 &&
-                             dredOwners->hasSwapChain && dredOwners->hasRtvHeap && dredOwners->hasQueue &&
-                             dredOwners->hasFence && dredOwners->hasFenceEvent &&
-                             presentation->state() == cue::PresentationContextState::Shutdown &&
-                             backend->state() == cue::GraphicsBackendState::DeviceRemoved;
+    const bool resizeValid =
+        removalResult && firstCountResult && *firstCountResult.try_value() == 0 && !resizeResult &&
+        has_error_code(resizeResult.try_error(), 34) && resizeCountResult && *resizeCountResult.try_value() == 1 &&
+        dredOwners != nullptr && dredOwners->hasCommandList && dredOwners->allocatorCount == 2 &&
+        dredOwners->backBufferCount == 2 && dredOwners->rtvCount == 2 && dredOwners->hasSwapChain &&
+        dredOwners->hasRtvHeap && dredOwners->hasQueue && dredOwners->hasFence && dredOwners->hasFenceEvent &&
+        presentation->state() == cue::PresentationContextState::Shutdown &&
+        backend->state() == cue::GraphicsBackendState::DeviceRemoved;
     cue::Result<void> presentationShutdownResult = presentation->shutdown();
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
-    const bool cleanupValid = presentationShutdownResult && backendShutdownResult &&
-                              backend->state() == cue::GraphicsBackendState::Shutdown;
+    const bool cleanupValid =
+        presentationShutdownResult && backendShutdownResult && backend->state() == cue::GraphicsBackendState::Shutdown;
     backend.reset();
     return resizeValid && cleanupValid ? 0 : 24;
 }
@@ -525,8 +645,7 @@ class ForeignWindow final : public cue::Window
                               *contextCountResult.try_value() == 1;
     presentation.reset();
     cue::Result<void> backendShutdownResult = backend->shutdown();
-    const bool cleanupValid =
-        backendShutdownResult && backend->state() == cue::GraphicsBackendState::Shutdown;
+    const bool cleanupValid = backendShutdownResult && backend->state() == cue::GraphicsBackendState::Shutdown;
     backend.reset();
     return removalValid && contextValid && cleanupValid ? 0 : 18;
 }
@@ -633,6 +752,16 @@ int main(int a_argumentCount, char **a_arguments)
     {
         valid = run_clear_smoke(*window, *processSinkView, assertContext);
         failureCode = valid ? 0 : 27;
+    }
+    else if (mode == "SceneSmoke")
+    {
+        valid = run_scene_smoke(*window, *processSinkView, assertContext);
+        failureCode = valid ? 0 : 38;
+    }
+    else if (mode == "SceneDeviceRemoval")
+    {
+        failureCode = run_scene_device_removal(*window, assertContext);
+        valid = failureCode == 0;
     }
     else if (mode == "PresentFrames300")
     {

@@ -18,6 +18,8 @@ namespace cue
 {
 class AssertContext;
 class D3d12QueueState;
+class D3d12ScenePass;
+struct PresentationSceneFrameDescriptor;
 
 constexpr std::uint32_t k_d3d12FrameContextCount = 2;
 
@@ -109,6 +111,10 @@ class D3d12FrameCommandState final
     /// @brief Current Back Buffer を指定 Clear Color で初期化する Command を記録する
     [[nodiscard]] Result<void> clear_back_buffer(std::uint32_t a_frameIndex, D3d12RtvHeap &a_heap,
                                                  const std::array<float, 4> &a_color) noexcept;
+    /// @brief RenderTarget状態のCurrent Back Bufferへ固定Cube Passを追加記録する
+    [[nodiscard]] Result<void> record_scene(std::uint32_t a_frameIndex, D3d12RtvHeap &a_heap,
+                                           D3d12ScenePass &a_pass, std::uint32_t a_width, std::uint32_t a_height,
+                                           const PresentationSceneFrameDescriptor &a_descriptor) noexcept;
     /// @brief Frame Recording を終了して Command List を実行可能な状態へ確定する
     [[nodiscard]] Result<void> close_frame() noexcept;
     /// @brief 記録済み Frame Command List を D3D12 Queue へ投入する

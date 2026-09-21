@@ -23,9 +23,9 @@ Cue.RHI.D3D12.Windows INTERFACE_LINK_LIBRARIES: @cueRhiD3d12WindowsInterfaceLink
 Cue.RHI.D3D12.Windows INTERFACE_INCLUDE_DIRECTORIES: @cueRhiD3d12WindowsInterfaceIncludes@
 Selected Windows SDK: @CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION@
 Minimum Windows SDK: @cueRhiD3d12MinimumWindowsSdkVersion@
-Allowed graph: Cue.RHI.D3D12->Cue.RHI+Cue.Foundation.Windows->Cue.Foundation
+Allowed graph: Cue.RHI.D3D12->Cue.RHI+Cue.Foundation.Windows+Cue.EngineAssets->Cue.Foundation
 Allowed Windows adapter graph: Cue.RHI.D3D12.Windows->Cue.RHI.D3D12+Cue.Platform.Windows
-Private links are LINK_ONLY: Cue.Foundation.Windows;D3D12;DXGI;DXGUID
+Private links are LINK_ONLY: Cue.Foundation.Windows;Cue.EngineAssets;D3D12;DXGI;DXGUID
 Windows and D3D12 native types in public headers: forbidden
 Target Source and Header File Sets: scanned
 Precompiled Headers and CXX Modules: forbidden

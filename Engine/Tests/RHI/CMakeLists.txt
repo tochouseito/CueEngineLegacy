@@ -130,6 +130,7 @@ if(WIN32)
     add_executable(CueRhiD3d12FrameCommandProcess D3d12FrameCommandProcess.cpp)
     add_executable(CueRhiD3d12QueueStateProcess D3d12QueueStateProcess.cpp)
     add_executable(CueRhiD3d12RtvHeapProcess D3d12RtvHeapProcess.cpp)
+    add_executable(CueRhiD3d12SceneFrameProcess D3d12SceneFrameProcess.cpp)
     add_executable(CueRhiD3d12SwapChainProcess D3d12SwapChainProcess.cpp)
     add_executable(
         CueRhiD3d12WindowsPublicHeaderTest
@@ -151,6 +152,8 @@ if(WIN32)
     target_compile_features(CueRhiD3d12QueueStateProcess PRIVATE cxx_std_20)
     target_link_libraries(CueRhiD3d12RtvHeapProcess PRIVATE Cue.RHI.D3D12)
     target_compile_features(CueRhiD3d12RtvHeapProcess PRIVATE cxx_std_20)
+    target_link_libraries(CueRhiD3d12SceneFrameProcess PRIVATE Cue.RHI.D3D12)
+    target_compile_features(CueRhiD3d12SceneFrameProcess PRIVATE cxx_std_20)
     target_link_libraries(
         CueRhiD3d12SwapChainProcess
         PRIVATE
@@ -168,6 +171,7 @@ if(WIN32)
         CueRhiD3d12FrameCommandProcess
         CueRhiD3d12QueueStateProcess
         CueRhiD3d12RtvHeapProcess
+        CueRhiD3d12SceneFrameProcess
         CueRhiD3d12SwapChainProcess
     )
 
@@ -188,6 +192,7 @@ if(WIN32)
         CueRhiD3d12FrameCommandProcess
         CueRhiD3d12QueueStateProcess
         CueRhiD3d12RtvHeapProcess
+        CueRhiD3d12SceneFrameProcess
         CueRhiD3d12SwapChainProcess
         CueRhiD3d12WindowsPublicHeaderTest
     )
@@ -275,6 +280,7 @@ if(WIN32)
         Cue.RHI.D3D12.RtvHeap.LiveSlotShutdown
         Cue.RHI.D3D12.RtvHeap.OwnerDestructor
         Cue.RHI.D3D12.RtvHeap.ActiveMoveAssignment
+        Cue.RHI.D3D12.SceneFrame.WarpPixel
         Cue.RHI.D3D12.SwapChain.SmokeVsync
         Cue.RHI.D3D12.SwapChain.SmokeImmediate
         Cue.RHI.D3D12.SwapChain.InfoQueue
@@ -293,6 +299,8 @@ if(WIN32)
         Cue.RHI.D3D12.SwapChain.Validation
         Cue.RHI.D3D12.SwapChain.ProductionOwnership
         Cue.RHI.D3D12.SwapChain.ClearSmoke
+        Cue.RHI.D3D12.SwapChain.SceneSmoke
+        Cue.RHI.D3D12.SwapChain.SceneDeviceRemoval
         Cue.RHI.D3D12.SwapChain.PresentFrames300
         Cue.RHI.D3D12.SwapChain.ResizeLifecycle
         Cue.RHI.D3D12.SwapChain.ResizeFailure
@@ -818,9 +826,10 @@ if(WIN32)
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyD3d12RtvHeapViolation.cmake
         )
     endforeach()
+    add_test(NAME Cue.RHI.D3D12.SceneFrame.WarpPixel COMMAND CueRhiD3d12SceneFrameProcess)
     foreach(
         swapChainMode
-        IN ITEMS SmokeVsync SmokeImmediate InfoQueue TearingMatrix PresentMatrix PresentSignalRecovery BeginFrameUnavailableRetention CloseFrameDeviceRemoved PresentUnavailableRetention SignalUnavailableRetention DirectPresentDeviceRemoved RecoverySignalDeviceRemoved RegularSignalDeviceRemoved CreationFaults LogFailure Validation ProductionOwnership ClearSmoke PresentFrames300 ResizeLifecycle ResizeFailure RtvRebuildFailure TerminalResizeRejection ResizeUnavailableRetention DeviceRemovalLifecycle DeviceRemovalResize DeviceRemovalDredFailure
+        IN ITEMS SmokeVsync SmokeImmediate InfoQueue TearingMatrix PresentMatrix PresentSignalRecovery BeginFrameUnavailableRetention CloseFrameDeviceRemoved PresentUnavailableRetention SignalUnavailableRetention DirectPresentDeviceRemoved RecoverySignalDeviceRemoved RegularSignalDeviceRemoved CreationFaults LogFailure Validation ProductionOwnership ClearSmoke SceneSmoke SceneDeviceRemoval PresentFrames300 ResizeLifecycle ResizeFailure RtvRebuildFailure TerminalResizeRejection ResizeUnavailableRetention DeviceRemovalLifecycle DeviceRemovalResize DeviceRemovalDredFailure
     )
         add_test(
             NAME Cue.RHI.D3D12.SwapChain.${swapChainMode}
@@ -831,6 +840,7 @@ if(WIN32)
         Cue.RHI.D3D12.SwapChain.DirectPresentDeviceRemoved
         Cue.RHI.D3D12.SwapChain.RecoverySignalDeviceRemoved
         Cue.RHI.D3D12.SwapChain.RegularSignalDeviceRemoved
+        Cue.RHI.D3D12.SwapChain.SceneDeviceRemoval
         Cue.RHI.D3D12.SwapChain.DeviceRemovalLifecycle
         Cue.RHI.D3D12.SwapChain.DeviceRemovalDredFailure
         PROPERTIES SKIP_RETURN_CODE 77
