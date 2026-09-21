@@ -4,6 +4,7 @@
 - Date: 2026-09-04
 - Decision Owners: CueEngine Project
 - Amendment: ADR-0019 replaces the Project Hub / ImGui / Platform host dependency edges below
+- Amendment: ADR-0031 permits a private `Cue.EngineAssets`／`Cue.Renderer` dependency for typed Create Primitive validation
 
 ## Context
 
@@ -82,8 +83,14 @@ Project、Schema、Scene、Runtime World境界へ接続する。
 
 ### Module Boundary
 
-`Cue.EditorCore`はPlatform、Window、ImGui、Rendererに依存しないApplication Moduleとする。初期依存は
+`Cue.EditorCore`はPlatform、Window、ImGuiに依存しないApplication Moduleとする。M12の初期依存は
 `Cue.Foundation`、`Cue.IO`、`Cue.Project`、`Cue.Scene`、`Cue.Schema`だけを許可する。
+
+ADR-0031のM19 Amendmentとして、`Cue.EditorCore`のPrivate実装だけが`Cue.EngineAssets`と`Cue.Renderer`へ
+依存してよい。用途はCreate Primitive IntentをTransactionへ変換する直前のTyped Catalog解決、Mesh Componentの
+Type／Field検証、Asset ID一致検証に限定する。公開Header、ViewModel、Intentは`Cue.EngineAssets`／`Cue.Renderer`型を
+公開せず、Stable IDと`SceneDocument`の値だけを使用する。これによりImGui以外のPresentationやAutomationが
+Catalog外IDまたはMesh以外のComponentを渡しても、Authoring Sceneへ不正値を永続化する前にController境界で拒否する。
 
 依存方向は次のとおりとする。
 
@@ -107,8 +114,13 @@ Cue.Editor.Tool ---------> Cue.ToolHost.WindowsD3D12 / Cue.Editor.ImGui / Cue.Ed
 Cue.RuntimeHost ---------> Cue.GameCore / Cue.Scene
 ```
 
-`Cue.EditorCore`は`Cue.Platform`、`Cue.RHI`、D3D12、Renderer、ImGuiへ依存しない。`Cue.Scene`、
-`Cue.Project`、`Cue.GameCore`、`Cue.RuntimeHost`は`Cue.EditorCore`へ依存しない。
+`Cue.EditorCore`の公開APIは`Cue.Platform`、`Cue.RHI`、D3D12、Renderer Native型、ImGuiへ依存しない。
+Private実装の`Cue.EngineAssets`／`Cue.Renderer`依存は上記Create Primitive検証だけに限定し、描画実行、GPU Resource、
+Runtime World抽出を所有しない。`Cue.Scene`、`Cue.Project`、`Cue.GameCore`、`Cue.RuntimeHost`は`Cue.EditorCore`へ依存しない。
+
+この依存追加によりEditorCoreのBuild Closureは大きくなるが、CatalogとRenderer Schemaの正本をUI側へ複製せず、
+すべてのPresentationに同じFail-closed検証を適用できる。Catalog／Schema Validatorを注入する案は、呼び出し側が
+正本と異なるValidatorを供給でき、公開APIへM19専用の抽象を追加するため採用しない。
 
 M12のImGui HostはEditor用Descriptor、Game Renderer、Viewport Render Targetを要求しない。WindowとImGui Backendに必要な
 Platform接続はPresentation Hostが所有し、`Cue.EditorCore`の公開APIへNative Handleを出さない。
@@ -493,8 +505,9 @@ ViewModelはProject／Scene Modelを再実装せず、表示に必要な値と�
 - Project Hub ServiceとEditor Launch Request生成
 - Process終了Resultの解釈
 
-Buildの依存検証で、`Cue.EditorCore`から`Cue.RHI`、D3D12、Renderer、ImGuiへの依存と、Runtime Moduleから
-`Cue.EditorCore`への逆依存を拒否する。
+Buildの依存検証で、`Cue.EditorCore`から`Cue.RHI`、D3D12、ImGuiへの依存、`Cue.EngineAssets`／`Cue.Renderer`の
+Public伝播、およびRuntime Moduleから`Cue.EditorCore`への逆依存を拒否する。Create Primitive TestはCatalog外ID、
+Mesh以外のComponent、Asset Field不一致をTransaction開始前に拒否することを検証する。
 
 ## Consequences
 

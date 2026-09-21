@@ -75,6 +75,8 @@ Revision 1のVertexはPositionとNormalだけを持つ。UV、Tangent、Material
 ### Authoring, Runtime Data, and Rendering
 
 - EditorのCreate PrimitiveはCatalogから明示選択したIDをMesh Componentへ保存する
+- `Cue.EditorCore`のPrivate実装がCatalog解決とRenderer Mesh Schema検証を所有し、公開APIへ両Moduleの型を出さない。
+  UI、Automation、将来の別PresentationからのIntentも、Transaction開始前に同じ検証を通す
 - PrimitiveをAuthoring Sceneへ生成する機能は、保存、Runtime Data、Renderer、Standaloneが同じIDを
   解決できる段階までUIへ公開しない
 - Cubeだけを許すRuntime Scene v2は変更しない
