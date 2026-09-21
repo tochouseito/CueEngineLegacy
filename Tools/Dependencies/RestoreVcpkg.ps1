@@ -194,18 +194,32 @@ function Invoke-CheckedProcess
         [string]$WorkingDirectory
     )
 
-    Push-Location $WorkingDirectory
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $ArgumentList)
+    {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
     try
     {
-        & $FilePath @ArgumentList
-        if ($LASTEXITCODE -ne 0)
+        if (-not $process.Start())
         {
-            throw "Process failed with exit code ${LASTEXITCODE}: $FilePath $($ArgumentList -join ' ')"
+            throw "Process could not be started: $FilePath"
+        }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0)
+        {
+            throw "Process failed with exit code $($process.ExitCode): $FilePath $($ArgumentList -join ' ')"
         }
     }
     finally
     {
-        Pop-Location
+        $process.Dispose()
     }
 }
 
