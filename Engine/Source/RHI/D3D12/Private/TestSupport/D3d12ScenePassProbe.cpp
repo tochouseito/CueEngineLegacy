@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <span>
 
 namespace
 {
@@ -40,40 +41,74 @@ struct EventOwner final
 
 namespace cue
 {
-bool verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext) noexcept
+D3d12SceneProbeResult verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext,
+                                                         D3d12ScenePixelCase a_case,
+                                                         D3d12SceneProbeAdapter a_adapter) noexcept
 {
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
-    if (FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf()))))
-    {
-        return false;
-    }
     Microsoft::WRL::ComPtr<ID3D12Device> device;
-    if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()))))
+    if (a_adapter == D3d12SceneProbeAdapter::Warp)
     {
-        return false;
+        if (FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf()))) ||
+            FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()))))
+        {
+            return D3d12SceneProbeResult::Failed;
+        }
+    }
+    else
+    {
+        for (UINT index = 0U;; ++index)
+        {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> candidate;
+            const HRESULT enumerateResult = factory->EnumAdapters1(index, candidate.GetAddressOf());
+            if (enumerateResult == DXGI_ERROR_NOT_FOUND)
+            {
+                break;
+            }
+            if (FAILED(enumerateResult))
+            {
+                return D3d12SceneProbeResult::Failed;
+            }
+            DXGI_ADAPTER_DESC1 description = {};
+            if (FAILED(candidate->GetDesc1(&description)))
+            {
+                return D3d12SceneProbeResult::Failed;
+            }
+            if ((description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0U &&
+                SUCCEEDED(
+                    D3D12CreateDevice(candidate.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()))))
+            {
+                adapter = candidate;
+                break;
+            }
+        }
+        if (!device)
+        {
+            return D3d12SceneProbeResult::HardwareUnavailable;
+        }
     }
     D3D12_COMMAND_QUEUE_DESC queueDescriptor = {};
     queueDescriptor.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
     if (FAILED(device->CreateCommandQueue(&queueDescriptor, IID_PPV_ARGS(queue.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
     if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocator.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
     if (FAILED(device->CreateCommandList(0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
                                          IID_PPV_ARGS(commandList.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
 
     D3D12_RESOURCE_DESC textureDescriptor = {};
@@ -92,7 +127,7 @@ bool verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext) no
                                                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
                                                IID_PPV_ARGS(renderTarget.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     D3D12_DESCRIPTOR_HEAP_DESC rtvDescriptor = {};
     rtvDescriptor.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -100,7 +135,7 @@ bool verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext) no
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
     if (FAILED(device->CreateDescriptorHeap(&rtvDescriptor, IID_PPV_ARGS(rtvHeap.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap->GetCPUDescriptorHandleForHeapStart();
     device->CreateRenderTargetView(renderTarget.Get(), nullptr, rtv);
@@ -125,31 +160,48 @@ bool verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext) no
                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                IID_PPV_ARGS(readback.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     if (FAILED(device->CreateFence(0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()))))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     EventOwner event;
     event.handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (event.handle == nullptr)
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
 
     D3d12ScenePass pass;
-    if (!pass.initialize(device.Get(), textureDescriptor.Format, a_assertContext))
+    if (!pass.initialize(device.Get(), textureDescriptor.Format, k_pixelSurfaceSize, k_pixelSurfaceSize,
+                         a_assertContext))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
                                                 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
-    PresentationSceneCube cube = {identity};
-    cube.localToWorld[14] = 0.5F;
-    const std::array cubes = {cube};
-    const PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, cubes};
+    constexpr std::array<float, 16> rotationY90 = {0.0F, 0.0F, -1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                   1.0F, 0.0F, 0.0F,  0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    std::array<PresentationSceneCube, 2> cubes = {PresentationSceneCube{identity}, PresentationSceneCube{rotationY90}};
+    if (a_case != D3d12ScenePixelCase::BackFaceCull)
+    {
+        cubes[0].localToWorld[14] = 0.75F;
+    }
+    cubes[1].localToWorld[14] = 0.95F;
+    if (a_case == D3d12ScenePixelCase::DepthReverseOrder)
+    {
+        const PresentationSceneCube nearCube = cubes[0];
+        cubes[0] = cubes[1];
+        cubes[1] = nearCube;
+    }
+    const std::size_t cubeCount =
+        a_case == D3d12ScenePixelCase::Depth || a_case == D3d12ScenePixelCase::DepthReverseOrder ? 2U : 1U;
+    const PresentationSceneCube *firstCube =
+        a_case == D3d12ScenePixelCase::DepthFarReference ? cubes.data() + 1U : cubes.data();
+    const PresentationSceneFrameDescriptor scene = {
+        {0.0F, 0.0F, 0.0F, 1.0F}, identity, std::span<const PresentationSceneCube>(firstCube, cubeCount)};
     commandList->ClearRenderTargetView(rtv, scene.clearColor.data(), 0U, nullptr);
     pass.record(commandList.Get(), rtv, 0U, k_pixelSurfaceSize, k_pixelSurfaceSize, scene);
     D3D12_RESOURCE_BARRIER barrier = {};
@@ -169,7 +221,7 @@ bool verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext) no
     commandList->CopyTextureRegion(&destination, 0U, 0U, 0U, &source, nullptr);
     if (FAILED(commandList->Close()))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     ID3D12CommandList *lists[] = {commandList.Get()};
     queue->ExecuteCommandLists(1U, lists);
@@ -185,16 +237,25 @@ bool verify_d3d12_scene_pixel_for_probe(const AssertContext &a_assertContext) no
     void *mapped = nullptr;
     if (FAILED(readback->Map(0U, &readRange, &mapped)))
     {
-        return false;
+        return D3d12SceneProbeResult::Failed;
     }
     const auto *pixels = static_cast<const std::uint8_t *>(mapped);
     const auto *pixel = pixels + pixelOffset;
     const auto *corner = pixels + cornerOffset;
     const bool hasDrawnColor = (pixel[0] > 30U || pixel[1] > 30U || pixel[2] > 30U) && pixel[3] == 255U;
     const bool hasClearCorner = corner[0] == 0U && corner[1] == 0U && corner[2] == 0U && corner[3] == 255U;
+    const bool farCubeIsVisible = pixel[0] > 200U && pixel[2] < 100U && pixel[3] == 255U;
+    const bool nearCubeWinsDepth = pixel[2] > 200U && pixel[0] < 100U && pixel[3] == 255U;
+    const bool insideCubeIsCulled = pixel[0] == 0U && pixel[1] == 0U && pixel[2] == 0U && pixel[3] == 255U;
     const D3D12_RANGE writtenRange = {0U, 0U};
     readback->Unmap(0U, &writtenRange);
     pass.release();
-    return hasDrawnColor && hasClearCorner;
+    const bool accepted =
+        hasClearCorner && (a_case == D3d12ScenePixelCase::Basic               ? hasDrawnColor
+                           : a_case == D3d12ScenePixelCase::DepthFarReference ? farCubeIsVisible
+                           : a_case == D3d12ScenePixelCase::Depth || a_case == D3d12ScenePixelCase::DepthReverseOrder
+                               ? nearCubeWinsDepth
+                               : insideCubeIsCulled);
+    return accepted ? D3d12SceneProbeResult::Passed : D3d12SceneProbeResult::Failed;
 }
 } // namespace cue

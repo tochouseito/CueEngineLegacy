@@ -23,6 +23,9 @@ constexpr std::int64_t k_scenePipelineCreationFailed = 303;
 constexpr std::int64_t k_sceneMeshContractInvalid = 304;
 constexpr std::int64_t k_sceneBufferCreationFailed = 305;
 constexpr std::int64_t k_sceneBufferMapFailed = 306;
+constexpr std::int64_t k_sceneDepthCreationFailed = 309;
+constexpr std::int64_t k_sceneDsvHeapCreationFailed = 310;
+constexpr std::int64_t k_sceneInvalidDepthExtent = 311;
 constexpr std::uint32_t k_sceneConstantAlignment = 256U;
 
 struct SceneVertex final
@@ -91,19 +94,24 @@ D3d12ScenePass::~D3d12ScenePass() noexcept
     release();
 }
 
-Result<void> D3d12ScenePass::initialize(ID3D12Device *a_device, DXGI_FORMAT a_format,
-                                        const AssertContext &a_assertContext) noexcept
+Result<void> D3d12ScenePass::initialize(ID3D12Device *a_device, DXGI_FORMAT a_format, std::uint32_t a_width,
+                                        std::uint32_t a_height, const AssertContext &a_assertContext) noexcept
 {
     if (has_native_objects())
     {
         return Result<void>::failure(d3d12_private::make_error(a_assertContext, k_scenePassAlreadyInitialized,
                                                                "D3D12 Scene Pass is already initialized"));
     }
-    return create_resources(a_device, a_format, a_assertContext);
+    if (a_width == 0U || a_height == 0U)
+    {
+        return Result<void>::failure(d3d12_private::make_error(a_assertContext, k_sceneInvalidDepthExtent,
+                                                               "D3D12 Scene Depth extent must be nonzero"));
+    }
+    return create_resources(a_device, a_format, a_width, a_height, a_assertContext);
 }
 
-Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMAT a_format,
-                                              const AssertContext &a_assertContext) noexcept
+Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMAT a_format, std::uint32_t a_width,
+                                              std::uint32_t a_height, const AssertContext &a_assertContext) noexcept
 {
     D3D12_ROOT_PARAMETER rootParameter = {};
     rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -142,15 +150,17 @@ Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMA
     pipeline.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pipeline.SampleMask = (std::numeric_limits<UINT>::max)();
     pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pipeline.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipeline.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    pipeline.RasterizerState.FrontCounterClockwise = FALSE;
     pipeline.RasterizerState.DepthClipEnable = TRUE;
-    pipeline.DepthStencilState.DepthEnable = FALSE;
-    pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    pipeline.DepthStencilState.DepthEnable = TRUE;
+    pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     pipeline.InputLayout = {inputElements, 2U};
     pipeline.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pipeline.NumRenderTargets = 1U;
     pipeline.RTVFormats[0] = a_format;
+    pipeline.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pipeline.SampleDesc.Count = 1U;
     result = a_device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(m_pipeline.GetAddressOf()));
     if (FAILED(result))
@@ -158,6 +168,39 @@ Result<void> D3d12ScenePass::create_resources(ID3D12Device *a_device, DXGI_FORMA
         return Result<void>::failure(d3d12_private::make_native_error(a_assertContext, k_scenePipelineCreationFailed,
                                                                       "D3D12 Scene Pipeline creation failed", result));
     }
+
+    D3D12_RESOURCE_DESC depthDescriptor = {};
+    depthDescriptor.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDescriptor.Width = a_width;
+    depthDescriptor.Height = a_height;
+    depthDescriptor.DepthOrArraySize = 1U;
+    depthDescriptor.MipLevels = 1U;
+    depthDescriptor.Format = DXGI_FORMAT_D32_FLOAT;
+    depthDescriptor.SampleDesc.Count = 1U;
+    depthDescriptor.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE depthClear = {};
+    depthClear.Format = DXGI_FORMAT_D32_FLOAT;
+    depthClear.DepthStencil.Depth = 1.0F;
+    D3D12_HEAP_PROPERTIES depthHeap = {};
+    depthHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    result = a_device->CreateCommittedResource(&depthHeap, D3D12_HEAP_FLAG_NONE, &depthDescriptor,
+                                               D3D12_RESOURCE_STATE_DEPTH_WRITE, &depthClear,
+                                               IID_PPV_ARGS(m_depth.GetAddressOf()));
+    if (FAILED(result))
+    {
+        return Result<void>::failure(d3d12_private::make_native_error(a_assertContext, k_sceneDepthCreationFailed,
+                                                                      "D3D12 Scene Depth creation failed", result));
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC dsvDescriptor = {};
+    dsvDescriptor.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsvDescriptor.NumDescriptors = 1U;
+    result = a_device->CreateDescriptorHeap(&dsvDescriptor, IID_PPV_ARGS(m_dsvHeap.GetAddressOf()));
+    if (FAILED(result))
+    {
+        return Result<void>::failure(d3d12_private::make_native_error(a_assertContext, k_sceneDsvHeapCreationFailed,
+                                                                      "D3D12 Scene DSV Heap creation failed", result));
+    }
+    a_device->CreateDepthStencilView(m_depth.Get(), nullptr, m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 
     const engine_assets::MeshView cube = engine_assets::built_in_cube_mesh();
     if (cube.assetId != engine_assets::k_cubeMeshAssetId || cube.revision != engine_assets::k_cubeMeshRevision ||
@@ -236,13 +279,15 @@ void D3d12ScenePass::release() noexcept
     }
     m_indices.Reset();
     m_vertices.Reset();
+    m_dsvHeap.Reset();
+    m_depth.Reset();
     m_pipeline.Reset();
     m_rootSignature.Reset();
 }
 
 bool D3d12ScenePass::has_native_objects() const noexcept
 {
-    if (m_rootSignature || m_pipeline || m_vertices || m_indices)
+    if (m_rootSignature || m_pipeline || m_depth || m_dsvHeap || m_vertices || m_indices)
     {
         return true;
     }
@@ -254,6 +299,21 @@ bool D3d12ScenePass::has_native_objects() const noexcept
         }
     }
     return false;
+}
+
+std::array<std::uint32_t, 2> D3d12ScenePass::depth_extent() const noexcept
+{
+    if (!m_depth)
+    {
+        return {0U, 0U};
+    }
+    const D3D12_RESOURCE_DESC descriptor = m_depth->GetDesc();
+    return {static_cast<std::uint32_t>(descriptor.Width), descriptor.Height};
+}
+
+bool D3d12ScenePass::has_depth_dsv() const noexcept
+{
+    return m_depth && m_dsvHeap;
 }
 
 void D3d12ScenePass::record(ID3D12GraphicsCommandList *a_commandList, D3D12_CPU_DESCRIPTOR_HANDLE a_rtv,
@@ -271,7 +331,9 @@ void D3d12ScenePass::record(ID3D12GraphicsCommandList *a_commandList, D3D12_CPU_
     a_commandList->SetPipelineState(m_pipeline.Get());
     a_commandList->RSSetViewports(1U, &viewport);
     a_commandList->RSSetScissorRects(1U, &scissor);
-    a_commandList->OMSetRenderTargets(1U, &a_rtv, FALSE, nullptr);
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    a_commandList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0F, 0U, 0U, nullptr);
+    a_commandList->OMSetRenderTargets(1U, &a_rtv, FALSE, &dsv);
     a_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     a_commandList->IASetVertexBuffers(0U, 1U, &vertexView);
     a_commandList->IASetIndexBuffer(&indexView);

@@ -52,6 +52,9 @@ struct D3d12PresentationProbeReport final
     bool hasSwapChain;
     bool hasRtvHeap;
     bool isRegistered;
+    std::uint32_t sceneDepthWidth;
+    std::uint32_t sceneDepthHeight;
+    bool hasSceneDepthDsv;
 };
 
 struct D3d12BackendOwnerProbeReport final
@@ -90,8 +93,8 @@ struct D3d12DredOwnerProbeReport final
                                                                     const AssertContext &a_assertContext) noexcept;
 
 /// @brief VSync、Tearing、OccludedのPresent引数と結果を検証する
-[[nodiscard]] bool verify_d3d12_swap_chain_present_matrix_for_probe(const void *a_nativeWindow,
-                                                                    std::uint32_t a_width, std::uint32_t a_height,
+[[nodiscard]] bool verify_d3d12_swap_chain_present_matrix_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                                    std::uint32_t a_height,
                                                                     const AssertContext &a_assertContext) noexcept;
 
 /// @brief DXGI生成、Association、Interface、Back Buffer取得、命名失敗のrollbackを検証する
@@ -111,23 +114,23 @@ struct D3d12DredOwnerProbeReport final
                                                                 const AssertContext &a_assertContext) noexcept;
 
 /// @brief ResizeBuffers失敗後に旧状態へ戻さず診断可能な所有状態を保つことを検証する
-[[nodiscard]] bool verify_d3d12_swap_chain_resize_failure_for_probe(const void *a_nativeWindow,
-                                                                    std::uint32_t a_width, std::uint32_t a_height,
+[[nodiscard]] bool verify_d3d12_swap_chain_resize_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                                    std::uint32_t a_height,
                                                                     const AssertContext &a_assertContext) noexcept;
 
 /// @brief RTV再構築失敗後にPresentationを規定順で解放し、Backend登録を解除することを検証する
-[[nodiscard]] bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow,
-                                                               std::uint32_t a_width, std::uint32_t a_height,
-                                                               AssertContext &a_assertContext) noexcept;
+[[nodiscard]] bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                              std::uint32_t a_height,
+                                                              AssertContext &a_assertContext) noexcept;
 
 /// @brief Terminal Signal Errorで停止したProduction PresentationをResizeが再開しないことを検証する
-[[nodiscard]] bool verify_d3d12_terminal_resize_rejection_for_probe(const void *a_nativeWindow,
-                                                                     std::uint32_t a_width, std::uint32_t a_height,
-                                                                     AssertContext &a_assertContext) noexcept;
+[[nodiscard]] bool verify_d3d12_terminal_resize_rejection_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                                    std::uint32_t a_height,
+                                                                    AssertContext &a_assertContext) noexcept;
 
 /// @brief Present失敗後の補完Signalと通常Present後のSignal失敗回収を検証する
-[[nodiscard]] bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow,
-                                                                  std::uint32_t a_width, std::uint32_t a_height,
+[[nodiscard]] bool verify_d3d12_present_signal_recovery_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                                  std::uint32_t a_height,
                                                                   D3d12PresentFailureProbeMode a_mode,
                                                                   AssertContext &a_assertContext) noexcept;
 
@@ -163,5 +166,5 @@ struct D3d12DredOwnerProbeReport final
 
 /// @brief Production PresentationのCurrent Back Bufferを指定色でClearしてSubmitする
 [[nodiscard]] bool submit_d3d12_clear_frame_for_probe(PresentationContext &a_presentation,
-                                                       const std::array<float, 4> &a_color) noexcept;
+                                                      const std::array<float, 4> &a_color) noexcept;
 } // namespace cue
