@@ -156,9 +156,11 @@ Inventory HashをManifestへ記録する。配布物からProject SourceやUser 
   単調増加する`revision`、
   Version Entryを持つCanonical JSONで保持する。Readerは対応外Majorと未知MemberをFail-closedで拒否し、
   新しいSchemaを旧Writerで上書きしない。破損時だけVersion Manifest、Payload完了Marker、
-  Probe成功Markerの三つが同じBundle／Manifest Digestを示すVersionからRegistry v1を明示Recoveryし、
-  元FileをEvidenceとして退避する。Probe成功MarkerがないVersionはSelectableへ復活させず隔離または
-  明示再Probeする。意味変更はMigration Issueと新Schemaで行う
+  Probe成功Markerが同じBundle／Manifest Digestを示し、検証済みManifest Identity／Inventoryから導出した
+  Worker ID、`Operations/Workers/<worker-id>/CueEngineInstallWorker.exe`、
+  `CueEngineInstallWorker.complete.json`のIdentity／Inventory／Digestも一致するVersionからRegistry v1を
+  明示Recoveryし、元FileをEvidenceとして退避する。Probe成功Markerまたは有効な公開済みWorkerがないVersionは
+  Selectableへ復活させず隔離または明示再Probe／Worker再発行する。意味変更はMigration Issueと新Schemaで行う
 - Project HubはInstalled Version RegistryからVersionを列挙し、Project Compatibilityと一致する
   Editor Entry Pointを明示選択する。単一の可変`current` Directoryへ依存しない
 - Process起動前に選択VersionのManifestとEntry Point Inventoryを再検証する
