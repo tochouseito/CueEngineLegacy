@@ -78,32 +78,95 @@ void require(bool a_condition) noexcept
     return count;
 }
 
-using SphereTriangleSignature = std::array<std::uint16_t, 3U>;
+using MeshVertexSignature = std::array<float, 6U>;
+using MeshTriangleSignature = std::array<MeshVertexSignature, 3U>;
 
-/// @brief Triangle内のIndex順に依存しないSphere Triangle Signatureを作成する
-[[nodiscard]] SphereTriangleSignature make_sphere_triangle_signature(std::uint16_t a_first,
-                                                                      std::uint16_t a_second,
-                                                                      std::uint16_t a_third) noexcept
+/// @brief Mesh Vertexを配列Indexに依存しない値Signatureへ変換する
+[[nodiscard]] MeshVertexSignature make_mesh_vertex_signature(const cue::engine_assets::MeshVertex &a_vertex) noexcept
 {
-    SphereTriangleSignature signature = {a_first, a_second, a_third};
+    return {
+        a_vertex.position.x,
+        a_vertex.position.y,
+        a_vertex.position.z,
+        a_vertex.normal.x,
+        a_vertex.normal.y,
+        a_vertex.normal.z,
+    };
+}
+
+/// @brief Triangle内のVertex順に依存しない値Signatureを作成する
+[[nodiscard]] MeshTriangleSignature make_mesh_triangle_signature(
+    const cue::engine_assets::MeshVertex &a_first, const cue::engine_assets::MeshVertex &a_second,
+    const cue::engine_assets::MeshVertex &a_third) noexcept
+{
+    MeshTriangleSignature signature = {
+        make_mesh_vertex_signature(a_first),
+        make_mesh_vertex_signature(a_second),
+        make_mesh_vertex_signature(a_third),
+    };
     std::ranges::sort(signature);
     return signature;
 }
 
+/// @brief Sphere Revision 1の配列順に依存しない期待Vertex値を作成する
+[[nodiscard]] std::array<cue::engine_assets::MeshVertex, 114U> make_expected_sphere_vertices() noexcept
+{
+    constexpr std::size_t sliceCount = 16U;
+    constexpr std::size_t stackCount = 8U;
+    constexpr double stepCos = 0.9238795325112867;
+    constexpr double stepSin = 0.3826834323650898;
+    std::array<cue::engine_assets::MeshVertex, 114U> vertices{};
+    vertices.front() = {{0.0F, 0.5F, 0.0F}, {0.0F, 1.0F, 0.0F}};
+
+    std::size_t vertexIndex = 1U;
+    double stackSin = 0.0;
+    double stackCos = 1.0;
+    for (std::size_t stackIndex = 1U; stackIndex < stackCount; ++stackIndex)
+    {
+        const double nextStackSin = stackSin * stepCos + stackCos * stepSin;
+        const double nextStackCos = stackCos * stepCos - stackSin * stepSin;
+        stackSin = nextStackSin;
+        stackCos = nextStackCos;
+
+        double sliceSin = 0.0;
+        double sliceCos = 1.0;
+        for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
+        {
+            const float normalX = static_cast<float>(stackSin * sliceCos);
+            const float normalY = static_cast<float>(stackCos);
+            const float normalZ = static_cast<float>(stackSin * sliceSin);
+            vertices[vertexIndex++] = {
+                {normalX * 0.5F, normalY * 0.5F, normalZ * 0.5F},
+                {normalX, normalY, normalZ},
+            };
+
+            const double nextSliceSin = sliceSin * stepCos + sliceCos * stepSin;
+            const double nextSliceCos = sliceCos * stepCos - sliceSin * stepSin;
+            sliceSin = nextSliceSin;
+            sliceCos = nextSliceCos;
+        }
+    }
+
+    vertices.back() = {{0.0F, -0.5F, 0.0F}, {0.0F, -1.0F, 0.0F}};
+    return vertices;
+}
+
 /// @brief Sphere Revision 1の順序非依存Triangle集合を作成する
-[[nodiscard]] std::array<SphereTriangleSignature, 224U> make_expected_sphere_triangle_set() noexcept
+[[nodiscard]] std::array<MeshTriangleSignature, 224U> make_expected_sphere_triangle_set() noexcept
 {
     constexpr std::size_t sliceCount = 16U;
     constexpr std::size_t ringCount = 7U;
     constexpr std::uint16_t bottomIndex = 113U;
-    std::array<SphereTriangleSignature, 224U> triangles{};
+    const auto vertices = make_expected_sphere_vertices();
+    std::array<MeshTriangleSignature, 224U> triangles{};
     std::size_t triangleIndex = 0U;
 
     for (std::size_t sliceIndex = 0U; sliceIndex < sliceCount; ++sliceIndex)
     {
         const std::uint16_t current = static_cast<std::uint16_t>(1U + sliceIndex);
         const std::uint16_t next = static_cast<std::uint16_t>(1U + (sliceIndex + 1U) % sliceCount);
-        triangles[triangleIndex++] = make_sphere_triangle_signature(0U, current, next);
+        triangles[triangleIndex++] =
+            make_mesh_triangle_signature(vertices[0U], vertices[current], vertices[next]);
     }
 
     for (std::size_t ringIndex = 0U; ringIndex + 1U < ringCount; ++ringIndex)
@@ -117,9 +180,10 @@ using SphereTriangleSignature = std::array<std::uint16_t, 3U>;
             const std::uint16_t upperNext = static_cast<std::uint16_t>(upperStart + nextSlice);
             const std::uint16_t lowerCurrent = static_cast<std::uint16_t>(lowerStart + sliceIndex);
             const std::uint16_t lowerNext = static_cast<std::uint16_t>(lowerStart + nextSlice);
-            triangles[triangleIndex++] =
-                make_sphere_triangle_signature(upperCurrent, lowerNext, lowerCurrent);
-            triangles[triangleIndex++] = make_sphere_triangle_signature(upperCurrent, upperNext, lowerNext);
+            triangles[triangleIndex++] = make_mesh_triangle_signature(
+                vertices[upperCurrent], vertices[lowerNext], vertices[lowerCurrent]);
+            triangles[triangleIndex++] = make_mesh_triangle_signature(
+                vertices[upperCurrent], vertices[upperNext], vertices[lowerNext]);
         }
     }
 
@@ -128,7 +192,8 @@ using SphereTriangleSignature = std::array<std::uint16_t, 3U>;
     {
         const std::uint16_t current = static_cast<std::uint16_t>(lastRingStart + sliceIndex);
         const std::uint16_t next = static_cast<std::uint16_t>(lastRingStart + (sliceIndex + 1U) % sliceCount);
-        triangles[triangleIndex++] = make_sphere_triangle_signature(current, next, bottomIndex);
+        triangles[triangleIndex++] =
+            make_mesh_triangle_signature(vertices[current], vertices[next], vertices[bottomIndex]);
     }
 
     return triangles;
@@ -338,6 +403,8 @@ void test_plane_mesh() noexcept
     std::ranges::sort(expectedPositions);
     require(positions == expectedPositions);
 
+    std::array<MeshTriangleSignature, 2U> triangleSet{};
+    std::size_t triangleIndex = 0U;
     for (std::size_t index = 0U; index < plane.indices.size(); index += 3U)
     {
         const auto firstIndex = plane.indices[index];
@@ -352,7 +419,22 @@ void test_plane_mesh() noexcept
         const auto triangleNormal = cue::math::cross(edgeA, edgeB);
         require(cue::math::dot(triangleNormal, triangleNormal) > 0.0F);
         require(cue::math::dot(triangleNormal, cue::math::Vector3{0.0F, 1.0F, 0.0F}) > 0.0F);
+        triangleSet[triangleIndex++] =
+            make_mesh_triangle_signature(plane.vertices[firstIndex], plane.vertices[secondIndex],
+                                         plane.vertices[thirdIndex]);
     }
+
+    constexpr cue::engine_assets::MeshVertex expectedFirst{{-0.5F, 0.0F, -0.5F}, {0.0F, 1.0F, 0.0F}};
+    constexpr cue::engine_assets::MeshVertex expectedSecond{{-0.5F, 0.0F, 0.5F}, {0.0F, 1.0F, 0.0F}};
+    constexpr cue::engine_assets::MeshVertex expectedThird{{0.5F, 0.0F, 0.5F}, {0.0F, 1.0F, 0.0F}};
+    constexpr cue::engine_assets::MeshVertex expectedFourth{{0.5F, 0.0F, -0.5F}, {0.0F, 1.0F, 0.0F}};
+    std::array<MeshTriangleSignature, 2U> expectedTriangleSet = {
+        make_mesh_triangle_signature(expectedFirst, expectedSecond, expectedThird),
+        make_mesh_triangle_signature(expectedFirst, expectedThird, expectedFourth),
+    };
+    std::ranges::sort(triangleSet);
+    std::ranges::sort(expectedTriangleSet);
+    require(triangleSet == expectedTriangleSet);
 }
 
 /// @brief SphereのTessellation、Bounds、Normal、Winding、Seam／Pole Contractを検証する
@@ -409,7 +491,7 @@ void test_sphere_mesh() noexcept
 
     std::size_t topTriangleCount = 0U;
     std::size_t bottomTriangleCount = 0U;
-    std::array<SphereTriangleSignature, 224U> triangleSet{};
+    std::array<MeshTriangleSignature, 224U> triangleSet{};
     std::size_t triangleIndex = 0U;
     for (std::size_t index = 0U; index < sphere.indices.size(); index += 3U)
     {
@@ -433,8 +515,7 @@ void test_sphere_mesh() noexcept
         };
         require(cue::math::dot(triangleNormal, triangleNormal) > 0.0000001F);
         require(cue::math::dot(triangleNormal, centroid) > 0.0F);
-        triangleSet[triangleIndex++] =
-            make_sphere_triangle_signature(firstIndex, secondIndex, thirdIndex);
+        triangleSet[triangleIndex++] = make_mesh_triangle_signature(first, second, third);
 
         if (firstIndex == 0U || secondIndex == 0U || thirdIndex == 0U)
         {
