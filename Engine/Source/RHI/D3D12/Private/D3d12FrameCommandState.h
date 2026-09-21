@@ -115,6 +115,11 @@ class D3d12FrameCommandState final
     [[nodiscard]] Result<void> record_scene(std::uint32_t a_frameIndex, D3d12RtvHeap &a_heap,
                                            D3d12ScenePass &a_pass, std::uint32_t a_width, std::uint32_t a_height,
                                            const PresentationSceneFrameDescriptor &a_descriptor) noexcept;
+#if CUE_D3D12_TESTING
+    /// @brief Scene描画直後のBack Bufferを、Present前にProbe所有のReadbackへ複製する
+    [[nodiscard]] bool copy_scene_back_buffer_for_probe(std::uint32_t a_frameIndex, ID3D12Resource *a_readback,
+                                                        const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &a_footprint) noexcept;
+#endif
     /// @brief Frame Recording を終了して Command List を実行可能な状態へ確定する
     [[nodiscard]] Result<void> close_frame() noexcept;
     /// @brief 記録済み Frame Command List を D3D12 Queue へ投入する

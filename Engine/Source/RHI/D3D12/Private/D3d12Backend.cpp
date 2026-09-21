@@ -22,6 +22,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -29,6 +30,7 @@
 #include <memory>
 #include <optional>
 #include <source_location>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -571,6 +573,16 @@ using ClassifyPresentationNativeFailure = cue::Result<void> (*)(void *, cue::Err
     return cue::Result<void>::success();
 }
 
+#if CUE_D3D12_TESTING
+struct D3d12ScenePixelCapture final
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+    std::uint32_t width = 0U;
+    std::uint32_t height = 0U;
+};
+#endif
+
 // Window 固有の Swap Chain、Back Buffer、RTV、Frame Command を所有する Presentation 実装
 // Backend の Device と Queue を借用するため、必ず Backend より先に Shutdown して登録を解除する
 class D3d12PresentationContext final : public cue::PresentationContext
@@ -832,6 +844,16 @@ class D3d12PresentationContext final : public cue::PresentationContext
                 return failFrameOperation(std::move(*sceneResult.try_error()),
                                           "D3D12 Backend cleanup preparation also failed after Scene Draw");
             }
+#if CUE_D3D12_TESTING
+            if (m_sceneCaptureForProbe != nullptr &&
+                !m_frameCommandState.copy_scene_back_buffer_for_probe(
+                    frameIndex, m_sceneCaptureForProbe->readback.Get(), m_sceneCaptureForProbe->footprint))
+            {
+                return failFrameOperation(make_error(*m_assertContext, k_invalidSceneFrame,
+                                                     "D3D12 Scene pixel capture could not be recorded"),
+                                          "D3D12 Scene pixel capture also failed");
+            }
+#endif
         }
 
         cue::Result<void> presentStateResult =
@@ -1305,8 +1327,64 @@ class D3d12PresentationContext final : public cue::PresentationContext
         report.sceneDepthWidth = depthExtent[0];
         report.sceneDepthHeight = depthExtent[1];
         report.hasSceneDepthDsv = m_scenePass.has_depth_dsv();
+        report.sceneDepthIdentity = m_scenePass.depth_identity_for_probe();
+        report.hasSceneNativeObjects = m_scenePass.has_native_objects();
         return report;
     }
+
+#if CUE_D3D12_TESTING
+    /// @brief このPresentationだけの次回Scene生成失敗をProbeから指定する
+    void set_scene_creation_fault_for_probe(cue::D3d12SceneCreationFault a_fault) noexcept
+    {
+        m_scenePass.set_creation_fault_for_probe(a_fault);
+    }
+
+    /// @brief 現寸法のSwap Chain Back Bufferを読み戻すBufferをProbeへ作成する
+    [[nodiscard]] bool create_scene_capture_for_probe(D3d12ScenePixelCapture &a_capture) noexcept
+    {
+        cue::Result<ID3D12Resource *> backBuffer =
+            m_frameCommandState.back_buffer(m_swapChain.current_back_buffer_index());
+        if (!backBuffer)
+        {
+            return false;
+        }
+        const D3D12_RESOURCE_DESC texture = (*backBuffer.try_value())->GetDesc();
+        UINT rowCount = 0U;
+        UINT64 rowSize = 0U;
+        UINT64 readbackSize = 0U;
+        m_device->GetCopyableFootprints(&texture, 0U, 1U, 0U, &a_capture.footprint, &rowCount, &rowSize, &readbackSize);
+        if (readbackSize == 0U)
+        {
+            return false;
+        }
+        D3D12_RESOURCE_DESC buffer = {};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = readbackSize;
+        buffer.Height = 1U;
+        buffer.DepthOrArraySize = 1U;
+        buffer.MipLevels = 1U;
+        buffer.SampleDesc.Count = 1U;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        D3D12_HEAP_PROPERTIES heap = {};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        if (FAILED(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(a_capture.readback.GetAddressOf()))))
+        {
+            return false;
+        }
+        a_capture.width = m_swapChain.width();
+        a_capture.height = m_swapChain.height();
+        return true;
+    }
+
+    /// @brief 次のScene Frameに限り、Present前のReadback Copy先を指定する
+    void set_scene_capture_for_probe(D3d12ScenePixelCapture *a_capture) noexcept
+    {
+        m_sceneCaptureForProbe = a_capture;
+    }
+
+#endif
 
     /// @brief D3D12 Backend の Transition Frame For Probe を GPU 実行順と Resource State を守って投入する
     [[nodiscard]] cue::Result<std::uint64_t> submit_transition_frame_for_probe() noexcept
@@ -1497,6 +1575,9 @@ class D3d12PresentationContext final : public cue::PresentationContext
     cue::PresentationContextState m_state;
     bool m_isRegistered;
     bool m_isResizePending;
+#if CUE_D3D12_TESTING
+    D3d12ScenePixelCapture *m_sceneCaptureForProbe = nullptr;
+#endif
 };
 
 // Process 側の Factory、Adapter、Device、Queue を所有し、Presentation へ長寿命 Resource を貸し出す Backend 実装
@@ -2198,6 +2279,224 @@ bool verify_d3d12_rtv_rebuild_failure_for_probe(const void *a_nativeWindow, std:
     return failureValid && cleanupValid;
 }
 
+#if CUE_D3D12_TESTING
+/// @brief GPU完了証明後にReadbackの中心・角画素から固定SceneのDepth結果を検査する
+[[nodiscard]] bool validate_scene_resize_capture(const D3d12ScenePixelCapture &a_capture,
+                                                 bool a_expectNearCube) noexcept
+{
+    if (!a_capture.readback || a_capture.width < 5U || a_capture.height < 5U)
+    {
+        return false;
+    }
+    const D3D12_RANGE readRange = {0U, static_cast<SIZE_T>(a_capture.readback->GetDesc().Width)};
+    void *mapped = nullptr;
+    if (FAILED(a_capture.readback->Map(0U, &readRange, &mapped)))
+    {
+        return false;
+    }
+    const auto *pixels = static_cast<const std::uint8_t *>(mapped);
+    const std::size_t centerOffset = a_capture.footprint.Offset +
+                                     (a_capture.height / 2U) * a_capture.footprint.Footprint.RowPitch +
+                                     (a_capture.width / 2U) * 4U;
+    const std::size_t cornerOffset = a_capture.footprint.Offset + 2U * a_capture.footprint.Footprint.RowPitch + 2U * 4U;
+    const auto *center = pixels + centerOffset;
+    const auto *corner = pixels + cornerOffset;
+    const bool cornerIsClear = corner[0] == 0U && corner[1] == 0U && corner[2] == 0U && corner[3] == 255U;
+    const bool depthColorIsCorrect = a_expectNearCube ? center[2] > 200U && center[0] < 100U && center[3] == 255U
+                                                      : center[0] > 200U && center[2] < 100U && center[3] == 255U;
+    const D3D12_RANGE writtenRange = {0U, 0U};
+    a_capture.readback->Unmap(0U, &writtenRange);
+    return cornerIsClear && depthColorIsCorrect;
+}
+
+D3d12ResizeScenePixelResult verify_d3d12_scene_resize_pixel_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                                      std::uint32_t a_height, bool a_useHardware,
+                                                                      AssertContext &a_assertContext) noexcept
+{
+    constexpr std::int64_t k_noHardwareAdapterForProbe = 24;
+    constexpr std::int64_t k_noSuitableAdapterForProbe = 25;
+    const D3d12BackendDescriptor backendDescriptor = {
+        a_useHardware ? D3d12AdapterPolicy::HighPerformanceHardware : D3d12AdapterPolicy::Warp,
+        D3d12ValidationMode::Disabled,
+        false,
+        5'000,
+    };
+    Result<std::unique_ptr<D3d12Backend>> backendResult = create_d3d12_backend(backendDescriptor, a_assertContext);
+    if (!backendResult)
+    {
+        const Error *error = backendResult.try_error();
+        return a_useHardware && error != nullptr && error->code().domain() == "Cue.RHI.D3D12" &&
+                       (error->code().value() == k_noHardwareAdapterForProbe ||
+                        error->code().value() == k_noSuitableAdapterForProbe)
+                   ? D3d12ResizeScenePixelResult::HardwareUnavailable
+                   : D3d12ResizeScenePixelResult::Failed;
+    }
+    std::unique_ptr<D3d12Backend> backend = std::move(*backendResult.try_value());
+    Result<std::unique_ptr<PresentationContext>> presentationResult =
+        backend->create_windows_presentation(a_nativeWindow, a_width, a_height, PresentationDescriptor{false});
+    if (!presentationResult)
+    {
+        static_cast<void>(backend->shutdown());
+        return D3d12ResizeScenePixelResult::Failed;
+    }
+    std::unique_ptr<PresentationContext> presentation = std::move(*presentationResult.try_value());
+    D3d12PresentationContext *d3d12Presentation = dynamic_cast<D3d12PresentationContext *>(presentation.get());
+    std::array<D3d12ScenePixelCapture, 6> captures;
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    constexpr std::array<float, 16> rotationY90 = {0.0F, 0.0F, -1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                   1.0F, 0.0F, 0.0F,  0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    /// @brief 指定Depth順のSceneを実Presentationへ描き、Present前画素を個別Readbackへ記録する
+    const auto captureFrame = [&](std::size_t a_index) noexcept
+    {
+        if (d3d12Presentation == nullptr || !d3d12Presentation->create_scene_capture_for_probe(captures[a_index]))
+        {
+            return false;
+        }
+        std::array<PresentationSceneCube, 2> cubes = {PresentationSceneCube{identity},
+                                                      PresentationSceneCube{rotationY90}};
+        cubes[0].localToWorld[14] = 0.75F;
+        cubes[1].localToWorld[14] = 0.95F;
+        const std::size_t depthCase = a_index % 3U;
+        if (depthCase == 2U)
+        {
+            std::swap(cubes[0], cubes[1]);
+        }
+        const std::span<const PresentationSceneCube> instances =
+            depthCase == 0U ? std::span<const PresentationSceneCube>(cubes.data() + 1U, 1U)
+                            : std::span<const PresentationSceneCube>(cubes);
+        const PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, instances};
+        d3d12Presentation->set_scene_capture_for_probe(&captures[a_index]);
+        Result<PresentationFrameStatus> frame = presentation->present_scene_frame(scene);
+        d3d12Presentation->set_scene_capture_for_probe(nullptr);
+        return static_cast<bool>(frame);
+    };
+
+    bool valid = d3d12Presentation != nullptr && captureFrame(0U) && captureFrame(1U) && captureFrame(2U);
+    const D3d12PresentationProbeReport beforeResize =
+        valid ? d3d12Presentation->probe_report() : D3d12PresentationProbeReport{};
+    const std::uint32_t nextWidth = a_width + 32U;
+    const std::uint32_t nextHeight = a_height + 24U;
+    if (valid)
+    {
+        valid = static_cast<bool>(presentation->resize(nextWidth, nextHeight));
+    }
+    const D3d12PresentationProbeReport afterResize =
+        valid ? d3d12Presentation->probe_report() : D3d12PresentationProbeReport{};
+    if (valid)
+    {
+        valid = captureFrame(3U) && captureFrame(4U) && captureFrame(5U);
+    }
+    const D3d12PresentationProbeReport afterDraw =
+        valid ? d3d12Presentation->probe_report() : D3d12PresentationProbeReport{};
+    valid = valid && beforeResize.hasSceneDepthDsv && beforeResize.sceneDepthWidth == a_width &&
+            beforeResize.sceneDepthHeight == a_height && beforeResize.lastSubmittedFence == 3U &&
+            !afterResize.hasSceneNativeObjects && afterResize.sceneDepthIdentity == 0U &&
+            afterResize.lastSubmittedFence == 3U && afterDraw.hasSceneDepthDsv &&
+            afterDraw.sceneDepthWidth == nextWidth && afterDraw.sceneDepthHeight == nextHeight &&
+            afterDraw.lastSubmittedFence == 6U;
+    Result<void> presentationShutdown = presentation->shutdown();
+    presentation.reset();
+    Result<void> backendShutdown = backend->shutdown();
+    backend.reset();
+    if (!presentationShutdown || !backendShutdown)
+    {
+        // GPU完了が未証明のままProbeのReadbackを解放しない
+        std::abort();
+    }
+    for (std::size_t index = 0U; index < captures.size(); ++index)
+    {
+        const bool captureValid = validate_scene_resize_capture(captures[index], index % 3U != 0U);
+        valid = valid && captureValid;
+    }
+    return valid ? D3d12ResizeScenePixelResult::Passed : D3d12ResizeScenePixelResult::Failed;
+}
+
+bool verify_d3d12_scene_resize_creation_failure_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
+                                                          std::uint32_t a_height,
+                                                          AssertContext &a_assertContext) noexcept
+{
+    constexpr std::array faults = {D3d12SceneCreationFault::Depth, D3d12SceneCreationFault::DsvHeap};
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    const PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, {}};
+    for (D3d12SceneCreationFault fault : faults)
+    {
+        D3d12BackendDescriptor backendDescriptor = {
+            D3d12AdapterPolicy::Warp,
+            D3d12ValidationMode::Disabled,
+            false,
+            5'000,
+        };
+        Result<std::unique_ptr<D3d12Backend>> backendResult = create_d3d12_backend(backendDescriptor, a_assertContext);
+        if (!backendResult)
+        {
+            return false;
+        }
+        std::unique_ptr<D3d12Backend> backend = std::move(*backendResult.try_value());
+        Result<std::unique_ptr<PresentationContext>> presentationResult =
+            backend->create_windows_presentation(a_nativeWindow, a_width, a_height, PresentationDescriptor{true});
+        if (!presentationResult)
+        {
+            static_cast<void>(backend->shutdown());
+            return false;
+        }
+        std::unique_ptr<PresentationContext> presentation = std::move(*presentationResult.try_value());
+        D3d12PresentationContext *d3d12Presentation = dynamic_cast<D3d12PresentationContext *>(presentation.get());
+        if (d3d12Presentation == nullptr)
+        {
+            static_cast<void>(presentation->shutdown());
+            presentation.reset();
+            static_cast<void>(backend->shutdown());
+            return false;
+        }
+        Result<PresentationFrameStatus> firstFrame = presentation->present_scene_frame(scene);
+        if (!firstFrame)
+        {
+            static_cast<void>(presentation->shutdown());
+            presentation.reset();
+            static_cast<void>(backend->shutdown());
+            return false;
+        }
+        Result<void> resizeResult = presentation->resize(a_width + 19U, a_height + 23U);
+        const D3d12PresentationProbeReport resizedReport = probe_d3d12_presentation(*presentation);
+        if (!resizeResult)
+        {
+            static_cast<void>(presentation->shutdown());
+            presentation.reset();
+            static_cast<void>(backend->shutdown());
+            return false;
+        }
+        d3d12Presentation->set_scene_creation_fault_for_probe(fault);
+        Result<PresentationFrameStatus> failedFrame = presentation->present_scene_frame(scene);
+        d3d12Presentation->set_scene_creation_fault_for_probe(D3d12SceneCreationFault::None);
+        const D3d12PresentationProbeReport failedReport = probe_d3d12_presentation(*presentation);
+        Result<PresentationFrameStatus> recoveredFrame = presentation->present_scene_frame(scene);
+        const D3d12PresentationProbeReport recoveredReport = probe_d3d12_presentation(*presentation);
+        const Error *failureError = failedFrame.try_error();
+        const NativeError *nativeError = failureError != nullptr ? failureError->try_native_error() : nullptr;
+        const std::int64_t expectedCode = fault == D3d12SceneCreationFault::Depth ? 309 : 310;
+        const bool valid =
+            !resizedReport.hasSceneNativeObjects && resizedReport.sceneDepthIdentity == 0U && !failedFrame &&
+            failureError != nullptr && failureError->code().domain() == "Cue.RHI.D3D12" &&
+            failureError->code().value() == expectedCode && nativeError != nullptr &&
+            nativeError->domain() == "D3D12" && presentation->state() == PresentationContextState::Ready &&
+            backend->state() == GraphicsBackendState::Ready && !failedReport.hasSceneNativeObjects &&
+            failedReport.sceneDepthIdentity == 0U && failedReport.lastSubmittedFence == 1U && recoveredFrame &&
+            recoveredReport.hasSceneDepthDsv && recoveredReport.sceneDepthWidth == a_width + 19U &&
+            recoveredReport.sceneDepthHeight == a_height + 23U && recoveredReport.lastSubmittedFence == 2U;
+        Result<void> presentationShutdown = presentation->shutdown();
+        presentation.reset();
+        Result<void> backendShutdown = backend->shutdown();
+        if (!valid || !presentationShutdown || !backendShutdown)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
 bool verify_d3d12_terminal_resize_rejection_for_probe(const void *a_nativeWindow, std::uint32_t a_width,
                                                       std::uint32_t a_height, AssertContext &a_assertContext) noexcept
 {
@@ -2747,7 +3046,11 @@ bool verify_d3d12_resize_unavailable_retention_for_probe(const void *a_nativeWin
         return false;
     }
 
-    Result<std::uint64_t> submitResult = d3d12Presentation->submit_transition_frame_for_probe();
+    constexpr std::array<float, 16> identity = {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    const PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, {}};
+    Result<PresentationFrameStatus> submitResult = presentation->present_scene_frame(scene);
+    const D3d12PresentationProbeReport beforeResize = d3d12Presentation->probe_report();
     g_queueLifecycleProbeState.failWaitWithoutCompletion = true;
     Result<void> resizeResult = presentation->resize(a_width + 1, a_height + 1);
     D3d12PresentationProbeReport report = d3d12Presentation->probe_report();
@@ -2756,12 +3059,16 @@ bool verify_d3d12_resize_unavailable_retention_for_probe(const void *a_nativeWin
     Result<void> backendShutdownResult = backend->shutdown();
     const D3d12BackendOwnerProbeReport *backendOwners = backendOwnerResult.try_value();
     const bool retentionValid =
-        submitResult && !resizeResult && presentation->state() == PresentationContextState::Unavailable &&
+        submitResult && beforeResize.hasSceneDepthDsv && beforeResize.sceneDepthIdentity != 0U &&
+        beforeResize.sceneDepthWidth == a_width && beforeResize.sceneDepthHeight == a_height && !resizeResult &&
+        presentation->state() == PresentationContextState::Unavailable &&
         backend->state() == GraphicsBackendState::Unavailable && !presentationShutdownResult &&
         !backendShutdownResult && report.hasCommandList && report.allocatorCount == k_d3d12FrameContextCount &&
         report.backBufferCount == k_d3d12SwapChainBufferCount && report.rtvCount == k_d3d12SwapChainBufferCount &&
         report.formatsMatch && !report.isAcceptingFrames && report.hasSwapChain && report.hasRtvHeap &&
-        report.isRegistered && backendOwners != nullptr && backendOwners->hasQueue && backendOwners->hasFence &&
+        report.hasSceneDepthDsv && report.sceneDepthIdentity == beforeResize.sceneDepthIdentity &&
+        report.sceneDepthWidth == a_width && report.sceneDepthHeight == a_height && report.isRegistered &&
+        backendOwners != nullptr && backendOwners->hasQueue && backendOwners->hasFence &&
         backendOwners->hasFenceEvent && backendOwners->hasDevice && backendOwners->hasAdapter &&
         backendOwners->hasFactory;
 

@@ -703,6 +703,41 @@ Result<void> D3d12FrameCommandState::record_scene(std::uint32_t a_frameIndex, D3
     return Result<void>::success();
 }
 
+#if CUE_D3D12_TESTING
+bool D3d12FrameCommandState::copy_scene_back_buffer_for_probe(
+    std::uint32_t a_frameIndex, ID3D12Resource *a_readback,
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &a_footprint) noexcept
+{
+    if (a_frameIndex >= k_d3d12FrameContextCount || a_frameIndex != m_activeFrameIndex ||
+        m_commandListState != D3d12CommandListState::Recording || a_readback == nullptr ||
+        m_frames[a_frameIndex].backBuffer == nullptr ||
+        m_frames[a_frameIndex].backBufferState != D3d12BackBufferState::RenderTarget)
+    {
+        return false;
+    }
+    ID3D12Resource *backBuffer = m_frames[a_frameIndex].backBuffer.Get();
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = backBuffer;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    m_commandList->ResourceBarrier(1U, &barrier);
+    D3D12_TEXTURE_COPY_LOCATION source = {};
+    source.pResource = backBuffer;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION destination = {};
+    destination.pResource = a_readback;
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = a_footprint;
+    m_commandList->CopyTextureRegion(&destination, 0U, 0U, 0U, &source, nullptr);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    m_commandList->ResourceBarrier(1U, &barrier);
+    return true;
+}
+#endif
+
 // 新規 Frame 受付を止めて最後の Submit 完了を待ち、Back Buffer 参照を外せる GPU Idle 状態を証明する
 Result<void> D3d12FrameCommandState::prepare_for_resize(std::uint32_t a_frameIndex) noexcept
 {

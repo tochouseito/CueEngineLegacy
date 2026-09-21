@@ -24,5 +24,6 @@ checks that the center remains the clear color. A production Presentation
 test checks Depth/DSV ownership and exact dimensions before Resize, after
 retirement, and after the next Scene Frame.
 
-Detailed Resize/Minimize/Restore fault injection remains #363. GPU failure
-retention and DRED owner diagnostics remain #364.
+Resize/Minimize/Restore behavior and Scene creation failure probes are recorded
+in `M24-d3d12-scene-resize.md`. Broader GPU fault retention and DRED owner
+diagnostics remain #364.

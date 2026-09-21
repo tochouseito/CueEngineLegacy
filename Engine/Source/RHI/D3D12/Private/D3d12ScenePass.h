@@ -16,6 +16,15 @@ namespace cue
 {
 class AssertContext;
 
+#if CUE_D3D12_TESTING
+enum class D3d12SceneCreationFault
+{
+    None,
+    Depth,
+    DsvHeap,
+};
+#endif
+
 /// @brief M24固定Cube PassのPipelineとFrame Slot別GPU入力をPresentation Owner内で保持する
 class D3d12ScenePass final
 {
@@ -45,6 +54,12 @@ class D3d12ScenePass final
     [[nodiscard]] std::array<std::uint32_t, 2> depth_extent() const noexcept;
     /// @brief Probe用にDepth ResourceとDSV Heapが共に保持されているかを返す
     [[nodiscard]] bool has_depth_dsv() const noexcept;
+    /// @brief Probe用にDepthの非所有Identityを返し、同一Resourceの保持を判定できるようにする
+    [[nodiscard]] std::uintptr_t depth_identity_for_probe() const noexcept;
+#if CUE_D3D12_TESTING
+    /// @brief TestSupport構成でこのPassの生成故障を指定し、Probeが再試行前に解除する
+    void set_creation_fault_for_probe(D3d12SceneCreationFault a_fault) noexcept;
+#endif
     /// @brief 検証済み入力を再利用Fence待機済みSlotへ書き、一つのCommand ListへCubeを記録する
     void record(ID3D12GraphicsCommandList *a_commandList, D3D12_CPU_DESCRIPTOR_HANDLE a_rtv, std::uint32_t a_frameIndex,
                 std::uint32_t a_width, std::uint32_t a_height,
@@ -63,5 +78,8 @@ class D3d12ScenePass final
     Microsoft::WRL::ComPtr<ID3D12Resource> m_indices;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, k_d3d12FrameContextCount> m_constants;
     std::array<std::byte *, k_d3d12FrameContextCount> m_mappedConstants = {};
+#if CUE_D3D12_TESTING
+    D3d12SceneCreationFault m_creationFault = D3d12SceneCreationFault::None;
+#endif
 };
 } // namespace cue

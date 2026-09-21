@@ -2,6 +2,9 @@
 
 #include <Cue/RHI/D3D12/TestSupport/D3d12ScenePassProbe.h>
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 /// @brief 固定Cube Passの色、Depth、裏面Cull画素をGPU種別ごとにProcess分離下で検証する
@@ -14,7 +17,8 @@ int main(int a_argc, char **a_argv)
     const std::string_view pixelCaseName = a_argv[1];
     const std::string_view adapterName = a_argv[2];
     cue::D3d12ScenePixelCase pixelCase = cue::D3d12ScenePixelCase::Basic;
-    if (pixelCaseName == "Depth")
+    const bool isResizeDepth = pixelCaseName == "DepthResize";
+    if (pixelCaseName == "Depth" || isResizeDepth)
     {
         pixelCase = cue::D3d12ScenePixelCase::Depth;
     }
@@ -35,21 +39,26 @@ int main(int a_argc, char **a_argv)
     cue::test::RhiProcessTestFixture fixture;
     if (pixelCase == cue::D3d12ScenePixelCase::Depth)
     {
-        const cue::D3d12SceneProbeResult farReference = cue::verify_d3d12_scene_pixel_for_probe(
-            fixture.assert_context(), cue::D3d12ScenePixelCase::DepthFarReference, adapter);
-        if (farReference != cue::D3d12SceneProbeResult::Passed)
+        constexpr std::array<std::uint32_t, 2> sizes = {64U, 96U};
+        constexpr std::array cases = {cue::D3d12ScenePixelCase::DepthFarReference,
+                                      cue::D3d12ScenePixelCase::DepthReverseOrder, cue::D3d12ScenePixelCase::Depth};
+        const std::size_t sizeCount = isResizeDepth ? sizes.size() : 1U;
+        for (std::size_t sizeIndex = 0U; sizeIndex < sizeCount; ++sizeIndex)
         {
-            return farReference == cue::D3d12SceneProbeResult::HardwareUnavailable ? 77 : 1;
+            for (cue::D3d12ScenePixelCase depthCase : cases)
+            {
+                const cue::D3d12SceneProbeResult result = cue::verify_d3d12_scene_pixel_for_probe(
+                    fixture.assert_context(), depthCase, adapter, sizes[sizeIndex]);
+                if (result != cue::D3d12SceneProbeResult::Passed)
+                {
+                    return result == cue::D3d12SceneProbeResult::HardwareUnavailable ? 77 : 1;
+                }
+            }
         }
-        const cue::D3d12SceneProbeResult reverseOrder = cue::verify_d3d12_scene_pixel_for_probe(
-            fixture.assert_context(), cue::D3d12ScenePixelCase::DepthReverseOrder, adapter);
-        if (reverseOrder != cue::D3d12SceneProbeResult::Passed)
-        {
-            return reverseOrder == cue::D3d12SceneProbeResult::HardwareUnavailable ? 77 : 1;
-        }
+        return 0;
     }
     const cue::D3d12SceneProbeResult result =
-        cue::verify_d3d12_scene_pixel_for_probe(fixture.assert_context(), pixelCase, adapter);
+        cue::verify_d3d12_scene_pixel_for_probe(fixture.assert_context(), pixelCase, adapter, 64U);
     return result == cue::D3d12SceneProbeResult::Passed                ? 0
            : result == cue::D3d12SceneProbeResult::HardwareUnavailable ? 77
                                                                        : 1;

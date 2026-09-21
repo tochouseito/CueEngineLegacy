@@ -338,18 +338,62 @@ class ForeignWindow final : public cue::Window
     const cue::PresentationSceneFrameDescriptor scene = {{0.0F, 0.0F, 0.0F, 1.0F}, identity, cubes};
     cue::Result<cue::PresentationFrameStatus> firstFrame = presentation->present_scene_frame(scene);
     const cue::D3d12PresentationProbeReport firstReport = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<void> minimizeResult = presentation->resize(0U, initialHeight);
+    const bool wasMinimizePending = presentation->is_resize_pending();
+    const cue::D3d12PresentationProbeReport minimizedReport = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<cue::PresentationFrameStatus> minimizedFrame = presentation->present_scene_frame(scene);
+    cue::Result<void> sameSizeRestoreResult = presentation->resize(initialWidth, initialHeight);
+    const bool wasSameSizeRestorePending = presentation->is_resize_pending();
+    const cue::D3d12PresentationProbeReport restoredReport = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<cue::PresentationFrameStatus> restoredFrame = presentation->present_scene_frame(scene);
     const std::uint32_t resizedWidth = initialWidth + 97U;
     const std::uint32_t resizedHeight = initialHeight + 43U;
     cue::Result<void> resizeResult = presentation->resize(resizedWidth, resizedHeight);
     const cue::D3d12PresentationProbeReport resizedReport = cue::probe_d3d12_presentation(*presentation);
     cue::Result<cue::PresentationFrameStatus> secondFrame = presentation->present_scene_frame(scene);
     const cue::D3d12PresentationProbeReport secondReport = cue::probe_d3d12_presentation(*presentation);
-    const bool valid = firstFrame && firstReport.hasSceneDepthDsv && firstReport.sceneDepthWidth == initialWidth &&
-                       firstReport.sceneDepthHeight == initialHeight && firstReport.lastSubmittedFence == 1U &&
-                       resizeResult && !resizedReport.hasSceneDepthDsv && resizedReport.sceneDepthWidth == 0U &&
-                       resizedReport.sceneDepthHeight == 0U && secondFrame && secondReport.hasSceneDepthDsv &&
-                       secondReport.sceneDepthWidth == resizedWidth && secondReport.sceneDepthHeight == resizedHeight &&
-                       secondReport.lastSubmittedFence == 2U;
+    const std::uint32_t nextWidth = resizedWidth + 29U;
+    const std::uint32_t nextHeight = resizedHeight + 31U;
+    cue::Result<void> secondMinimizeResult = presentation->resize(0U, resizedHeight);
+    const bool wasSecondMinimizePending = presentation->is_resize_pending();
+    const cue::D3d12PresentationProbeReport secondMinimizedReport = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<cue::PresentationFrameStatus> secondMinimizedFrame = presentation->present_scene_frame(scene);
+    cue::Result<void> changedSizeRestoreResult = presentation->resize(nextWidth, nextHeight);
+    const bool wasChangedSizeRestorePending = presentation->is_resize_pending();
+    const cue::D3d12PresentationProbeReport changedSizeRestoredReport = cue::probe_d3d12_presentation(*presentation);
+    cue::Result<cue::PresentationFrameStatus> changedSizeRestoredFrame = presentation->present_scene_frame(scene);
+    const cue::D3d12PresentationProbeReport finalReport = cue::probe_d3d12_presentation(*presentation);
+    const bool initialValid = firstFrame && firstReport.hasSceneDepthDsv &&
+                              firstReport.sceneDepthWidth == initialWidth &&
+                              firstReport.sceneDepthHeight == initialHeight && firstReport.sceneDepthIdentity != 0U &&
+                              firstReport.lastSubmittedFence == 1U;
+    const bool sameSizeCycleValid =
+        minimizeResult && wasMinimizePending && minimizedReport.hasSceneDepthDsv &&
+        minimizedReport.sceneDepthIdentity == firstReport.sceneDepthIdentity &&
+        minimizedReport.sceneDepthWidth == initialWidth && minimizedReport.sceneDepthHeight == initialHeight &&
+        !minimizedReport.isAcceptingFrames && !minimizedFrame && has_error_code(minimizedFrame.try_error(), 88) &&
+        sameSizeRestoreResult && !wasSameSizeRestorePending && restoredReport.hasSceneDepthDsv &&
+        restoredReport.sceneDepthIdentity == firstReport.sceneDepthIdentity &&
+        restoredReport.sceneDepthWidth == initialWidth && restoredReport.sceneDepthHeight == initialHeight &&
+        restoredReport.isAcceptingFrames && restoredFrame && restoredReport.lastSubmittedFence == 1U;
+    const bool sizeChangeValid =
+        resizeResult && !resizedReport.hasSceneDepthDsv && resizedReport.sceneDepthIdentity == 0U &&
+        resizedReport.sceneDepthWidth == 0U && resizedReport.sceneDepthHeight == 0U && secondFrame &&
+        secondReport.hasSceneDepthDsv && secondReport.sceneDepthIdentity != 0U &&
+        secondReport.sceneDepthWidth == resizedWidth && secondReport.sceneDepthHeight == resizedHeight &&
+        secondReport.lastSubmittedFence == 3U;
+    const bool changedSizeCycleValid =
+        secondMinimizeResult && wasSecondMinimizePending && secondMinimizedReport.hasSceneDepthDsv &&
+        secondMinimizedReport.sceneDepthIdentity == secondReport.sceneDepthIdentity &&
+        secondMinimizedReport.sceneDepthWidth == resizedWidth &&
+        secondMinimizedReport.sceneDepthHeight == resizedHeight && !secondMinimizedReport.isAcceptingFrames &&
+        !secondMinimizedFrame && has_error_code(secondMinimizedFrame.try_error(), 88) && changedSizeRestoreResult &&
+        !wasChangedSizeRestorePending && !changedSizeRestoredReport.hasSceneDepthDsv &&
+        changedSizeRestoredReport.sceneDepthIdentity == 0U && changedSizeRestoredReport.sceneDepthWidth == 0U &&
+        changedSizeRestoredReport.sceneDepthHeight == 0U && changedSizeRestoredFrame && finalReport.hasSceneDepthDsv &&
+        finalReport.sceneDepthIdentity != 0U && finalReport.sceneDepthWidth == nextWidth &&
+        finalReport.sceneDepthHeight == nextHeight && finalReport.lastSubmittedFence == 4U;
+    const bool valid = initialValid && sameSizeCycleValid && sizeChangeValid && changedSizeCycleValid;
     cue::Result<void> presentationShutdown = presentation->shutdown();
     presentation.reset();
     cue::Result<void> backendShutdown = backend->shutdown();
@@ -827,6 +871,20 @@ int main(int a_argumentCount, char **a_arguments)
     {
         valid = run_scene_resize(*window, *processSinkView, assertContext);
         failureCode = valid ? 0 : 42;
+    }
+    else if (mode == "SceneResizeCreationFailure")
+    {
+        valid = cue::verify_d3d12_scene_resize_creation_failure_for_probe(nativeWindow, 640U, 360U, assertContext);
+        failureCode = valid ? 0 : 43;
+    }
+    else if (mode == "SceneResizePixelWarp" || mode == "SceneResizePixelHardware")
+    {
+        const cue::D3d12ResizeScenePixelResult result = cue::verify_d3d12_scene_resize_pixel_for_probe(
+            nativeWindow, 640U, 360U, mode == "SceneResizePixelHardware", assertContext);
+        failureCode = result == cue::D3d12ResizeScenePixelResult::Passed                ? 0
+                      : result == cue::D3d12ResizeScenePixelResult::HardwareUnavailable ? 77
+                                                                                        : 44;
+        valid = failureCode == 0 || failureCode == 77;
     }
     else if (mode == "PresentFrames300")
     {
