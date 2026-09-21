@@ -996,8 +996,21 @@ Result<SourceSdkPublishReport> publish_windows_source_sdk(const WindowsSourceSdk
         StagingArea staging = std::move(*stagingResult.try_value());
         const std::filesystem::path stagingAbsolute = native_path(a_request.destinationParent) /
                                                       native_path(staging.path().text());
+        const std::vector<std::byte> operationSeed = bytes_from_string(staging.path().text());
+        auto operationDigest = hash_bytes(operationSeed, a_assertContext);
+        if (!operationDigest)
+        {
+            auto rollback = filesystem.try_value()->get()->rollback_staging_area(std::move(staging));
+            if (!rollback)
+            {
+                operationDigest.try_error()->append_secondary_diagnostics(
+                    a_assertContext, *rollback.try_error(), "Source SDK staging rollback failed", "Rollback");
+            }
+            return Result<SourceSdkPublishReport>::failure(std::move(*operationDigest.try_error()));
+        }
+        const std::string operationName = "op-" + operationDigest.try_value()->substr(0U, 16U);
         const std::filesystem::path operationRoot = native_path(a_request.operationsRoot) /
-                                                    native_path(staging.path().text());
+                                                    native_path(operationName);
 
         const auto failStaging = [&](Error a_error) -> Result<SourceSdkPublishReport>
         {
