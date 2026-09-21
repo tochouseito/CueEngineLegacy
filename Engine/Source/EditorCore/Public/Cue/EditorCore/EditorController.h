@@ -119,9 +119,11 @@ class EditorController final
     /// @brief Semantic Intentを検証し、Scene CommandまたはEditor Workflowへ一元変換する
     /// @param a_identitySource 新規Object／ComponentへStable Identity候補を供給する注入境界
     /// @param a_componentTemplates Add Componentで使用可能な検証済み初期値Template
-    [[nodiscard]] Result<void> execute_intent(EditorDocumentId a_documentId, EditorIntent a_intent,
-                                              scene::SceneIdentitySource &a_identitySource,
-                                              std::span<const EditorComponentTemplate> a_componentTemplates) noexcept;
+    /// @param a_primitiveTemplates Create Primitiveで使用可能なCatalog由来Template
+    [[nodiscard]] Result<void> execute_intent(
+        EditorDocumentId a_documentId, EditorIntent a_intent, scene::SceneIdentitySource &a_identitySource,
+        std::span<const EditorComponentTemplate> a_componentTemplates,
+        std::span<const EditorPrimitiveTemplate> a_primitiveTemplates = {}) noexcept;
     /// @brief Stable Identity だけを保持する Scene 編集 Command を検証し一つの Revision として適用する
     /// @details Open 中の対象 Document と Scene Identity の一致を要求し、失敗時は Authoring Scene、Selection、
     /// Revision を呼び出し前の状態に維持する。同値更新は現在 Revision を返し新しい State を発行しない
@@ -203,8 +205,7 @@ class EditorController final
     [[nodiscard]] Result<void> require_persistence_services() const noexcept;
     /// @brief 指定Destinationへ競合検査付きSaveを実行する共通経路
     [[nodiscard]] Result<scene::SceneSaveOutcome> save_document_to(EditorDocumentId a_documentId,
-                                                                   RelativePath a_locator,
-                                                                   bool a_switchDestination,
+                                                                   RelativePath a_locator, bool a_switchDestination,
                                                                    bool a_requireMissingDestination) noexcept;
     /// @brief 現在 Thread が Controller 作成 Thread であることを全構成で検証する
     void assert_owner_thread() const noexcept;

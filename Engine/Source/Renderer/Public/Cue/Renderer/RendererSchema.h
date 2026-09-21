@@ -4,6 +4,7 @@
 #include <Cue/Scene/ComponentData.h>
 #include <Cue/Schema/Types.h>
 
+#include <string_view>
 #include <vector>
 
 namespace cue
@@ -55,8 +56,8 @@ struct MeshFieldIds final
 [[nodiscard]] Result<std::vector<scene::ComponentValueSchema>> make_renderer_value_schemas(
     const schema::SchemaRegistry &a_schemaRegistry, const AssertContext &a_assertContext) noexcept;
 /// @brief Package用Camera／Built-in Cubeの完全なv1 Field集合と投影値を検証する
-[[nodiscard]] Result<void> validate_runtime_scene_component(
-    const scene::SceneComponent &a_component, const AssertContext &a_assertContext) noexcept;
+[[nodiscard]] Result<void> validate_runtime_scene_component(const scene::SceneComponent &a_component,
+                                                            const AssertContext &a_assertContext) noexcept;
 /// @brief 既定Perspective値を持つCamera Authoring Componentを生成する
 [[nodiscard]] Result<scene::SceneComponent> make_camera_component(
     scene::ComponentInstanceId a_instanceId, bool a_isMain, const schema::SchemaRegistry &a_schemaRegistry,
@@ -65,4 +66,10 @@ struct MeshFieldIds final
 [[nodiscard]] Result<scene::SceneComponent> make_cube_mesh_component(
     scene::ComponentInstanceId a_instanceId, const schema::SchemaRegistry &a_schemaRegistry,
     const scene::ComponentValueSchemaRegistry &a_valueSchemaRegistry, const AssertContext &a_assertContext) noexcept;
+/// @brief Catalog検証済みBuilt-in Mesh Assetを明示参照するAuthoring Componentを生成する
+[[nodiscard]] Result<scene::SceneComponent> make_builtin_mesh_component(
+    scene::ComponentInstanceId a_instanceId, std::string_view a_assetId, const schema::SchemaRegistry &a_schemaRegistry,
+    const scene::ComponentValueSchemaRegistry &a_valueSchemaRegistry, const AssertContext &a_assertContext) noexcept;
+/// @brief 現在のGameView／DebugView Render PathがBuilt-in Mesh IDを描画できる場合にtrueを返す
+[[nodiscard]] bool is_render_mesh_supported(std::string_view a_assetId) noexcept;
 } // namespace cue::renderer

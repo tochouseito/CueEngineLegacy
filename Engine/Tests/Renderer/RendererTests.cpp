@@ -1,3 +1,4 @@
+#include <Cue/EngineAssets/BuiltInMesh.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
@@ -141,6 +142,28 @@ template <typename T> [[nodiscard]] T take_value(cue::Result<T> &&a_result) noex
     return document;
 }
 
+/// @brief Catalog IDのAuthoring Component生成と現在の描画対応範囲を検証する
+void test_builtin_mesh_authoring(const cue::schema::SchemaRegistry &a_schemaRegistry,
+                                 const cue::scene::ComponentValueSchemaRegistry &a_valueSchemaRegistry,
+                                 const cue::AssertContext &a_assertContext) noexcept
+{
+    cue::scene::SceneComponent plane = take_value(cue::renderer::make_builtin_mesh_component(
+        make_component_id("71000000-0000-4000-8000-000000000009", a_assertContext),
+        cue::engine_assets::k_planeMeshAssetId, a_schemaRegistry, a_valueSchemaRegistry, a_assertContext));
+    const cue::scene::KnownComponentData *known = plane.try_known();
+    require(known != nullptr && known->known_fields().size() == 1U);
+    const cue::scene::AssetReferenceValue *asset = known->known_fields()[0].value().try_asset_reference();
+    require(asset != nullptr && asset->token() == cue::engine_assets::k_planeMeshAssetId);
+
+    cue::Result<cue::scene::SceneComponent> unknown = cue::renderer::make_builtin_mesh_component(
+        make_component_id("71000000-0000-4000-8000-000000000010", a_assertContext), "cue://engine/mesh/unknown",
+        a_schemaRegistry, a_valueSchemaRegistry, a_assertContext);
+    require(!unknown.has_value());
+    require(cue::renderer::is_render_mesh_supported(cue::engine_assets::k_cubeMeshAssetId));
+    require(!cue::renderer::is_render_mesh_supported(cue::engine_assets::k_planeMeshAssetId));
+    require(!cue::renderer::is_render_mesh_supported(cue::engine_assets::k_sphereMeshAssetId));
+}
+
 /// @brief Authoring抽出のMissing、Ready、Multiple状態とCube抽出を検証する
 [[nodiscard]] cue::scene::SceneSnapshot test_authoring_extraction(
     cue::scene::SceneDocument &a_document, const cue::renderer::RendererSchemaTypeIds &a_typeIds,
@@ -258,6 +281,7 @@ int main()
     const cue::renderer::RendererSchemaTypeIds typeIds =
         take_value(cue::renderer::make_renderer_schema_type_ids(assertContext));
     cue::scene::SceneDocument document = make_render_scene(*schemaRegistry, valueSchemaRegistry, assertContext);
+    test_builtin_mesh_authoring(*schemaRegistry, valueSchemaRegistry, assertContext);
     cue::scene::SceneSnapshot runtimeSnapshot =
         test_authoring_extraction(document, typeIds, *schemaRegistry, valueSchemaRegistry, assertContext);
     test_debug_camera_motion(assertContext);

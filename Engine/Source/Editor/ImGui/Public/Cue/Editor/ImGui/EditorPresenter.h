@@ -34,7 +34,7 @@ enum class EditorWorkflowRequest : std::uint8_t
 /// @brief EditorControllerのRead-only ViewをHierarchy・Inspector操作へ変換するPresentation Adapter
 ///
 /// Controller、Identity Source、Schema Registry、Assert ContextはPresenterより長く生存させ、
-/// 生成Threadだけでdrawとsubmitを呼び出す。Component Template群はPresenterが所有する
+/// 生成Threadだけでdrawとsubmitを呼び出す。Component／Primitive Template群はPresenterが所有する
 class EditorPresenter final
 {
   public:
@@ -51,10 +51,12 @@ class EditorPresenter final
 
     /// @brief 一つのOpen Documentへ結び付くHierarchy・Inspector Adapterを生成する
     /// @param a_componentTemplates Presenterが所有権を受け取りAdd Component候補として保持する
+    /// @param a_primitiveTemplates Presenterが所有権を受け取りCreate Primitive候補として保持する
     [[nodiscard]] static std::unique_ptr<EditorPresenter> create(
         editor_core::EditorController &a_controller, editor_core::EditorDocumentId a_documentId,
         scene::SceneIdentitySource &a_identitySource, const schema::SchemaRegistry &a_schemaRegistry,
         std::vector<editor_core::EditorComponentTemplate> a_componentTemplates,
+        std::vector<editor_core::EditorPrimitiveTemplate> a_primitiveTemplates,
         const AssertContext &a_assertContext) noexcept;
 
     /// @brief 現在DocumentのRead-only ViewからHierarchy・Inspectorを描画し、Frame末尾で最大一Intentを適用する
@@ -82,6 +84,7 @@ class EditorPresenter final
     EditorPresenter(editor_core::EditorController &a_controller, editor_core::EditorDocumentId a_documentId,
                     scene::SceneIdentitySource &a_identitySource, const schema::SchemaRegistry &a_schemaRegistry,
                     std::vector<editor_core::EditorComponentTemplate> a_componentTemplates,
+                    std::vector<editor_core::EditorPrimitiveTemplate> a_primitiveTemplates,
                     const AssertContext &a_assertContext) noexcept;
 
     /// @brief Undo／Redo MenuとShortcutを描画して意味Intentを予約する
@@ -105,6 +108,7 @@ class EditorPresenter final
     const schema::SchemaRegistry *m_schemaRegistry;
     const AssertContext *m_assertContext;
     std::vector<editor_core::EditorComponentTemplate> m_componentTemplates;
+    std::vector<editor_core::EditorPrimitiveTemplate> m_primitiveTemplates;
     editor_core::EditorDocumentId m_documentId;
     std::optional<editor_core::EditorIntent> m_deferredIntent;
     std::optional<EditorWorkflowRequest> m_workflowRequest;

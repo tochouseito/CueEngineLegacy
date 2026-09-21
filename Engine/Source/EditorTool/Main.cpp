@@ -18,6 +18,7 @@
 #include <Cue/EditorCore/EditorPlaySessionController.h>
 #include <Cue/EditorCore/Error.h>
 #include <Cue/EditorCore/SceneCommand.h>
+#include <Cue/EngineAssets/BuiltInAssetCatalog.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Error.h>
 #include <Cue/Foundation/Fatal.h>
@@ -204,20 +205,18 @@ class WindowsBuildOperationIdSource final : public cue::editor::BuildOperationId
 }
 
 /// @brief Compiler Installation Root末尾からMSBuildへ固定するminor Toolset Versionを返す
-[[nodiscard]] std::optional<std::string> msvc_toolset_version(
-    std::string_view a_installationRoot, const cue::AssertContext &a_assertContext) noexcept
+[[nodiscard]] std::optional<std::string> msvc_toolset_version(std::string_view a_installationRoot,
+                                                              const cue::AssertContext &a_assertContext) noexcept
 {
     try
     {
-        while (!a_installationRoot.empty() &&
-               (a_installationRoot.back() == '/' || a_installationRoot.back() == '\\'))
+        while (!a_installationRoot.empty() && (a_installationRoot.back() == '/' || a_installationRoot.back() == '\\'))
         {
             a_installationRoot.remove_suffix(1U);
         }
         const std::size_t separator = a_installationRoot.find_last_of("/\\");
-        const std::string_view version = separator == std::string_view::npos
-                                             ? a_installationRoot
-                                             : a_installationRoot.substr(separator + 1U);
+        const std::string_view version =
+            separator == std::string_view::npos ? a_installationRoot : a_installationRoot.substr(separator + 1U);
         return version.empty() ? std::nullopt : std::optional<std::string>(version);
     }
     catch (...)
@@ -1042,8 +1041,8 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             const std::string_view projectLocator = m_session->project_locator();
             const std::filesystem::path projectRoot(
                 std::u8string_view(reinterpret_cast<const char8_t *>(projectLocator.data()), projectLocator.size()));
-            const std::filesystem::path currentPath = projectRoot / "Generated" / "Artifacts" / "GameModule" /
-                                                      configuration / "modular" / "Current.json";
+            const std::filesystem::path currentPath =
+                projectRoot / "Generated" / "Artifacts" / "GameModule" / configuration / "modular" / "Current.json";
             std::ifstream currentStream(currentPath, std::ios::binary);
             const std::string current{std::istreambuf_iterator<char>(currentStream), std::istreambuf_iterator<char>()};
             if (!currentStream.is_open() || currentStream.bad() ||
@@ -1170,8 +1169,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
     }
 
     /// @brief 実Editor CompositionからBuild、Package、Standalone起動をHeadless検証する
-    [[nodiscard]] cue::Result<void> run_package_workflow_process_test(
-        cue::BuildConfiguration a_configuration) noexcept
+    [[nodiscard]] cue::Result<void> run_package_workflow_process_test(cue::BuildConfiguration a_configuration) noexcept
     {
         try
         {
@@ -1233,8 +1231,8 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             {
                 return cue::Result<void>::failure(std::move(*completed.try_error()));
             }
-            if (ran.state != cue::package::PackageWorkflowState::RunSucceeded || ran.activeStage !=
-                                                                                       cue::package::PackageWorkflowStage::None)
+            if (ran.state != cue::package::PackageWorkflowState::RunSucceeded ||
+                ran.activeStage != cue::package::PackageWorkflowStage::None)
             {
                 return fail(ran.message.empty() ? "Packaged Runtime did not exit successfully" : ran.message);
             }
@@ -1356,13 +1354,12 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             const cue::package::PackageWorkflowSnapshot &stoppedSnapshot = m_packagePresenter->current_snapshot();
             if (!completed || stoppedSnapshot.state != cue::package::PackageWorkflowState::PackageReady ||
                 stoppedSnapshot.activeStage != cue::package::PackageWorkflowStage::None ||
-                stoppedSnapshot.recoveryStagingLocator.has_value() ||
-                stopElapsed >= std::chrono::seconds(5) ||
+                stoppedSnapshot.recoveryStagingLocator.has_value() || stopElapsed >= std::chrono::seconds(5) ||
                 !process_output_contains(stoppedSnapshot.runOutput, "D3D12 Render Loop shutdown completed"))
             {
                 return completed
                            ? fail(stoppedSnapshot.message.empty() ? "Packaged Shipping Product did not stop cleanly"
-                                                                 : stoppedSnapshot.message)
+                                                                  : stoppedSnapshot.message)
                            : cue::Result<void>::failure(std::move(*completed.try_error()));
             }
             return cue::Result<void>::success();
@@ -1745,10 +1742,9 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             cue::create_windows_child_process_runner(*m_assertContext);
         if (!processRunner || !packageBuildProcessRunner)
         {
-            cue::report_fatal(
-                a_logger, m_assertContext->fatal_handler(), "Build Process Runner initialization failed",
-                processRunner ? std::move(*packageBuildProcessRunner.try_error())
-                              : std::move(*processRunner.try_error()));
+            cue::report_fatal(a_logger, m_assertContext->fatal_handler(), "Build Process Runner initialization failed",
+                              processRunner ? std::move(*packageBuildProcessRunner.try_error())
+                                            : std::move(*processRunner.try_error()));
         }
         cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>> artifactPublisher =
             cue::create_windows_build_artifact_publisher(std::string(m_session->project_locator()),
@@ -1768,24 +1764,22 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                                    ? std::move(*artifactPublisher.try_error())
                                    : (!packageArtifactPublisher ? std::move(*packageArtifactPublisher.try_error())
                                                                 : std::move(*packageArtifactReader.try_error()));
-            cue::report_fatal(a_logger, m_assertContext->fatal_handler(),
-                              "Build Artifact access initialization failed", std::move(error));
+            cue::report_fatal(a_logger, m_assertContext->fatal_handler(), "Build Artifact access initialization failed",
+                              std::move(error));
         }
-        cue::CMakeRunnerSettings runnerSettings{cmake->nativePath, environment.engineSourceRoot,
-                                                std::move(environmentAllowlist), std::chrono::minutes(5),
-                                                std::chrono::minutes(30), *toolsetVersion};
+        cue::CMakeRunnerSettings runnerSettings{
+            cmake->nativePath,       environment.engineSourceRoot, std::move(environmentAllowlist),
+            std::chrono::minutes(5), std::chrono::minutes(30),     *toolsetVersion};
         cue::Result<std::unique_ptr<cue::GameBuildService>> service =
             cue::GameBuildService::create(runnerSettings, std::move(*processRunner.try_value()),
                                           std::move(*artifactPublisher.try_value()), *m_assertContext);
         cue::Result<std::unique_ptr<cue::GameBuildService>> packageBuildService =
-            cue::GameBuildService::create(std::move(runnerSettings),
-                                          std::move(*packageBuildProcessRunner.try_value()),
+            cue::GameBuildService::create(std::move(runnerSettings), std::move(*packageBuildProcessRunner.try_value()),
                                           std::move(*packageArtifactPublisher.try_value()), *m_assertContext);
         if (!service || !packageBuildService)
         {
-            cue::report_fatal(
-                a_logger, m_assertContext->fatal_handler(), "Game Build Service initialization failed",
-                service ? std::move(*packageBuildService.try_error()) : std::move(*service.try_error()));
+            cue::report_fatal(a_logger, m_assertContext->fatal_handler(), "Game Build Service initialization failed",
+                              service ? std::move(*packageBuildService.try_error()) : std::move(*service.try_error()));
         }
         m_buildService = std::move(*service.try_value());
         cue::BuildWorkspaceCompatibility compatibility{cue::BuildGenerator::VisualStudio2026,
@@ -1819,13 +1813,12 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         if (!packageService)
         {
             cue::report_fatal(a_logger, m_assertContext->fatal_handler(),
-                              "Package Workflow Service initialization failed",
-                              std::move(*packageService.try_error()));
+                              "Package Workflow Service initialization failed", std::move(*packageService.try_error()));
         }
         m_packageService = std::move(*packageService.try_value());
         m_packagePresenter = cue::editor::PackagePresenter::create(
-            *m_packageService, m_session->controller(), std::string(m_session->project_locator()),
-            compatibility, std::make_unique<WindowsBuildOperationIdSource>(*m_assertContext), *m_assertContext);
+            *m_packageService, m_session->controller(), std::string(m_session->project_locator()), compatibility,
+            std::make_unique<WindowsBuildOperationIdSource>(*m_assertContext), *m_assertContext);
         m_packagePresenter->set_active_document(m_session->active_document_id());
     }
 
@@ -1860,9 +1853,42 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         std::vector<cue::editor_core::EditorComponentTemplate> componentTemplates;
         componentTemplates.push_back({"Camera", std::move(*cameraTemplate.try_value())});
         componentTemplates.push_back({"Mesh (Built-in Cube)", std::move(*meshTemplate.try_value())});
+
+        const std::span<const cue::engine_assets::BuiltInMeshDescriptor> meshCatalog =
+            cue::engine_assets::built_in_mesh_catalog();
+        cue::Result<void> validatedCatalog =
+            cue::engine_assets::validate_builtin_mesh_catalog(meshCatalog, *m_assertContext);
+        if (!validatedCatalog)
+        {
+            m_assertContext->fatal_handler().terminate("Editor Built-in Mesh Catalog validation failed");
+        }
+        std::vector<cue::editor_core::EditorPrimitiveTemplate> primitiveTemplates;
+        primitiveTemplates.reserve(meshCatalog.size());
+        for (const cue::engine_assets::BuiltInMeshDescriptor &descriptor : meshCatalog)
+        {
+            cue::Result<cue::scene::ComponentInstanceId> primitiveTemplateId =
+                cue::scene::ComponentInstanceId::generate(m_session->identity_source(), *m_assertContext);
+            if (!primitiveTemplateId)
+            {
+                m_assertContext->fatal_handler().terminate("Editor Primitive template identity generation failed");
+            }
+            cue::Result<cue::scene::SceneComponent> primitivePrototype = cue::renderer::make_builtin_mesh_component(
+                std::move(*primitiveTemplateId.try_value()), descriptor.assetId, m_session->schema_registry(),
+                m_session->value_schema_registry(), *m_assertContext);
+            if (!primitivePrototype)
+            {
+                m_assertContext->fatal_handler().terminate("Editor Primitive template creation failed");
+            }
+            const bool isEnabled = cue::renderer::is_render_mesh_supported(descriptor.assetId);
+            primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+                std::string(descriptor.displayName), std::string(descriptor.assetId),
+                std::move(*primitivePrototype.try_value()),
+                isEnabled ? std::string{} : "GameView／DebugViewはこのPrimitiveに未対応です。", isEnabled});
+        }
         m_presenter = cue::editor::EditorPresenter::create(m_session->controller(), *m_session->active_document_id(),
                                                            m_session->identity_source(), m_session->schema_registry(),
-                                                           std::move(componentTemplates), *m_assertContext);
+                                                           std::move(componentTemplates), std::move(primitiveTemplates),
+                                                           *m_assertContext);
     }
 
     /// @brief Editor UI確定後にPortable EventをPlay SessionへFIFO順に配送して一Frame進める
@@ -3018,9 +3044,10 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                                     k_processTestFailed);
             }
         }
-        const cue::tool_host::ToolHostDescriptor descriptor{
-            "CueEngine Editor", {1440U, 900U}, a_options.maximumFrameCount,
-            static_cast<std::uint16_t>(IDI_CUE_EDITOR_TOOL)};
+        const cue::tool_host::ToolHostDescriptor descriptor{"CueEngine Editor",
+                                                            {1440U, 900U},
+                                                            a_options.maximumFrameCount,
+                                                            static_cast<std::uint16_t>(IDI_CUE_EDITOR_TOOL)};
         cue::Result<void> hosted = cue::tool_host::run_windows_d3d12_tool_host(descriptor, client, a_assertContext);
         if (!hosted)
         {

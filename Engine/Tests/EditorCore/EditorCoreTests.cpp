@@ -540,13 +540,14 @@ cue::scene::ComponentValueSchemaRegistry make_component_value_registry(
 cue::scene::SceneComponent make_health_component(cue::scene::ComponentInstanceId a_componentId, std::int64_t a_health,
                                                  const cue::schema::SchemaRegistry &a_registry,
                                                  const cue::scene::ComponentValueSchemaRegistry &a_valueRegistry,
-                                                 const cue::AssertContext &a_assertContext) noexcept
+                                                 const cue::AssertContext &a_assertContext,
+                                                 std::string_view a_assetId = "asset://default") noexcept
 {
     std::vector<cue::scene::KnownFieldData> fields;
     fields.push_back(take_value(cue::scene::create_known_field(
         make_health_field_id(a_assertContext), cue::scene::FieldValue::signed_integer(a_health),
         cue::scene::FieldValueKind::SignedInteger, a_assertContext)));
-    auto assetReference = take_value(cue::scene::AssetReferenceValue::create("asset://default", a_assertContext));
+    auto assetReference = take_value(cue::scene::AssetReferenceValue::create(a_assetId, a_assertContext));
     fields.push_back(take_value(cue::scene::create_known_field(
         make_asset_field_id(a_assertContext), cue::scene::FieldValue::asset_reference(std::move(assetReference)),
         cue::scene::FieldValueKind::AssetReference, a_assertContext)));
@@ -1179,6 +1180,46 @@ void test_scene_persistence_workflow() noexcept
     const auto *document = controller->session().find_document(documentId);
     require(document != nullptr && !document->is_dirty() && !document->has_recovery_candidate());
 
+    TestSceneIdentitySource identitySource;
+    std::vector<cue::editor_core::EditorPrimitiveTemplate> primitiveTemplates;
+    primitiveTemplates.push_back(cue::editor_core::EditorPrimitiveTemplate{
+        "Cube",
+        "cue://engine/mesh/cube",
+        make_health_component(make_component_id("00000000-0000-4000-8000-000000000713", assertContext), 25, *registry,
+                              valueRegistry, assertContext, "cue://engine/mesh/cube"),
+        {},
+        true});
+    require(controller
+                ->execute_intent(documentId, cue::editor_core::CreatePrimitiveIntent{std::nullopt, 0U}, identitySource,
+                                 {}, primitiveTemplates)
+                .has_value());
+    document = controller->session().find_document(documentId);
+    require(document != nullptr && document->is_dirty() && document->scene_document().object_count() == 2U &&
+            document->selection().size() == 1U);
+    const cue::scene::ObjectId primitiveId = document->selection()[0];
+    const cue::scene::SceneObject *primitive = document->scene_document().find_object(primitiveId);
+    require(primitive != nullptr && primitive->name() == "Cube" && primitive->components().size() == 1U);
+    const cue::scene::ComponentInstanceId primitiveComponentId = primitive->components()[0].instance_id();
+    require(component_asset_token(*primitive, primitiveComponentId) == "cue://engine/mesh/cube");
+    require(controller->undo(documentId).has_value());
+    document = controller->session().find_document(documentId);
+    require(document != nullptr && document->scene_document().find_object(primitiveId) == nullptr);
+    require(controller->redo(documentId).has_value());
+    document = controller->session().find_document(documentId);
+    primitive = document->scene_document().find_object(primitiveId);
+    require(primitive != nullptr && primitive->components().size() == 1U &&
+            primitive->components()[0].instance_id() == primitiveComponentId);
+    require(component_asset_token(*primitive, primitiveComponentId) == "cue://engine/mesh/cube");
+    auto primitiveSave = controller->save_document(documentId);
+    require(primitiveSave.has_value() && primitiveSave.try_value()->status() == cue::scene::SceneSaveStatus::Committed);
+    require(controller->reload_document(documentId).has_value());
+    document = controller->session().find_document(documentId);
+    primitive = document != nullptr ? document->scene_document().find_object(primitiveId) : nullptr;
+    require(primitive != nullptr && primitive->transform().translation() == cue::math::Vector3{} &&
+            primitive->transform().scale() == cue::math::Vector3{1.0F, 1.0F, 1.0F} &&
+            primitive->components().size() == 1U &&
+            component_asset_token(*primitive, primitiveComponentId) == "cue://engine/mesh/cube");
+
     require(controller
                 ->execute_command(cue::editor_core::SceneCommandRequest{
                     documentId, sceneAssetId, cue::editor_core::RenameObjectCommand{rootId, "Edited"}})
@@ -1732,7 +1773,7 @@ void test_saved_startup_scene_snapshot() noexcept
                      take_value(cue::scene::serialize_scene_document(startupScene, assertContext)));
 
     cue::editor_core::ScenePersistenceServices services(sourceAssets, savedRoot, *registry, valueRegistry,
-                                                         sceneMigrations, componentMigrations);
+                                                        sceneMigrations, componentMigrations);
     auto controller =
         cue::editor_core::EditorController::create(make_project_descriptor(assertContext), services, assertContext);
     const auto documentId = take_value(controller->open_document_from_storage(
@@ -1755,8 +1796,8 @@ void test_saved_startup_scene_snapshot() noexcept
     require(descriptorSnapshot.try_value()->objects()[0].name() == "Descriptor Startup");
 
     auto externalScene = make_scene_document("00000000-0000-4000-8000-000000000099", assertContext);
-    require(externalScene.add_object(objectId, "Externally Saved", true, std::nullopt, cue::math::Transform{})
-                .has_value());
+    require(
+        externalScene.add_object(objectId, "Externally Saved", true, std::nullopt, cue::math::Transform{}).has_value());
     sourceAssets.set("Scenes/Default.cuescene",
                      take_value(cue::scene::serialize_scene_document(externalScene, assertContext)));
     auto externalSnapshot = controller->load_saved_startup_scene_snapshot();
