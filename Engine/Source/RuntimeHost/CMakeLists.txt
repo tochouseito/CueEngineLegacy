@@ -36,6 +36,8 @@ target_sources(
         GameModuleQueryProvider.cpp
         RuntimeHostApplication.cpp
         RuntimeHostProcess.cpp
+        RuntimeSceneFrame.cpp
+        RuntimeSceneFrame.h
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public
