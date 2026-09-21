@@ -200,6 +200,47 @@ constexpr std::size_t k_maximumJsonStringBytes = 4096U;
     return componentCount >= 2U && componentCount <= 4U;
 }
 
+/// @brief 数値Versionが指定下限以上か返す
+[[nodiscard]] bool is_tool_version_at_least(std::string_view a_value, std::string_view a_minimum) noexcept
+{
+    if (!is_tool_version(a_value) || !is_tool_version(a_minimum))
+    {
+        return false;
+    }
+    const auto split = [](std::string_view a_version) noexcept
+    {
+        std::array<std::string_view, 4U> components{"0", "0", "0", "0"};
+        std::size_t start = 0U;
+        std::size_t count = 0U;
+        while (start < a_version.size())
+        {
+            const std::size_t end = a_version.find('.', start);
+            components[count++] = a_version.substr(
+                start, end == std::string_view::npos ? a_version.size() - start : end - start);
+            if (end == std::string_view::npos)
+            {
+                break;
+            }
+            start = end + 1U;
+        }
+        return components;
+    };
+    const auto valueComponents = split(a_value);
+    const auto minimumComponents = split(a_minimum);
+    for (std::size_t index = 0U; index < valueComponents.size(); ++index)
+    {
+        if (valueComponents[index].size() != minimumComponents[index].size())
+        {
+            return valueComponents[index].size() > minimumComponents[index].size();
+        }
+        if (valueComponents[index] != minimumComponents[index])
+        {
+            return valueComponents[index] > minimumComponents[index];
+        }
+    }
+    return true;
+}
+
 /// @brief 生成Binary Roleか返す
 [[nodiscard]] bool is_tool_role(cue::distribution::DistributionFileRole a_role) noexcept
 {
@@ -272,9 +313,9 @@ constexpr std::array k_expectedToolPaths = {
         return cue::Result<void>::failure(make_distribution_error(a_assertContext, DistributionError::InvalidIdentity,
                                                                   "Distribution Manifest identity is invalid"));
     }
-    if (!is_tool_version(a_manifest.minimumToolchain.cmakeVersion) ||
-        !is_tool_version(a_manifest.minimumToolchain.gitVersion) ||
-        !is_manifest_string(a_manifest.minimumToolchain.compilerVendor, 64U) ||
+    if (!is_tool_version_at_least(a_manifest.minimumToolchain.cmakeVersion, "4.2.0") ||
+        !is_tool_version_at_least(a_manifest.minimumToolchain.gitVersion, "2.44.0") ||
+        a_manifest.minimumToolchain.compilerVendor != "msvc" ||
         !is_tool_version(a_manifest.minimumToolchain.compilerVersion) ||
         !is_tool_version(a_manifest.minimumToolchain.windowsSdkVersion))
     {

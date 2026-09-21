@@ -365,7 +365,7 @@ bool is_valid_publisher_build_identity(const PublisherBuildIdentity &a_identity)
     return a_identity.hostArchitecture == DistributionArchitecture::X64 &&
            a_identity.targetArchitecture == DistributionArchitecture::X64 &&
            is_canonical_git_revision(a_identity.builtFromRevision) && a_identity.targetTriplet == "x64-windows" &&
-           is_identity_token(a_identity.compilerVendor) && is_identity_token(a_identity.compilerVersion) &&
+           a_identity.compilerVendor == "msvc" && is_identity_token(a_identity.compilerVersion) &&
            is_identity_token(a_identity.toolsetVersion) && a_identity.crtLinkage == "dynamic" &&
            is_identity_token(a_identity.crtVersion) && is_identity_token(a_identity.windowsSdkTargetVersion) &&
            a_identity.configuration == "Release";
@@ -375,7 +375,7 @@ bool is_valid_dependency_build_identity(const DependencyBuildIdentity &a_identit
 {
     return a_identity.hostArchitecture == DistributionArchitecture::X64 &&
            a_identity.targetArchitecture == DistributionArchitecture::X64 &&
-           a_identity.targetTriplet == "x64-windows" && is_identity_token(a_identity.compilerVendor) &&
+           a_identity.targetTriplet == "x64-windows" && a_identity.compilerVendor == "msvc" &&
            is_identity_token(a_identity.compilerVersion) && is_identity_token(a_identity.toolsetVersion) &&
            a_identity.crtLinkage == "dynamic" && is_identity_token(a_identity.crtVersion) &&
            is_identity_token(a_identity.windowsSdkTargetVersion);

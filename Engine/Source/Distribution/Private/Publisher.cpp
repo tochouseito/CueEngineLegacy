@@ -49,16 +49,21 @@ namespace
 [[nodiscard]] bool has_forbidden_segment(std::string_view a_path)
 {
     const std::string lower = ascii_lower(a_path);
+    constexpr std::string_view engineSourcePrefix = "engine/source/";
+    constexpr std::string_view engineBuildPrefix = "engine/source/build/";
+    const std::string_view lowerView = lower;
     std::size_t start = 0U;
     while (start <= lower.size())
     {
         const std::size_t end = lower.find('/', start);
         const std::string_view segment =
-            lower.substr(start, end == std::string::npos ? lower.size() - start : end - start);
+            lowerView.substr(start, end == std::string::npos ? lower.size() - start : end - start);
         if (segment == ".git" || segment == ".codex" || segment == ".github" || segment == ".vs" ||
             segment == "tests" || segment == "test" || segment == "out" || segment == "cache" ||
             segment == "vcpkg_installed" || segment == ".tools" ||
-            ((segment == "build" || segment == "builds") && start == 0U))
+            ((segment == "build" || segment == "builds") &&
+             !(segment == "build" && start == engineSourcePrefix.size() &&
+               lower.starts_with(engineBuildPrefix))))
         {
             return true;
         }

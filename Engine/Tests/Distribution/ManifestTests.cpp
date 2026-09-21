@@ -188,6 +188,23 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
+    manifest.publisherBuildIdentity.compilerVendor = "gcc";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
+    manifest.minimumToolchain.cmakeVersion = "4.10.0";
+    manifest.minimumToolchain.gitVersion = "2.100.0";
+    require(cue::distribution::write_distribution_manifest(manifest, a_assertContext).has_value());
+
+    manifest = make_manifest();
+    manifest.minimumToolchain.cmakeVersion = "4.1.9";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
+    manifest.minimumToolchain.gitVersion = "2.43.9";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
     manifest.bundleId = "12345678-1234-5abc-8def-1234567890ab";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
@@ -310,6 +327,9 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext));
     build.targetTriplet = "x64-windows";
     build.crtLinkage = "static";
+    require(!cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext));
+    build.crtLinkage = "dynamic";
+    build.compilerVendor = "gcc";
     require(!cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext));
 
     auto versionDirectory = cue::distribution::make_distribution_version_directory(
