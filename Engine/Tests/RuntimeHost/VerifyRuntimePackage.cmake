@@ -125,6 +125,7 @@ endif()
 foreach(requiredMessage IN ITEMS
     "D3D12 Render Loop ready:"
     "Runtime Application Session started: Generation=1, WorldId="
+    "Runtime Presentation Frame: Mode=DiagnosticClear, CubeCount=0"
     "Runtime Application Session stopped: Reason=WindowClosed, FrameCount=1"
     "D3D12 Render Loop completed: FrameCount=1"
     "D3D12 Render Loop shutdown completed"
@@ -161,7 +162,7 @@ set(readyCameraScene
 set(multipleCameraScene
     "{\"schemaVersion\":2,\"sceneAssetId\":\"${sceneId}\",\"objects\":[${objectPrefix}${cameraComponent},${meshComponent}]},${secondObject}]}${runtimeLf}"
 )
-function(verify_render_snapshot_scene sceneBytes expectedStatus)
+function(verify_render_snapshot_scene sceneBytes expectedStatus expectedPresentationMode)
     write_runtime_data("${scenePackagePath}" "${sceneBytes}")
     write_package_manifest("${packageRoot}" "" "")
     execute_process(
@@ -175,16 +176,19 @@ function(verify_render_snapshot_scene sceneBytes expectedStatus)
     set(sceneCombined "${sceneOutput}\n${sceneError}")
     string(FIND "${sceneCombined}" "Runtime Render Snapshot: MainCamera=${expectedStatus}, MeshCount=1"
         snapshotPosition)
+    string(FIND "${sceneCombined}"
+        "Runtime Presentation Frame: Mode=${expectedPresentationMode}, CubeCount=1"
+        presentationPosition)
     string(FIND "${sceneCombined}" "Runtime Application Session stopped: Reason=WindowClosed, FrameCount=1"
         stopPosition)
-    if(NOT sceneResult EQUAL 0 OR snapshotPosition EQUAL -1 OR stopPosition EQUAL -1)
+    if(NOT sceneResult EQUAL 0 OR snapshotPosition EQUAL -1 OR presentationPosition EQUAL -1 OR stopPosition EQUAL -1)
         message(FATAL_ERROR "Runtime Scene v2 composition failed for ${expectedStatus}\n${sceneCombined}")
     endif()
 endfunction()
-verify_render_snapshot_scene("${missingCameraScene}" "Missing")
-verify_render_snapshot_scene("${readyCameraScene}" "Ready")
-verify_render_snapshot_scene("${multipleCameraScene}" "Multiple")
-verify_render_snapshot_scene("${readyCameraScene}" "Ready")
+verify_render_snapshot_scene("${missingCameraScene}" "Missing" "DiagnosticClear")
+verify_render_snapshot_scene("${readyCameraScene}" "Ready" "Scene")
+verify_render_snapshot_scene("${multipleCameraScene}" "Multiple" "DiagnosticClear")
+verify_render_snapshot_scene("${readyCameraScene}" "Ready" "Scene")
 write_runtime_data("${scenePackagePath}" "${readyCameraScene}")
 write_package_manifest("${packageRoot}" "" "")
 execute_process(
@@ -201,7 +205,7 @@ string(FIND "${failedStartCombined}" "Runtime Host failed to start Runtime Appli
 if(NOT failedStartResult EQUAL 14 OR failedStartPosition EQUAL -1)
     message(FATAL_ERROR "Renderer and Game Module start failure did not rollback safely\n${failedStartCombined}")
 endif()
-verify_render_snapshot_scene("${readyCameraScene}" "Ready")
+verify_render_snapshot_scene("${readyCameraScene}" "Ready" "Scene")
 write_runtime_data("${scenePackagePath}" "${canonicalV1Scene}")
 write_package_manifest("${packageRoot}" "" "")
 

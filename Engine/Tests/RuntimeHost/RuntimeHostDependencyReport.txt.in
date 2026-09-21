@@ -7,4 +7,4 @@ Static package loader dependencies: Cue.RuntimeHost.Core;Cue.IO.Windows;Cue.Pack
 Process implementation target: Cue.RuntimeHost.Core
 Testing-only Core dependency: Cue.Platform.Windows.TestSupport
 Forbidden source dependencies: D3D12NativeTypes;Editor;ProjectFiles;ECS
-Renderer source dependency allowed only in RuntimePackage.cpp;GameModuleQueryProvider.cpp;RuntimeHostApplication.cpp;RuntimeHostProcess.cpp;RuntimeHostApplication.h
+Renderer source dependency allowed only in RuntimePackage.cpp;GameModuleQueryProvider.cpp;RuntimeHostApplication.cpp;RuntimeHostProcess.cpp;RuntimeHostApplication.h;RuntimeSceneFrame.cpp;RuntimeSceneFrame.h
