@@ -180,6 +180,7 @@ add_custom_target(
         CueRuntimeHostModuleIdentityTests
         CueRuntimeHostPathTests
         CueRuntimeHostRhiOwnershipCompile
+        CueRuntimePresentationFrameTests
         CueRuntimeSceneDataTests
 )
 
@@ -192,6 +193,20 @@ if(MSVC)
     target_compile_options(CueRuntimeSceneDataTests PRIVATE /W4 /WX /permissive- /Zc:__cplusplus /utf-8)
 endif()
 add_test(NAME Cue.RuntimeHost.SceneData COMMAND CueRuntimeSceneDataTests)
+
+add_executable(CueRuntimePresentationFrameTests RuntimeSceneFrameTests.cpp)
+target_link_libraries(CueRuntimePresentationFrameTests PRIVATE Cue.RuntimeHost.Core)
+target_include_directories(
+    CueRuntimePresentationFrameTests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/Engine/Source/RuntimeHost
+)
+target_compile_features(CueRuntimePresentationFrameTests PRIVATE cxx_std_20)
+set_target_properties(CueRuntimePresentationFrameTests PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(CueRuntimePresentationFrameTests PRIVATE /W4 /WX /permissive- /Zc:__cplusplus /utf-8)
+endif()
+add_test(NAME Cue.RuntimeHost.PresentationFrame COMMAND CueRuntimePresentationFrameTests)
 
 add_test(NAME Cue.RuntimeHost.PathUtf8 COMMAND CueRuntimeHostPathTests)
 add_test(NAME Cue.RuntimeHost.GameModuleQueryProvider COMMAND CueRuntimeHostGameModuleQueryProviderTests)
@@ -342,6 +357,7 @@ set_tests_properties(
     Cue.RuntimeHost.InvalidModeCombination
     Cue.RuntimeHost.ModuleIdentity
     Cue.RuntimeHost.PathUtf8
+    Cue.RuntimeHost.PresentationFrame
     PROPERTIES
         LABELS RuntimeHost
         TIMEOUT 10

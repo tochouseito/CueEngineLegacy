@@ -16,6 +16,8 @@
 #include <Cue/RHI/D3D12/Windows/D3d12WindowsPresentation.h>
 #include <Cue/RuntimeHost/RuntimeHostApplication.h>
 
+#include "RuntimeSceneFrame.h"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -740,6 +742,7 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
                      "Runtime Application Session started: Generation=" + std::to_string(application->generation()) +
                          ", WorldId=" + std::to_string(application->world_id()));
     cue::LogResult renderSnapshotLogResult = cue::LogResult::Success;
+    cue::LogResult presentationFrameLogResult = cue::LogResult::Success;
     if (a_options.isPackageRuntime)
     {
         const cue::renderer::RenderSnapshot &snapshot = application->render_snapshot();
@@ -771,6 +774,7 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
     bool isShutdownRequested = false;
     bool wasWindowCloseRequested = false;
     bool hasRuntimeFrameFailure = false;
+    bool hasLoggedPresentationFrame = false;
 
     while (!isShutdownRequested)
     {
@@ -942,9 +946,27 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
             continue;
         }
 
-        // Clear と Present を一つの Frame として繰り返し、最小 Rendering 経路の失敗を各 Frame で検出する
-        cue::PresentationFrameDescriptor frameDescriptor = {clearColor};
-        cue::Result<cue::PresentationFrameStatus> frameResult = presentation->present_frame(frameDescriptor);
+        cue::Result<cue::runtime_host::RuntimePresentationFrame> presentationFrame =
+            cue::runtime_host::make_runtime_presentation_frame(application->render_snapshot(), presentation->width(),
+                                                               presentation->height(), clearColor, a_assertContext);
+        if (!presentationFrame)
+        {
+            frameError.emplace(std::move(*presentationFrame.try_error()));
+            loopErrorMessage = "Runtime Host failed to convert Render Snapshot for Presentation";
+            break;
+        }
+        if (a_options.isPackageRuntime && !hasLoggedPresentationFrame)
+        {
+            const bool isScene = presentationFrame.try_value()->mode() ==
+                                 cue::runtime_host::RuntimePresentationFrameMode::Scene;
+            presentationFrameLogResult = a_logger.log(
+                cue::LogLevel::Info,
+                "Runtime Presentation Frame: Mode=" + std::string(isScene ? "Scene" : "DiagnosticClear") +
+                    ", CubeCount=" + std::to_string(presentationFrame.try_value()->cube_count()));
+            hasLoggedPresentationFrame = true;
+        }
+        cue::Result<cue::PresentationFrameStatus> frameResult =
+            cue::runtime_host::present_runtime_presentation_frame(*presentation, *presentationFrame.try_value());
 
         if (!frameResult)
         {
@@ -1172,6 +1194,7 @@ void add_secondary_runtime_error(cue::Error &a_primaryError, const cue::Error &a
     return capabilityStateLogResult == cue::LogResult::Success && readyLogResult == cue::LogResult::Success &&
                    runtimeReadyLogResult == cue::LogResult::Success &&
                    renderSnapshotLogResult == cue::LogResult::Success &&
+                   presentationFrameLogResult == cue::LogResult::Success &&
                    runtimeShutdownLogResult == cue::LogResult::Success &&
                    resizeSmokeLogResult == cue::LogResult::Success && completionLogResult == cue::LogResult::Success &&
                    shutdownLogResult == cue::LogResult::Success && flushResult == cue::LogResult::Success
