@@ -3,16 +3,20 @@ add_library(Cue.EngineAssets STATIC)
 target_sources(
     Cue.EngineAssets
     PRIVATE
+        Private/BuiltInAssetCatalog.cpp
         Private/BuiltInMesh.cpp
+        Private/Error.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public
         FILES
+            Public/Cue/EngineAssets/BuiltInAssetCatalog.h
             Public/Cue/EngineAssets/BuiltInMesh.h
+            Public/Cue/EngineAssets/Error.h
 )
 
 target_compile_features(Cue.EngineAssets PUBLIC cxx_std_20)
-target_link_libraries(Cue.EngineAssets PUBLIC Cue.Math)
+target_link_libraries(Cue.EngineAssets PUBLIC Cue.Foundation Cue.Math)
 target_include_directories(Cue.EngineAssets PUBLIC Public)
 
 set_target_properties(
@@ -40,10 +44,12 @@ endif()
 get_target_property(cueEngineAssetsLinks Cue.EngineAssets LINK_LIBRARIES)
 get_target_property(cueEngineAssetsInterfaceLinks Cue.EngineAssets INTERFACE_LINK_LIBRARIES)
 
-if(NOT "${cueEngineAssetsLinks}" STREQUAL "Cue.Math")
-    message(FATAL_ERROR "Cue.EngineAssets must directly link only Cue.Math: ${cueEngineAssetsLinks}")
+if(NOT "${cueEngineAssetsLinks}" STREQUAL "Cue.Foundation;Cue.Math")
+    message(FATAL_ERROR "Cue.EngineAssets must directly link only Cue.Foundation and Cue.Math: ${cueEngineAssetsLinks}")
 endif()
 
-if(NOT "${cueEngineAssetsInterfaceLinks}" STREQUAL "Cue.Math")
-    message(FATAL_ERROR "Cue.EngineAssets must expose only Cue.Math: ${cueEngineAssetsInterfaceLinks}")
+if(NOT "${cueEngineAssetsInterfaceLinks}" STREQUAL "Cue.Foundation;Cue.Math")
+    message(FATAL_ERROR
+        "Cue.EngineAssets must expose only Cue.Foundation and Cue.Math: ${cueEngineAssetsInterfaceLinks}"
+    )
 endif()
