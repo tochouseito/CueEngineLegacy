@@ -92,3 +92,48 @@ Assert-RestoreRejected -Arguments @(
     "-DependencyDefinitionId", $definitionId,
     "-DependencyBuildIdentityJson", ($buildIdentity.Replace("x64-windows", "x86-windows"))
 ) -ExpectedMessage "supported x64-windows MSVC ABI"
+
+$quarantineParent = Join-Path ([IO.Path]::GetTempPath()) `
+    "CueEngine-RestoreContract-Quarantine-$([Guid]::NewGuid().ToString('N'))"
+$quarantineDependencyRoot = Join-Path $quarantineParent $dependencyId
+$quarantineTool = Join-Path $quarantineDependencyRoot "Tool\vcpkg"
+$quarantineInstall = Join-Path $quarantineDependencyRoot "Installed"
+try
+{
+    New-Item -ItemType Directory -Path $quarantineDependencyRoot | Out-Null
+    $failingExecutable = Join-Path ([Environment]::GetFolderPath('System')) "where.exe"
+    $output = (& $powerShell -NoProfile -File $restoreScript `
+        -ToolRoot $quarantineTool `
+        -InstallRoot $quarantineInstall `
+        -GitExecutable $failingExecutable `
+        -InstalledVersionRoot $versionRoot `
+        -DependencyRootId $dependencyId `
+        -DependencyDefinitionId $definitionId `
+        -DependencyBuildIdentityJson $buildIdentity 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0)
+    {
+        throw "Restore with the failing Git probe unexpectedly succeeded."
+    }
+    if (Test-Path -LiteralPath $quarantineDependencyRoot)
+    {
+        throw "Invalid Dependency Root remained at its final path."
+    }
+    $quarantined = @(Get-ChildItem -LiteralPath $quarantineParent -Directory `
+        -Filter ".invalid-$dependencyId-*")
+    if ($quarantined.Count -ne 1)
+    {
+        throw "Invalid Dependency Root was not preserved in exactly one quarantine path. Output: $output"
+    }
+    $staging = @(Get-ChildItem -LiteralPath $quarantineParent -Directory -Filter ".staging-*")
+    if ($staging.Count -ne 0)
+    {
+        throw "Failed Dependency staging was not cleaned up."
+    }
+}
+finally
+{
+    if (Test-Path -LiteralPath $quarantineParent -PathType Container)
+    {
+        Remove-Item -LiteralPath $quarantineParent -Recurse -Force
+    }
+}
