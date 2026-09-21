@@ -123,6 +123,14 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(cmakeRole.has_value() && *cmakeRole.try_value() == DistributionFileRole::CMake);
     require(scriptRole.has_value() && *scriptRole.try_value() == DistributionFileRole::Script);
     require(buildModuleRole.has_value() && *buildModuleRole.try_value() == DistributionFileRole::EngineSource);
+    require(cue::distribution::classify_distribution_source_path("Engine/Source/Editor/App.ico", a_assertContext)
+                .has_value());
+    require(cue::distribution::classify_distribution_source_path("Engine/Source/Editor/Logo.png", a_assertContext)
+                .has_value());
+    require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/credentials.json",
+                                                                  a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/.env", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Engine/Source/Foo/signing.p12", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Engine/Tests/Foo.cpp", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Tools/GameCoreBenchmark/CMakeLists.txt",
                                                                   a_assertContext));

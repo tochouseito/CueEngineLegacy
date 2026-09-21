@@ -89,6 +89,21 @@ namespace
     return lower.ends_with("cuegameproduct") || lower.ends_with("cuegameproduct.exe");
 }
 
+/// @brief Engine/Source配下でDeveloper Source SDKへ収録できる既知のFirst-party File種別か返す
+[[nodiscard]] bool has_allowed_engine_source_kind(std::string_view a_path)
+{
+    const std::string lower = ascii_lower(a_path);
+    constexpr std::array allowedExtensions = {
+        std::string_view(".c"),   std::string_view(".cpp"), std::string_view(".cxx"),
+        std::string_view(".h"),   std::string_view(".hpp"), std::string_view(".hxx"),
+        std::string_view(".in"),  std::string_view(".rc"),  std::string_view(".ico"),
+        std::string_view(".png"),
+    };
+    return std::ranges::any_of(allowedExtensions,
+                               [&lower](std::string_view a_extension) noexcept
+                               { return lower.ends_with(a_extension); });
+}
+
 /// @brief Manifest Inventoryの長さ付きCanonical Fieldを追加する
 void append_inventory_field(std::string &a_output, std::string_view a_name, std::string_view a_value)
 {
@@ -188,7 +203,13 @@ Result<DistributionFileRole> classify_distribution_source_path(std::string_view 
             {
                 return Result<DistributionFileRole>::success(DistributionFileRole::Hlsl);
             }
-            return Result<DistributionFileRole>::success(DistributionFileRole::EngineSource);
+            if (has_allowed_engine_source_kind(a_relativePath))
+            {
+                return Result<DistributionFileRole>::success(DistributionFileRole::EngineSource);
+            }
+            return Result<DistributionFileRole>::failure(
+                make_distribution_error(a_assertContext, DistributionError::ForbiddenPayload,
+                                        "Engine source file kind is not allowlisted for Distribution"));
         }
         return Result<DistributionFileRole>::failure(make_distribution_error(
             a_assertContext, DistributionError::PayloadNotAllowlisted, "Distribution source path is not allowlisted"));

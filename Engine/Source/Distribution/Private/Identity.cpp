@@ -15,6 +15,8 @@
 
 namespace
 {
+constexpr std::string_view k_approvedVcpkgRepository = "https://github.com/microsoft/vcpkg.git";
+
 constexpr std::size_t k_maximumIdentityFieldBytes = 128U;
 constexpr std::size_t k_maximumDependencyDefinitionBytes = 1024U * 1024U;
 
@@ -287,7 +289,7 @@ class DefinitionCursor final
     std::string_view windowsSha256;
     std::string_view sourceSha512;
     return cursor.expect("{\n    \"repository\": ") && cursor.parse_string(repository) &&
-           repository.starts_with("https://") && is_definition_token(repository) &&
+           repository == k_approvedVcpkgRepository &&
            cursor.expect(",\n    \"commit\": ") && cursor.parse_string(commit) &&
            cue::distribution::is_canonical_git_revision(commit) && cursor.expect(",\n    \"release\": ") &&
            cursor.parse_string(release) && is_definition_token(release) &&
@@ -362,7 +364,7 @@ bool is_valid_publisher_build_identity(const PublisherBuildIdentity &a_identity)
 {
     return a_identity.hostArchitecture == DistributionArchitecture::X64 &&
            a_identity.targetArchitecture == DistributionArchitecture::X64 &&
-           is_canonical_git_revision(a_identity.builtFromRevision) && is_identity_token(a_identity.targetTriplet) &&
+           is_canonical_git_revision(a_identity.builtFromRevision) && a_identity.targetTriplet == "x64-windows" &&
            is_identity_token(a_identity.compilerVendor) && is_identity_token(a_identity.compilerVersion) &&
            is_identity_token(a_identity.toolsetVersion) && is_identity_token(a_identity.crtLinkage) &&
            is_identity_token(a_identity.crtVersion) && is_identity_token(a_identity.windowsSdkTargetVersion) &&
@@ -373,7 +375,7 @@ bool is_valid_dependency_build_identity(const DependencyBuildIdentity &a_identit
 {
     return a_identity.hostArchitecture == DistributionArchitecture::X64 &&
            a_identity.targetArchitecture == DistributionArchitecture::X64 &&
-           is_identity_token(a_identity.targetTriplet) && is_identity_token(a_identity.compilerVendor) &&
+           a_identity.targetTriplet == "x64-windows" && is_identity_token(a_identity.compilerVendor) &&
            is_identity_token(a_identity.compilerVersion) && is_identity_token(a_identity.toolsetVersion) &&
            is_identity_token(a_identity.crtLinkage) && is_identity_token(a_identity.crtVersion) &&
            is_identity_token(a_identity.windowsSdkTargetVersion);

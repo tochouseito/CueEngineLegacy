@@ -162,6 +162,10 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
+    manifest.publisherBuildIdentity.targetTriplet = "x86-windows";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
     manifest.bundleId = "12345678-1234-5abc-8def-1234567890ab";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
@@ -259,6 +263,12 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     std::string duplicateKey(manifest);
     duplicateKey.insert(duplicateKey.find(",\n    \"version-string\""), ",\n    \"name\": \"cue-engine\"");
     require(!cue::distribution::make_dependency_definition_id(duplicateKey, configuration, tool, a_assertContext));
+    std::string alternateRepository(tool);
+    alternateRepository.replace(alternateRepository.find("https://github.com/microsoft/vcpkg.git"),
+                                std::string_view("https://github.com/microsoft/vcpkg.git").size(),
+                                "https://example.com/vcpkg.git");
+    require(!cue::distribution::make_dependency_definition_id(manifest, configuration, alternateRepository,
+                                                               a_assertContext));
 
     cue::distribution::DependencyBuildIdentity build = {"x64-windows",
                                                         cue::distribution::DistributionArchitecture::X64,
@@ -274,6 +284,8 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     build.compilerVersion = "19.45.1";
     auto otherRoot = cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext);
     require(otherRoot.has_value() && *root.try_value() != *otherRoot.try_value());
+    build.targetTriplet = "x86-windows";
+    require(!cue::distribution::make_dependency_root_id(*definition.try_value(), build, a_assertContext));
 
     auto versionDirectory = cue::distribution::make_distribution_version_directory(
         "1.2.3", "12345678-1234-4abc-8def-1234567890ab", a_assertContext);
