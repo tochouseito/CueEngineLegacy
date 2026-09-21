@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <new>
 #include <string>
+#include <string_view>
 
 namespace
 {
@@ -100,21 +101,203 @@ void append_field(std::string &a_output, std::string_view a_name, std::string_vi
     return component <= 0xffffffffULL;
 }
 
-/// @brief Dependency定義Byte列が固定Commit由来のCanonical入力として扱えるか返す
-[[nodiscard]] bool is_valid_definition_bytes(std::string_view a_value) noexcept
+/// @brief Canonical Dependency JSONを固定順序で読むCursor
+class DefinitionCursor final
 {
-    if (a_value.empty() || a_value.size() > k_maximumDependencyDefinitionBytes || a_value.front() == '\xef')
+  public:
+    explicit DefinitionCursor(std::string_view a_bytes) noexcept : m_bytes(a_bytes)
     {
-        return false;
     }
-    for (const unsigned char value : a_value)
+
+    [[nodiscard]] bool expect(std::string_view a_literal) noexcept
     {
-        if (value == 0U)
+        if (m_bytes.substr(m_offset, a_literal.size()) != a_literal)
         {
             return false;
         }
+        m_offset += a_literal.size();
+        return true;
     }
-    return true;
+
+    [[nodiscard]] bool parse_string(std::string_view &a_output) noexcept
+    {
+        if (!expect("\""))
+        {
+            return false;
+        }
+        const std::size_t start = m_offset;
+        while (m_offset < m_bytes.size() && m_bytes[m_offset] != '"')
+        {
+            const unsigned char value = static_cast<unsigned char>(m_bytes[m_offset]);
+            if (value < 0x21U || value > 0x7eU || value == '\\' || m_offset - start >= k_maximumIdentityFieldBytes)
+            {
+                return false;
+            }
+            ++m_offset;
+        }
+        if (m_offset >= m_bytes.size() || m_offset == start)
+        {
+            return false;
+        }
+        a_output = m_bytes.substr(start, m_offset - start);
+        ++m_offset;
+        return true;
+    }
+
+    [[nodiscard]] bool parse_boolean(bool &a_output) noexcept
+    {
+        if (expect("false"))
+        {
+            a_output = false;
+            return true;
+        }
+        if (expect("true"))
+        {
+            a_output = true;
+            return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool finished() const noexcept
+    {
+        return m_offset == m_bytes.size();
+    }
+
+  private:
+    std::string_view m_bytes;
+    std::size_t m_offset = 0U;
+};
+
+/// @brief Dependency定義Byte列の共通Envelopeを検証する
+[[nodiscard]] bool has_valid_definition_envelope(std::string_view a_value) noexcept
+{
+    if (a_value.empty() || a_value.size() > k_maximumDependencyDefinitionBytes || a_value.front() == '\xef' ||
+        !a_value.ends_with('\n'))
+    {
+        return false;
+    }
+    return std::ranges::none_of(a_value, [](unsigned char a_character) noexcept
+                                { return a_character == 0U || a_character == '\r'; });
+}
+
+/// @brief Canonical Tokenとして使用できるDependency定義Stringか返す
+[[nodiscard]] bool is_definition_token(std::string_view a_value) noexcept
+{
+    return !a_value.empty() && a_value.size() <= k_maximumIdentityFieldBytes;
+}
+
+/// @brief Canonical vcpkg.json Schemaを検証する
+[[nodiscard]] bool is_canonical_vcpkg_manifest(std::string_view a_value) noexcept
+{
+    if (!has_valid_definition_envelope(a_value))
+    {
+        return false;
+    }
+    DefinitionCursor cursor(a_value);
+    std::string_view name;
+    std::string_view version;
+    if (!cursor.expect("{\n    \"name\": ") || !cursor.parse_string(name) || name != "cue-engine" ||
+        !cursor.expect(",\n    \"version-string\": ") || !cursor.parse_string(version) ||
+        !is_definition_token(version) || !cursor.expect(",\n    \"dependencies\": [\n"))
+    {
+        return false;
+    }
+
+    std::string_view previousDependency;
+    bool firstDependency = true;
+    while (true)
+    {
+        if (!firstDependency && !cursor.expect(",\n"))
+        {
+            return false;
+        }
+        std::string_view dependency;
+        bool defaultFeatures = false;
+        if (!cursor.expect("        {\n            \"name\": ") || !cursor.parse_string(dependency) ||
+            !is_definition_token(dependency) || (!previousDependency.empty() && dependency <= previousDependency) ||
+            !cursor.expect(",\n            \"default-features\": ") || !cursor.parse_boolean(defaultFeatures) ||
+            !cursor.expect(",\n            \"features\": [\n"))
+        {
+            return false;
+        }
+        previousDependency = dependency;
+
+        std::string_view previousFeature;
+        bool firstFeature = true;
+        while (true)
+        {
+            if (!firstFeature && !cursor.expect(",\n"))
+            {
+                return false;
+            }
+            std::string_view feature;
+            if (!cursor.expect("                ") || !cursor.parse_string(feature) || !is_definition_token(feature) ||
+                (!previousFeature.empty() && feature <= previousFeature))
+            {
+                return false;
+            }
+            previousFeature = feature;
+            firstFeature = false;
+            if (cursor.expect("\n            ]"))
+            {
+                break;
+            }
+        }
+        if (!cursor.expect("\n        }"))
+        {
+            return false;
+        }
+        firstDependency = false;
+        if (cursor.expect("\n    ]"))
+        {
+            break;
+        }
+    }
+    return cursor.expect("\n}\n") && cursor.finished();
+}
+
+/// @brief Canonical vcpkg-configuration.json Schemaを検証する
+[[nodiscard]] bool is_canonical_vcpkg_configuration(std::string_view a_value) noexcept
+{
+    if (!has_valid_definition_envelope(a_value))
+    {
+        return false;
+    }
+    DefinitionCursor cursor(a_value);
+    std::string_view kind;
+    std::string_view baseline;
+    return cursor.expect("{\n    \"default-registry\": {\n        \"kind\": ") && cursor.parse_string(kind) &&
+           kind == "builtin" && cursor.expect(",\n        \"baseline\": ") && cursor.parse_string(baseline) &&
+           cue::distribution::is_canonical_git_revision(baseline) && cursor.expect("\n    }\n}\n") && cursor.finished();
+}
+
+/// @brief Canonical vcpkg-tool.json Schemaを検証する
+[[nodiscard]] bool is_canonical_vcpkg_tool_pin(std::string_view a_value) noexcept
+{
+    if (!has_valid_definition_envelope(a_value))
+    {
+        return false;
+    }
+    DefinitionCursor cursor(a_value);
+    std::string_view repository;
+    std::string_view commit;
+    std::string_view release;
+    std::string_view windowsVersion;
+    std::string_view windowsSha256;
+    std::string_view sourceSha512;
+    return cursor.expect("{\n    \"repository\": ") && cursor.parse_string(repository) &&
+           repository.starts_with("https://") && is_definition_token(repository) &&
+           cursor.expect(",\n    \"commit\": ") && cursor.parse_string(commit) &&
+           cue::distribution::is_canonical_git_revision(commit) && cursor.expect(",\n    \"release\": ") &&
+           cursor.parse_string(release) && is_definition_token(release) &&
+           cursor.expect(",\n    \"windowsX64Version\": ") && cursor.parse_string(windowsVersion) &&
+           is_definition_token(windowsVersion) && cursor.expect(",\n    \"windowsX64Sha256\": ") &&
+           cursor.parse_string(windowsSha256) && cue::distribution::is_canonical_sha256(windowsSha256) &&
+           cursor.expect(",\n    \"sourceSha512\": ") && cursor.parse_string(sourceSha512) &&
+           sourceSha512.size() == 128U &&
+           std::ranges::all_of(sourceSha512, [](char a_character) noexcept { return is_lower_hex(a_character); }) &&
+           cursor.expect("\n}\n") && cursor.finished();
 }
 } // namespace
 
@@ -203,8 +386,8 @@ Result<std::string> make_dependency_definition_id(std::string_view a_vcpkgManife
 {
     try
     {
-        if (!is_valid_definition_bytes(a_vcpkgManifest) || !is_valid_definition_bytes(a_vcpkgConfiguration) ||
-            !is_valid_definition_bytes(a_vcpkgToolPin))
+        if (!is_canonical_vcpkg_manifest(a_vcpkgManifest) || !is_canonical_vcpkg_configuration(a_vcpkgConfiguration) ||
+            !is_canonical_vcpkg_tool_pin(a_vcpkgToolPin))
         {
             return Result<std::string>::failure(make_distribution_error(a_assertContext,
                                                                         DistributionError::InvalidDependencyIdentity,

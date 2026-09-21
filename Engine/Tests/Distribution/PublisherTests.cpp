@@ -124,6 +124,11 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(scriptRole.has_value() && *scriptRole.try_value() == DistributionFileRole::Script);
     require(buildModuleRole.has_value() && *buildModuleRole.try_value() == DistributionFileRole::EngineSource);
     require(!cue::distribution::classify_distribution_source_path("Engine/Tests/Foo.cpp", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Tools/GameCoreBenchmark/CMakeLists.txt",
+                                                                  a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Tools/Package/Injected.cmake", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("Engine/Source", a_assertContext));
+    require(!cue::distribution::classify_distribution_source_path("ThirdParty/Licenses", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path(".codex/config.toml", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("Build/CueEditorTool.exe", a_assertContext));
     require(!cue::distribution::classify_distribution_source_path("../outside", a_assertContext));

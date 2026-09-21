@@ -1,6 +1,7 @@
 #include <Cue/Distribution/Manifest.h>
 
 #include <Cue/Distribution/Error.h>
+#include <Cue/Distribution/Publisher.h>
 #include <Cue/Foundation/Assert.h>
 
 #include <algorithm>
@@ -202,6 +203,46 @@ constexpr std::size_t k_maximumJsonStringBytes = 4096U;
            a_role == DistributionFileRole::Installer || a_role == DistributionFileRole::InstallWorker;
 }
 
+/// @brief 生成Tool Roleに対応する固定Bundle Path
+struct ExpectedToolPath final
+{
+    cue::distribution::DistributionFileRole role;
+    std::string_view path;
+};
+
+constexpr std::array k_expectedToolPaths = {
+    ExpectedToolPath{cue::distribution::DistributionFileRole::Bootstrap, "Bin/CueEngineBootstrap.exe"},
+    ExpectedToolPath{cue::distribution::DistributionFileRole::ProjectHub, "Bin/CueProjectHubTool.exe"},
+    ExpectedToolPath{cue::distribution::DistributionFileRole::Editor, "Bin/CueEditorTool.exe"},
+    ExpectedToolPath{cue::distribution::DistributionFileRole::RuntimeHost, "Bin/CueRuntimeHost.exe"},
+    ExpectedToolPath{cue::distribution::DistributionFileRole::Installer, "Bin/CueEngineInstallerTool.exe"},
+    ExpectedToolPath{cue::distribution::DistributionFileRole::InstallWorker, "Bin/CueEngineInstallWorker.exe"},
+};
+
+/// @brief Tool Roleに対応する固定Bundle Pathを返す
+[[nodiscard]] std::string_view expected_tool_path(cue::distribution::DistributionFileRole a_role) noexcept
+{
+    const auto iterator =
+        std::ranges::find_if(k_expectedToolPaths, [a_role](const ExpectedToolPath &a_expected) noexcept
+                             { return a_expected.role == a_role; });
+    return iterator == k_expectedToolPaths.end() ? std::string_view{} : iterator->path;
+}
+
+/// @brief Inventoryが指定Roleを一つ以上含むか返す
+[[nodiscard]] bool has_role(std::span<const cue::distribution::DistributionFileEntry> a_files,
+                            cue::distribution::DistributionFileRole a_role) noexcept
+{
+    return std::ranges::any_of(a_files, [a_role](const auto &a_file) noexcept { return a_file.role == a_role; });
+}
+
+/// @brief Inventoryが指定Pathを含むか返す
+[[nodiscard]] bool has_path(std::span<const cue::distribution::DistributionFileEntry> a_files,
+                            std::string_view a_path) noexcept
+{
+    return std::ranges::any_of(a_files,
+                               [a_path](const auto &a_file) noexcept { return a_file.relativePath == a_path; });
+}
+
 /// @brief Entry Point Pathと対応Roleを一つのInventoryへ照合する
 [[nodiscard]] bool has_entry_point(std::span<const cue::distribution::DistributionFileEntry> a_files,
                                    std::string_view a_path, cue::distribution::DistributionFileRole a_role) noexcept
@@ -254,6 +295,26 @@ constexpr std::size_t k_maximumJsonStringBytes = 4096U;
                     make_distribution_error(a_assertContext, DistributionError::InvalidManifest,
                                             "Distribution Manifest file entry is invalid"));
             }
+            if (is_tool_role(file.role))
+            {
+                if (file.relativePath != expected_tool_path(file.role))
+                {
+                    return cue::Result<void>::failure(
+                        make_distribution_error(a_assertContext, DistributionError::InvalidManifest,
+                                                "Generated Tool role and path do not match"));
+                }
+            }
+            else
+            {
+                cue::Result<DistributionFileRole> classified =
+                    classify_distribution_source_path(file.relativePath, a_assertContext);
+                if (!classified || *classified.try_value() != file.role)
+                {
+                    return cue::Result<void>::failure(
+                        make_distribution_error(a_assertContext, DistributionError::InvalidManifest,
+                                                "Source payload role and path do not match"));
+                }
+            }
             paths.push_back(make_portable_path_key(file.relativePath));
         }
         std::ranges::sort(paths);
@@ -273,8 +334,45 @@ constexpr std::size_t k_maximumJsonStringBytes = 4096U;
         terminate_exception(a_assertContext);
     }
 
+    constexpr std::array requiredSourceRoles = {
+        DistributionFileRole::EngineSource,
+        DistributionFileRole::Hlsl,
+        DistributionFileRole::CMake,
+        DistributionFileRole::Script,
+        DistributionFileRole::Document,
+        DistributionFileRole::License,
+        DistributionFileRole::DependencyDefinition,
+        DistributionFileRole::ThirdPartyNotice,
+        DistributionFileRole::ThirdPartyLicense,
+    };
+    if (std::ranges::any_of(requiredSourceRoles, [&a_manifest](DistributionFileRole a_role) noexcept
+                            { return !has_role(a_manifest.files, a_role); }))
+    {
+        return cue::Result<void>::failure(
+            make_distribution_error(a_assertContext, DistributionError::MissingRequiredPayload,
+                                    "Required source-managed Distribution payload is missing from Manifest"));
+    }
+    constexpr std::array requiredSourcePaths = {
+        std::string_view("Tools/Dependencies/RestoreVcpkg.ps1"), std::string_view("ThirdParty/vcpkg.json"),
+        std::string_view("ThirdParty/vcpkg-configuration.json"), std::string_view("ThirdParty/vcpkg-tool.json"),
+        std::string_view("ThirdParty/THIRD_PARTY_NOTICES.md"),   std::string_view("LICENSE.txt"),
+    };
+    if (std::ranges::any_of(requiredSourcePaths, [&a_manifest](std::string_view a_path) noexcept
+                            { return !has_path(a_manifest.files, a_path); }))
+    {
+        return cue::Result<void>::failure(
+            make_distribution_error(a_assertContext, DistributionError::MissingRequiredPayload,
+                                    "Required fixed-path Distribution payload is missing from Manifest"));
+    }
+
     const DistributionEntryPoints &entryPoints = a_manifest.entryPoints;
-    if (!has_entry_point(a_manifest.files, entryPoints.bootstrap, DistributionFileRole::Bootstrap) ||
+    if (entryPoints.bootstrap != expected_tool_path(DistributionFileRole::Bootstrap) ||
+        entryPoints.projectHub != expected_tool_path(DistributionFileRole::ProjectHub) ||
+        entryPoints.editor != expected_tool_path(DistributionFileRole::Editor) ||
+        entryPoints.runtimeHost != expected_tool_path(DistributionFileRole::RuntimeHost) ||
+        entryPoints.installer != expected_tool_path(DistributionFileRole::Installer) ||
+        entryPoints.installWorker != expected_tool_path(DistributionFileRole::InstallWorker) ||
+        !has_entry_point(a_manifest.files, entryPoints.bootstrap, DistributionFileRole::Bootstrap) ||
         !has_entry_point(a_manifest.files, entryPoints.projectHub, DistributionFileRole::ProjectHub) ||
         !has_entry_point(a_manifest.files, entryPoints.editor, DistributionFileRole::Editor) ||
         !has_entry_point(a_manifest.files, entryPoints.runtimeHost, DistributionFileRole::RuntimeHost) ||
@@ -474,7 +572,8 @@ bool is_canonical_distribution_path(std::string_view a_path) noexcept
         if (index < a_path.size())
         {
             const char value = a_path[index];
-            if (value == '\\' || value == ':' || value == '"')
+            if (value == '\\' || value == ':' || value == '"' || value == '<' || value == '>' || value == '|' ||
+                value == '?' || value == '*')
             {
                 return false;
             }

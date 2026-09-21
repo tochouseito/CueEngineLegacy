@@ -39,11 +39,10 @@ namespace
     return result;
 }
 
-/// @brief PathがPrefix自身またはPrefix配下か返す
-[[nodiscard]] bool is_under(std::string_view a_path, std::string_view a_prefix) noexcept
+/// @brief PathがPrefix直下またはその子孫か返す
+[[nodiscard]] bool is_below(std::string_view a_path, std::string_view a_prefix) noexcept
 {
-    return a_path == a_prefix ||
-           (a_path.size() > a_prefix.size() && a_path.starts_with(a_prefix) && a_path[a_prefix.size()] == '/');
+    return a_path.size() > a_prefix.size() && a_path.starts_with(a_prefix) && a_path[a_prefix.size()] == '/';
 }
 
 /// @brief Path Segmentが配布禁止名か返す
@@ -148,8 +147,9 @@ Result<DistributionFileRole> classify_distribution_source_path(std::string_view 
                 a_assertContext, DistributionError::ForbiddenPayload, "Distribution source path is forbidden"));
         }
         if (a_relativePath == "CMakeLists.txt" || a_relativePath == "CMakePresets.json" ||
-            is_under(a_relativePath, "CMake") || a_relativePath.ends_with("/CMakeLists.txt") ||
-            a_relativePath.ends_with(".cmake"))
+            is_below(a_relativePath, "CMake") ||
+            (is_below(a_relativePath, "Engine/Source") &&
+             (a_relativePath.ends_with("/CMakeLists.txt") || a_relativePath.ends_with(".cmake"))))
         {
             return Result<DistributionFileRole>::success(DistributionFileRole::CMake);
         }
@@ -166,7 +166,7 @@ Result<DistributionFileRole> classify_distribution_source_path(std::string_view 
         {
             return Result<DistributionFileRole>::success(DistributionFileRole::ThirdPartyNotice);
         }
-        if (is_under(a_relativePath, "ThirdParty/Licenses"))
+        if (is_below(a_relativePath, "ThirdParty/Licenses"))
         {
             return Result<DistributionFileRole>::success(DistributionFileRole::ThirdPartyLicense);
         }
@@ -174,15 +174,15 @@ Result<DistributionFileRole> classify_distribution_source_path(std::string_view 
         {
             return Result<DistributionFileRole>::success(DistributionFileRole::License);
         }
-        if (a_relativePath == "README.md" || is_under(a_relativePath, "Engine/Documents"))
+        if (a_relativePath == "README.md" || is_below(a_relativePath, "Engine/Documents"))
         {
             return Result<DistributionFileRole>::success(DistributionFileRole::Document);
         }
-        if (is_under(a_relativePath, "Templates"))
+        if (is_below(a_relativePath, "Templates"))
         {
             return Result<DistributionFileRole>::success(DistributionFileRole::Template);
         }
-        if (is_under(a_relativePath, "Engine/Source"))
+        if (is_below(a_relativePath, "Engine/Source"))
         {
             if (a_relativePath.ends_with(".hlsl") || a_relativePath.ends_with(".hlsli"))
             {

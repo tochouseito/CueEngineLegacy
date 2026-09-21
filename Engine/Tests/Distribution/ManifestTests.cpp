@@ -81,6 +81,19 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     manifest.files = {
         DistributionFileEntry{DistributionFileRole::ProjectHub, manifest.entryPoints.projectHub, 10U, hash('2')},
         DistributionFileEntry{DistributionFileRole::EngineSource, "Engine/Source/Foundation/Foo.cpp", 0U, hash('1')},
+        DistributionFileEntry{DistributionFileRole::Hlsl, "Engine/Source/Renderer/Shaders/Foo.hlsl", 0U, hash('8')},
+        DistributionFileEntry{DistributionFileRole::CMake, "CMakeLists.txt", 0U, hash('9')},
+        DistributionFileEntry{DistributionFileRole::Script, "Tools/Dependencies/RestoreVcpkg.ps1", 0U, hash('a')},
+        DistributionFileEntry{DistributionFileRole::Document, "Engine/Documents/CODING_RULES.md", 0U, hash('b')},
+        DistributionFileEntry{DistributionFileRole::License, "LICENSE.txt", 0U, hash('c')},
+        DistributionFileEntry{DistributionFileRole::DependencyDefinition, "ThirdParty/vcpkg.json", 0U, hash('d')},
+        DistributionFileEntry{DistributionFileRole::DependencyDefinition, "ThirdParty/vcpkg-configuration.json", 0U,
+                              hash('e')},
+        DistributionFileEntry{DistributionFileRole::DependencyDefinition, "ThirdParty/vcpkg-tool.json", 0U, hash('f')},
+        DistributionFileEntry{DistributionFileRole::ThirdPartyNotice, "ThirdParty/THIRD_PARTY_NOTICES.md", 0U,
+                              hash('0')},
+        DistributionFileEntry{DistributionFileRole::ThirdPartyLicense, "ThirdParty/Licenses/DearImGui-LICENSE.txt", 0U,
+                              hash('1')},
         DistributionFileEntry{DistributionFileRole::Bootstrap, manifest.entryPoints.bootstrap, 10U, hash('3')},
         DistributionFileEntry{DistributionFileRole::Editor, manifest.entryPoints.editor, 10U, hash('4')},
         DistributionFileEntry{DistributionFileRole::RuntimeHost, manifest.entryPoints.runtimeHost, 10U, hash('5')},
@@ -122,7 +135,24 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 
     std::string unsupported = *written.try_value();
     unsupported.replace(unsupported.find("\"schemaVersion\":1"), 17U, "\"schemaVersion\":2");
-    return !cue::distribution::read_distribution_manifest(unsupported, a_assertContext);
+    require(!cue::distribution::read_distribution_manifest(unsupported, a_assertContext));
+
+    std::string roleMismatch = *written.try_value();
+    const std::size_t rolePosition = roleMismatch.find("\"role\":\"engineSource\"");
+    require(rolePosition != std::string::npos);
+    roleMismatch.replace(rolePosition, 21U, "\"role\":\"document\"");
+    require(!cue::distribution::read_distribution_manifest(roleMismatch, a_assertContext));
+
+    std::string movedTool = *written.try_value();
+    constexpr std::string_view editorPath = "Bin/CueEditorTool.exe";
+    constexpr std::string_view movedEditorPath = "Bin/RenamedEditor.exe";
+    std::size_t pathPosition = 0U;
+    while ((pathPosition = movedTool.find(editorPath, pathPosition)) != std::string::npos)
+    {
+        movedTool.replace(pathPosition, editorPath.size(), movedEditorPath);
+        pathPosition += movedEditorPath.size();
+    }
+    return !cue::distribution::read_distribution_manifest(movedTool, a_assertContext);
 }
 
 [[nodiscard]] bool test_manifest_identity_and_inventory_rejected(const cue::AssertContext &a_assertContext)
@@ -144,11 +174,38 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
+    const std::string editorPath = manifest.entryPoints.editor;
+    const auto editor =
+        std::ranges::find(manifest.files, editorPath, &cue::distribution::DistributionFileEntry::relativePath);
+    require(editor != manifest.files.end());
+    editor->relativePath = "Bin/RenamedEditor.exe";
+    manifest.entryPoints.editor = editor->relativePath;
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
+    const auto engineSource = std::ranges::find(manifest.files, cue::distribution::DistributionFileRole::EngineSource,
+                                                &cue::distribution::DistributionFileEntry::role);
+    require(engineSource != manifest.files.end());
+    engineSource->role = cue::distribution::DistributionFileRole::Document;
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
+    const auto dependency = std::ranges::find(manifest.files, std::string("ThirdParty/vcpkg-tool.json"),
+                                              &cue::distribution::DistributionFileEntry::relativePath);
+    require(dependency != manifest.files.end());
+    manifest.files.erase(dependency);
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
     manifest.files.front().relativePath = "../outside";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
     manifest.files.front().relativePath = "Bin/CON.exe";
+    require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
+
+    manifest = make_manifest();
+    manifest.files.front().relativePath = "Bin/Project?.exe";
     require(!cue::distribution::write_distribution_manifest(manifest, a_assertContext));
 
     manifest = make_manifest();
@@ -159,15 +216,38 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 
 [[nodiscard]] bool test_identity_derivation(const cue::AssertContext &a_assertContext)
 {
-    auto definition =
-        cue::distribution::make_dependency_definition_id("manifest\n", "configuration\n", "tool\n", a_assertContext);
-    auto same =
-        cue::distribution::make_dependency_definition_id("manifest\n", "configuration\n", "tool\n", a_assertContext);
+    constexpr std::string_view manifest =
+        "{\n    \"name\": \"cue-engine\",\n    \"version-string\": \"0.0.0\",\n    \"dependencies\": [\n"
+        "        {\n            \"name\": \"imgui\",\n            \"default-features\": false,\n"
+        "            \"features\": [\n                \"docking-experimental\",\n                \"dx12-binding\",\n"
+        "                \"win32-binding\"\n            ]\n        }\n    ]\n}\n";
+    constexpr std::string_view configuration =
+        "{\n    \"default-registry\": {\n        \"kind\": \"builtin\",\n"
+        "        \"baseline\": \"386d7c478221b7ee0c97bfe6ea61dcf65121d564\"\n    }\n}\n";
+    constexpr std::string_view tool =
+        "{\n    \"repository\": \"https://github.com/microsoft/vcpkg.git\",\n"
+        "    \"commit\": \"386d7c478221b7ee0c97bfe6ea61dcf65121d564\",\n"
+        "    \"release\": \"2026-07-27\",\n"
+        "    \"windowsX64Version\": \"2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8\",\n"
+        "    \"windowsX64Sha256\": \"13b8175e99a884c5ad34249218754b45541a1a63f216e92603aee57a285ac741\",\n"
+        "    \"sourceSha512\": "
+        "\"e2e256879343662da5b18994559559faa04691987bc1025fc067d9ca944d3ba495bad759e4906bb06952572df1a2671e0fc63281c494"
+        "fe7299078bcd18c16cde\"\n}\n";
+    auto definition = cue::distribution::make_dependency_definition_id(manifest, configuration, tool, a_assertContext);
+    auto same = cue::distribution::make_dependency_definition_id(manifest, configuration, tool, a_assertContext);
+    std::string changedManifest(manifest);
+    changedManifest.replace(changedManifest.find("0.0.0"), 5U, "0.0.1");
     auto changed =
-        cue::distribution::make_dependency_definition_id("manifest2\n", "configuration\n", "tool\n", a_assertContext);
+        cue::distribution::make_dependency_definition_id(changedManifest, configuration, tool, a_assertContext);
     require(definition.has_value() && same.has_value() && changed.has_value());
-    require(*definition.try_value() == "ba65ccf99c9f76a85b04158503f2a9764f12facf8d4d4b0244f150805ba1f4bd");
     require(*definition.try_value() == *same.try_value() && *definition.try_value() != *changed.try_value());
+
+    std::string noncanonical(manifest);
+    noncanonical.insert(1U, " ");
+    require(!cue::distribution::make_dependency_definition_id(noncanonical, configuration, tool, a_assertContext));
+    std::string duplicateKey(manifest);
+    duplicateKey.insert(duplicateKey.find(",\n    \"version-string\""), ",\n    \"name\": \"cue-engine\"");
+    require(!cue::distribution::make_dependency_definition_id(duplicateKey, configuration, tool, a_assertContext));
 
     cue::distribution::DependencyBuildIdentity build = {"x64-windows",
                                                         cue::distribution::DistributionArchitecture::X64,
