@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -239,5 +240,10 @@ int main()
     require(test_allowlist(assertContext));
     require(test_repository_evidence(assertContext));
     require(test_inventory(assertContext));
+    constexpr std::array emptyBytes = {std::byte{}};
+    const auto emptyHash = cue::distribution::compute_distribution_sha256(
+        std::span<const std::byte>(emptyBytes.data(), 0U), assertContext);
+    require(emptyHash.has_value());
+    require(*emptyHash.try_value() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     return 0;
 }

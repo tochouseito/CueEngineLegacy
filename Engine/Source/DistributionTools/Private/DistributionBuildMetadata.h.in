@@ -1,0 +1,16 @@
+#pragma once
+
+#include <string_view>
+
+namespace cue::distribution_build_metadata
+{
+inline constexpr std::string_view k_repositoryRoot = "@cueDistributionRepositoryRoot@";
+inline constexpr std::string_view k_cmakeCommand = "@cueDistributionCMakeCommand@";
+inline constexpr std::string_view k_cmakeVersion = "@cueDistributionCMakeVersion@";
+inline constexpr std::string_view k_cmakeGenerator = "@cueDistributionCMakeGenerator@";
+inline constexpr std::string_view k_gitCommand = "@cueDistributionGitCommand@";
+inline constexpr std::string_view k_powerShellCommand = "@cueDistributionPowerShellCommand@";
+inline constexpr std::string_view k_compilerVersion = "@cueDistributionCompilerVersion@";
+inline constexpr std::string_view k_toolsetVersion = "@cueDistributionToolsetVersion@";
+inline constexpr std::string_view k_windowsSdkVersion = "@cueDistributionWindowsSdkVersion@";
+} // namespace cue::distribution_build_metadata

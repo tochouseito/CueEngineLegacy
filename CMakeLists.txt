@@ -39,6 +39,8 @@ add_subdirectory(Engine/Source/Editor/ImGui)
 add_subdirectory(Engine/Source/RHI)
 
 if(WIN32)
+    add_subdirectory(Engine/Source/Distribution/Windows)
+    add_subdirectory(Engine/Source/DistributionTools)
     add_subdirectory(Engine/Source/Build/Windows)
     add_subdirectory(Engine/Source/Editor/Windows)
     add_subdirectory(Engine/Source/ToolHost/WindowsD3D12)

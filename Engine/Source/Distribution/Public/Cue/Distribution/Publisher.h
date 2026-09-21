@@ -3,6 +3,7 @@
 #include <Cue/Distribution/Manifest.h>
 #include <Cue/Foundation/Result.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -74,4 +75,8 @@ struct DistributionPublisherInventory final
     std::span<const SourceBlobEvidence> a_sources, std::span<const GeneratedToolEvidence> a_tools,
     std::string_view a_fixedRevision, const PublisherBuildIdentity &a_publisherBuildIdentity,
     const AssertContext &a_assertContext) noexcept;
+
+/// @brief Platform Adapterが読んだPayload Byte列のSHA-256をlowercase hexadecimalで返す
+[[nodiscard]] Result<std::string> compute_distribution_sha256(std::span<const std::byte> a_bytes,
+                                                               const AssertContext &a_assertContext) noexcept;
 } // namespace cue::distribution

@@ -1,15 +1,175 @@
 [CmdletBinding()]
-param()
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$ToolRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string]$InstallRoot,
+
+    [string]$InstalledVersionRoot,
+
+    [string]$DependencyRootId,
+
+    [string]$DependencyDefinitionId,
+
+    [string]$DependencyBuildIdentityJson
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $thirdPartyRoot = Join-Path $repositoryRoot "ThirdParty"
-$toolRoot = Join-Path $thirdPartyRoot ".tools\vcpkg"
 $configurationPath = Join-Path $thirdPartyRoot "vcpkg-tool.json"
 $configuration = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
-$env:VCPKG_ROOT = $toolRoot
+
+function Test-PathInside
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Candidate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    $relative = [IO.Path]::GetRelativePath($Root, $Candidate)
+    return -not [IO.Path]::IsPathFullyQualified($relative) -and
+        $relative -ne ".." -and
+        -not $relative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::Ordinal)
+}
+
+function Test-SamePath
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Right
+    )
+
+    return $Left.Equals($Right, [StringComparison]::OrdinalIgnoreCase)
+}
+
+if (-not [IO.Path]::IsPathFullyQualified($ToolRoot) -or -not [IO.Path]::IsPathFullyQualified($InstallRoot))
+{
+    throw "ToolRoot and InstallRoot must be absolute paths."
+}
+$toolRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($ToolRoot))
+$installedRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($InstallRoot))
+
+if ((Test-SamePath -Left $toolRoot -Right $installedRoot) -or
+    (Test-PathInside -Candidate $toolRoot -Root $installedRoot) -or
+    (Test-PathInside -Candidate $installedRoot -Root $toolRoot))
+{
+    throw "ToolRoot and InstallRoot must be separate directory trees."
+}
+
+$versionRoot = $null
+if (-not [string]::IsNullOrWhiteSpace($InstalledVersionRoot))
+{
+    if (-not [IO.Path]::IsPathFullyQualified($InstalledVersionRoot))
+    {
+        throw "InstalledVersionRoot must be an absolute path."
+    }
+    $versionRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($InstalledVersionRoot))
+    if ((Test-PathInside -Candidate $toolRoot -Root $versionRoot) -or
+        (Test-PathInside -Candidate $installedRoot -Root $versionRoot))
+    {
+        throw "vcpkg ToolRoot and InstallRoot must remain outside the immutable installed version."
+    }
+}
+
+$rootModeValues = @($DependencyRootId, $DependencyDefinitionId, $DependencyBuildIdentityJson)
+$rootMode = @($rootModeValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -ne 0
+if ($rootMode -and
+    @($rootModeValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0)
+{
+    throw "DependencyRootId, DependencyDefinitionId, and DependencyBuildIdentityJson must be provided together."
+}
+if ($rootMode -and $null -eq $versionRoot)
+{
+    throw "Immutable Dependency Root publication requires InstalledVersionRoot."
+}
+
+$buildIdentity = $null
+$expectedMarker = $null
+$finalDependencyRoot = $null
+$stagingDependencyRoot = $null
+$dependencyLease = $null
+
+if ($rootMode)
+{
+    if ($DependencyRootId -cnotmatch '^[0-9a-f]{64}$' -or $DependencyDefinitionId -cnotmatch '^[0-9a-f]{64}$')
+    {
+        throw "Dependency Root and Definition IDs must be 64 lowercase hexadecimal characters."
+    }
+
+    $buildIdentity = $DependencyBuildIdentityJson | ConvertFrom-Json
+    $expectedBuildMembers = @(
+        "targetTriplet",
+        "hostArchitecture",
+        "targetArchitecture",
+        "compilerVendor",
+        "compilerVersion",
+        "toolsetVersion",
+        "crtLinkage",
+        "crtVersion",
+        "windowsSdkTargetVersion"
+    )
+    $actualBuildMembers = @($buildIdentity.psobject.Properties.Name)
+    if (($actualBuildMembers -join "|") -cne ($expectedBuildMembers -join "|") -or
+        ($buildIdentity | ConvertTo-Json -Compress) -cne $DependencyBuildIdentityJson)
+    {
+        throw "DependencyBuildIdentityJson must be canonical and contain the fixed v1 members."
+    }
+
+    $finalDependencyRoot = Split-Path -Parent $installedRoot
+    if ((Split-Path -Leaf $finalDependencyRoot) -cne $DependencyRootId -or
+        -not (Test-SamePath -Left $toolRoot -Right (Join-Path $finalDependencyRoot "Tool\vcpkg")) -or
+        -not (Test-SamePath -Left $installedRoot -Right (Join-Path $finalDependencyRoot "Installed")))
+    {
+        throw "Immutable Dependency Root paths must use <root-id>/Tool/vcpkg and <root-id>/Installed."
+    }
+    if (Test-PathInside -Candidate $finalDependencyRoot -Root $versionRoot)
+    {
+        throw "Dependency Root must remain outside the immutable installed version."
+    }
+
+    $marker = [ordered]@{
+        schemaVersion = 1
+        definitionId = $DependencyDefinitionId
+        buildIdentity = $buildIdentity
+        rootId = $DependencyRootId
+        pin = [ordered]@{
+            repository = [string]$configuration.repository
+            commit = [string]$configuration.commit
+            release = [string]$configuration.release
+            windowsX64Version = [string]$configuration.windowsX64Version
+            windowsX64Sha256 = [string]$configuration.windowsX64Sha256
+            sourceSha512 = [string]$configuration.sourceSha512
+        }
+    }
+    $expectedMarker = ($marker | ConvertTo-Json -Compress -Depth 4) + "`n"
+
+    $dependencyParent = Split-Path -Parent $finalDependencyRoot
+    $lockRoot = Join-Path $dependencyParent ".locks"
+    New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
+    $lockPath = Join-Path $lockRoot "$DependencyRootId.lock"
+    try
+    {
+        $dependencyLease = [IO.File]::Open(
+            $lockPath,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None)
+    }
+    catch
+    {
+        throw "Dependency Root lease is already held: $DependencyRootId"
+    }
+}
 
 function Invoke-CheckedProcess
 {
@@ -48,112 +208,192 @@ function Test-VcpkgExecutable
     }
 
     $actualHash = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $configuration.windowsX64Sha256)
+    if ($actualHash -cne $configuration.windowsX64Sha256)
     {
         return $false
     }
 
     $versionText = (& $executablePath version | Out-String)
-    if ($LASTEXITCODE -ne 0 -or -not $versionText.Contains($configuration.windowsX64Version))
+    return $LASTEXITCODE -eq 0 -and $versionText.Contains($configuration.windowsX64Version)
+}
+
+function Test-CompletedDependencyRoot
+{
+    if (-not $rootMode -or -not (Test-Path -LiteralPath $finalDependencyRoot -PathType Container))
     {
         return $false
     }
-
-    return $true
+    $markerPath = Join-Path $finalDependencyRoot "CueDependencyRoot.complete.json"
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf))
+    {
+        return $false
+    }
+    $actualMarker = [IO.File]::ReadAllText($markerPath)
+    if ($actualMarker -cne $expectedMarker -or -not (Test-VcpkgExecutable))
+    {
+        return $false
+    }
+    return Test-Path -LiteralPath (Join-Path $installedRoot "vcpkg\status") -PathType Leaf
 }
 
-if (-not (Test-Path -LiteralPath $toolRoot -PathType Container))
+function Invoke-VcpkgRestore
 {
-    $toolParent = Split-Path -Parent $toolRoot
-    New-Item -ItemType Directory -Path $toolParent -Force | Out-Null
-    Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
-        "clone",
-        "--filter=blob:none",
-        "--no-checkout",
-        $configuration.repository,
-        $toolRoot
-    ) -WorkingDirectory $toolParent
-    Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
-        "checkout",
-        "--detach",
-        $configuration.commit
-    ) -WorkingDirectory $toolRoot
-}
+    $env:VCPKG_ROOT = $toolRoot
+    if (-not (Test-Path -LiteralPath $toolRoot -PathType Container))
+    {
+        $toolParent = Split-Path -Parent $toolRoot
+        New-Item -ItemType Directory -Path $toolParent -Force | Out-Null
+        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            $configuration.repository,
+            $toolRoot
+        ) -WorkingDirectory $toolParent
+        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+            "checkout",
+            "--detach",
+            $configuration.commit
+        ) -WorkingDirectory $toolRoot
+    }
 
-$trackedChanges = (& git -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $trackedChanges.Length -ne 0)
-{
-    throw "Managed vcpkg checkout contains tracked changes."
-}
+    $trackedChanges = (& git -c "safe.directory=$toolRoot" -C $toolRoot status --porcelain --untracked-files=no |
+        Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $trackedChanges.Length -ne 0)
+    {
+        throw "Managed vcpkg checkout contains tracked changes."
+    }
 
-$actualRepository = (& git -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
-if ($LASTEXITCODE -ne 0 -or $actualRepository -ne $configuration.repository)
-{
-    throw "Managed vcpkg checkout origin does not match the pinned repository."
-}
+    $actualRepository = (& git -c "safe.directory=$toolRoot" -C $toolRoot remote get-url origin).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualRepository -cne $configuration.repository)
+    {
+        throw "Managed vcpkg checkout origin does not match the pinned repository."
+    }
 
-$actualCommit = (& git -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0)
-{
-    throw "Managed vcpkg checkout commit could not be read."
-}
-if ($actualCommit -ne $configuration.commit)
-{
-    Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
-        "-c",
-        "safe.directory=$toolRoot",
-        "-C",
-        $toolRoot,
-        "fetch",
-        "--filter=blob:none",
-        "origin",
-        $configuration.commit
+    $actualCommit = (& git -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "Managed vcpkg checkout commit could not be read."
+    }
+    if ($actualCommit -cne $configuration.commit)
+    {
+        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+            "-c",
+            "safe.directory=$toolRoot",
+            "-C",
+            $toolRoot,
+            "fetch",
+            "--filter=blob:none",
+            "origin",
+            $configuration.commit
+        ) -WorkingDirectory $repositoryRoot
+        Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
+            "-c",
+            "safe.directory=$toolRoot",
+            "-C",
+            $toolRoot,
+            "checkout",
+            "--detach",
+            $configuration.commit
+        ) -WorkingDirectory $repositoryRoot
+    }
+
+    $actualCommit = (& git -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $configuration.commit)
+    {
+        throw "Managed vcpkg checkout does not match the pinned commit."
+    }
+
+    $metadataPath = Join-Path $toolRoot "scripts\vcpkg-tool-metadata.txt"
+    $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-StringData
+    if ($metadata.VCPKG_TOOL_RELEASE_TAG -cne $configuration.release)
+    {
+        throw "Managed vcpkg tool release does not match the pinned release."
+    }
+    if ($metadata.VCPKG_TOOL_SOURCE_SHA -cne $configuration.sourceSha512)
+    {
+        throw "Managed vcpkg tool source hash does not match the pinned hash."
+    }
+
+    if (-not (Test-VcpkgExecutable))
+    {
+        $bootstrapPath = Join-Path $toolRoot "bootstrap-vcpkg.bat"
+        Invoke-CheckedProcess -FilePath $bootstrapPath -ArgumentList @("-disableMetrics") -WorkingDirectory $toolRoot
+    }
+    if (-not (Test-VcpkgExecutable))
+    {
+        throw "Bootstrapped vcpkg executable does not match the pinned version and hash."
+    }
+
+    $vcpkgPath = Join-Path $toolRoot "vcpkg.exe"
+    $env:VCPKG_DISABLE_METRICS = "1"
+    Invoke-CheckedProcess -FilePath $vcpkgPath -ArgumentList @(
+        "install",
+        "--x-manifest-root=$thirdPartyRoot",
+        "--x-install-root=$installedRoot",
+        "--triplet=x64-windows"
     ) -WorkingDirectory $repositoryRoot
-    Invoke-CheckedProcess -FilePath "git" -ArgumentList @(
-        "-c",
-        "safe.directory=$toolRoot",
-        "-C",
-        $toolRoot,
-        "checkout",
-        "--detach",
-        $configuration.commit
-    ) -WorkingDirectory $repositoryRoot
 }
 
-$actualCommit = (& git -c "safe.directory=$toolRoot" -C $toolRoot rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $configuration.commit)
+try
 {
-    throw "Managed vcpkg checkout does not match the pinned commit."
-}
+    if ($rootMode)
+    {
+        if (Test-Path -LiteralPath $finalDependencyRoot -PathType Container)
+        {
+            if (-not (Test-CompletedDependencyRoot))
+            {
+                throw "Published Dependency Root does not match its immutable completion marker."
+            }
+            return
+        }
 
-$metadataPath = Join-Path $toolRoot "scripts\vcpkg-tool-metadata.txt"
-$metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-StringData
-if ($metadata.VCPKG_TOOL_RELEASE_TAG -ne $configuration.release)
-{
-    throw "Managed vcpkg tool release does not match the pinned release."
-}
-if ($metadata.VCPKG_TOOL_SOURCE_SHA -ne $configuration.sourceSha512)
-{
-    throw "Managed vcpkg tool source hash does not match the pinned hash."
-}
+        $stagingDependencyRoot = Join-Path (Split-Path -Parent $finalDependencyRoot) `
+            ".$DependencyRootId.staging.$([Guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $stagingDependencyRoot | Out-Null
+        $toolRoot = Join-Path $stagingDependencyRoot "Tool\vcpkg"
+        $installedRoot = Join-Path $stagingDependencyRoot "Installed"
+    }
 
-if (-not (Test-VcpkgExecutable))
-{
-    $bootstrapPath = Join-Path $toolRoot "bootstrap-vcpkg.bat"
-    Invoke-CheckedProcess -FilePath $bootstrapPath -ArgumentList @("-disableMetrics") -WorkingDirectory $toolRoot
-}
+    Invoke-VcpkgRestore
 
-if (-not (Test-VcpkgExecutable))
-{
-    throw "Bootstrapped vcpkg executable does not match the pinned version and hash."
-}
+    if ($rootMode)
+    {
+        $markerPath = Join-Path $stagingDependencyRoot "CueDependencyRoot.complete.json"
+        $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes($expectedMarker)
+        $markerStream = [IO.File]::Open(
+            $markerPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None)
+        try
+        {
+            $markerStream.Write($markerBytes, 0, $markerBytes.Length)
+            $markerStream.Flush($true)
+        }
+        finally
+        {
+            $markerStream.Dispose()
+        }
 
-$vcpkgPath = Join-Path $toolRoot "vcpkg.exe"
-$installedRoot = Join-Path $thirdPartyRoot "vcpkg_installed"
-$env:VCPKG_DISABLE_METRICS = "1"
-Invoke-CheckedProcess -FilePath $vcpkgPath -ArgumentList @(
-    "install",
-    "--x-manifest-root=$thirdPartyRoot",
-    "--x-install-root=$installedRoot",
-    "--triplet=x64-windows"
-) -WorkingDirectory $repositoryRoot
+        Move-Item -LiteralPath $stagingDependencyRoot -Destination $finalDependencyRoot
+        $stagingDependencyRoot = $null
+        $toolRoot = Join-Path $finalDependencyRoot "Tool\vcpkg"
+        $installedRoot = Join-Path $finalDependencyRoot "Installed"
+        if (-not (Test-CompletedDependencyRoot))
+        {
+            throw "Published Dependency Root failed post-publish validation."
+        }
+    }
+}
+finally
+{
+    if ($null -ne $stagingDependencyRoot -and (Test-Path -LiteralPath $stagingDependencyRoot -PathType Container))
+    {
+        [IO.Directory]::Delete($stagingDependencyRoot, $true)
+    }
+    if ($null -ne $dependencyLease)
+    {
+        $dependencyLease.Dispose()
+    }
+}

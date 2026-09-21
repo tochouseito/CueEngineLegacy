@@ -72,7 +72,10 @@ jobs:
 
             - name: Restore dependencies
               shell: pwsh
-              run: ./Tools/Dependencies/RestoreVcpkg.ps1
+              run: |
+                  ./Tools/Dependencies/RestoreVcpkg.ps1 `
+                      -ToolRoot "${{ github.workspace }}\ThirdParty\.tools\vcpkg" `
+                      -InstallRoot "${{ github.workspace }}\ThirdParty\vcpkg_installed"
 
             - name: Configure
               run: cmake --preset windows-vs2026
