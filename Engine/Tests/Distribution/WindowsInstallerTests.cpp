@@ -1173,9 +1173,10 @@ void test_registry_recovery_rejects_multiple_pending_operations(const cue::Asser
             evidenceCountBefore);
 }
 
-/// @brief 指定Uninstall StageのRegistry Recoveryで最後の有効Payloadを保護することを検証する
+/// @brief 指定Uninstall Stageで代替Versionが消失しても最後の有効Payloadを保護することを検証する
 void test_registry_recovery_protects_last_payload_during_uninstall_stage(
-    cue::distribution::InstallOperationStage a_stage, const cue::AssertContext &a_assertContext)
+    cue::distribution::InstallOperationStage a_stage, bool a_corruptRegistry,
+    const cue::AssertContext &a_assertContext)
 {
     TemporaryRoot temporary;
     const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
@@ -1232,7 +1233,10 @@ void test_registry_recovery_protects_last_payload_during_uninstall_stage(
         require(MoveFileExW(extended_path(targetRoot).c_str(), extended_path(retainedPayload).c_str(),
                             MOVEFILE_WRITE_THROUGH) != FALSE);
     }
-    write_text(installRoot / L"State" / L"InstalledVersions.json", "");
+    if (a_corruptRegistry)
+    {
+        write_text(installRoot / L"State" / L"InstalledVersions.json", "");
+    }
 
     cue::distribution::WindowsInstalledVersionRequest uninstallRequest{utf8_path(installRoot),
                                                                        installed.try_value()->versionDirectory};
@@ -1240,21 +1244,23 @@ void test_registry_recovery_protects_last_payload_during_uninstall_stage(
     require(uninstall.has_value());
     const auto workerExit = wait_process_id(uninstall.try_value()->workerProcessId, 60000U);
     require(workerExit.has_value() && *workerExit != 0U);
-    const cue::distribution::InstalledVersionsRegistry recovered = read_registry(installRoot, a_assertContext);
-    require(recovered.versions.empty());
+    const cue::distribution::InstalledVersionsRegistry resultingRegistry = read_registry(installRoot, a_assertContext);
+    require(a_corruptRegistry ? resultingRegistry.versions.empty() : resultingRegistry.versions.size() == 2U);
     require(path_exists(retainedPayload));
     require(path_exists(journalPath));
 }
 
-/// @brief Registry Recoveryの各Uninstall再開Stageで最後の有効Payloadを保護することを検証する
+/// @brief Registry RecoveryとCanonical RegistryのUninstall再開で最後の有効Payloadを保護することを検証する
 void test_registry_recovery_protects_last_payload_during_uninstall(const cue::AssertContext &a_assertContext)
 {
     test_registry_recovery_protects_last_payload_during_uninstall_stage(
-        cue::distribution::InstallOperationStage::Prepared, a_assertContext);
+        cue::distribution::InstallOperationStage::Prepared, true, a_assertContext);
     test_registry_recovery_protects_last_payload_during_uninstall_stage(
-        cue::distribution::InstallOperationStage::RemovalBlocked, a_assertContext);
+        cue::distribution::InstallOperationStage::RemovalBlocked, true, a_assertContext);
     test_registry_recovery_protects_last_payload_during_uninstall_stage(
-        cue::distribution::InstallOperationStage::VersionQuarantined, a_assertContext);
+        cue::distribution::InstallOperationStage::VersionQuarantined, true, a_assertContext);
+    test_registry_recovery_protects_last_payload_during_uninstall_stage(
+        cue::distribution::InstallOperationStage::Prepared, false, a_assertContext);
 }
 
 /// @brief Read-only属性を持つPayloadとWorkerを属性保持したままInstallできることを検証する

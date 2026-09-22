@@ -3197,13 +3197,21 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
             return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
                                                             "Installed Versions Registry changed before Uninstall"));
         }
-        const auto replacement =
-            std::ranges::find_if(registry.versions,
-                                 [&a_journal](const InstalledVersionEntry &a_entry)
-                                 {
-                                     return a_entry.directoryName != a_journal.target->directoryName &&
-                                            a_entry.state == InstalledVersionState::Selectable;
-                                 });
+        auto replacement = registry.versions.end();
+        for (auto candidate = registry.versions.begin(); candidate != registry.versions.end(); ++candidate)
+        {
+            if (candidate->directoryName == a_journal.target->directoryName ||
+                candidate->state != InstalledVersionState::Selectable)
+            {
+                continue;
+            }
+            auto validated = read_installed_version(a_installRoot, candidate->directoryName, false, a_assertContext);
+            if (validated)
+            {
+                replacement = candidate;
+                break;
+            }
+        }
         if (replacement == registry.versions.end())
         {
             return cue::Result<void>::failure(install_error(a_assertContext,
@@ -3299,7 +3307,7 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     return cue::Result<void>::success();
 }
 
-/// @brief Uninstallの全再開Stageで代替Selectable Versionが残ることを確認する
+/// @brief Uninstallの全再開Stageで証拠再検証済みの代替Selectable Versionが残ることを確認する
 [[nodiscard]] cue::Result<void> require_uninstall_replacement(
     const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
     const cue::AssertContext &a_assertContext) noexcept
@@ -3313,20 +3321,21 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
                                      "Installed Versions Registry is unavailable during Uninstall resume")
                      : std::move(*snapshot.try_error()));
     }
-    const bool hasReplacement =
-        std::ranges::any_of(snapshot.try_value()->registry->versions,
-                            [&a_journal](const InstalledVersionEntry &a_entry) noexcept
-                            {
-                                return a_entry.directoryName != a_journal.target->directoryName &&
-                                       a_entry.state == InstalledVersionState::Selectable;
-                            });
-    if (!hasReplacement)
+    for (const InstalledVersionEntry &entry : snapshot.try_value()->registry->versions)
     {
-        return cue::Result<void>::failure(install_error(a_assertContext,
-                                                        DistributionError::InstalledVersionProtected,
-                                                        "The last valid Installed Version cannot be removed"));
+        if (entry.directoryName == a_journal.target->directoryName || entry.state != InstalledVersionState::Selectable)
+        {
+            continue;
+        }
+        auto replacement = read_installed_version(a_installRoot, entry.directoryName, false, a_assertContext);
+        if (replacement)
+        {
+            return cue::Result<void>::success();
+        }
     }
-    return cue::Result<void>::success();
+    return cue::Result<void>::failure(install_error(a_assertContext,
+                                                    DistributionError::InstalledVersionProtected,
+                                                    "The last valid Installed Version cannot be removed"));
 }
 
 /// @brief Uninstall JournalをPendingRemoval、Quarantine、Registry削除の順で冪等再開する

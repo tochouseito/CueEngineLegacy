@@ -354,6 +354,8 @@ Journal削除だけを再実行する。
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
 - Registry Recoveryが未完了Uninstall対象を除外した結果、別のSelectable Versionを再構築できない場合は、
   Journal Stageや対象Entryの有無にかかわらず最後の有効Payloadを削除しない
+- 代替Selectable VersionはRegistry Entryだけを信用せず、Manifest、Payload／Probe Marker、Worker証拠まで
+  起動時と同じ基準で再検証してからUninstallを続行する
 - `workerPublished` StageとWorker完了MarkerがJournalのWorker Identity／Digestに一致しないVersionはSelectableにせず、
   そのWorkerへRollback／Uninstallを委譲しない
 - Worker IDはManifestの検証済みIdentity／Inventoryから導出する64文字lowercase SHA-256 hexだけを許可し、
