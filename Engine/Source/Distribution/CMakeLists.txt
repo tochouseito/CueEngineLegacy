@@ -5,6 +5,7 @@ target_sources(
     PRIVATE
         Private/Error.cpp
         Private/Identity.cpp
+        Private/InstallState.cpp
         Private/Manifest.cpp
         Private/Publisher.cpp
         Private/Sha256.cpp
@@ -15,6 +16,7 @@ target_sources(
         FILES
             Public/Cue/Distribution/Error.h
             Public/Cue/Distribution/Identity.h
+            Public/Cue/Distribution/InstallState.h
             Public/Cue/Distribution/Manifest.h
             Public/Cue/Distribution/Publisher.h
 )

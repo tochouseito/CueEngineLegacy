@@ -35,7 +35,12 @@ enum class DistributionError : std::int64_t
     PlatformOperationFailed = 18,
     BuildFailed = 19,
     PublishConflict = 20,
-    BundleValidationFailed = 21
+    BundleValidationFailed = 21,
+    InvalidInstallState = 22,
+    UnsupportedInstallSchema = 23,
+    NonCanonicalInstallState = 24,
+    InstallConflict = 25,
+    InstallRecoveryBlocked = 26
 };
 
 /// @brief Distribution Domainの回復可能Errorを生成する
