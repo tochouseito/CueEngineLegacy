@@ -205,6 +205,7 @@ struct PublisherState final
     std::atomic<bool> invalidPortableExecutable = false;
     std::atomic<bool> oversizedRuntimePeImage = false;
     std::atomic<bool> oversizedRuntimePeInventory = false;
+    std::atomic<bool> runtimeHostOnlyInventoryOverflow = false;
     std::atomic<bool> readerLeaseActive = false;
     std::atomic<bool> artifactReadWithoutLease = false;
     std::atomic<bool> packageWriteWithLease = false;
@@ -553,6 +554,8 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         const std::vector<std::byte> pdbBytes = text_bytes("test-debug-symbols");
         const std::vector<std::byte> metadataBytes = text_bytes("{\"schemaVersion\":1}\n");
         const bool hasOversizedInventory = m_state->oversizedRuntimePeInventory.load(std::memory_order_acquire);
+        const bool hasRuntimeHostOnlyOverflow =
+            m_state->runtimeHostOnlyInventoryOverflow.load(std::memory_order_acquire);
         auto modulePayload = cue::package::PackageFilePayload::create(
             cue::package::PackageFileRole::GameModule, "CueGameModule.dll", moduleBytes, *m_assertContext);
         auto metadataPayload =
@@ -578,7 +581,9 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
             !write_file(versionDirectory / L"CueRuntimeHost.exe", runtimeHostBytes) ||
             !write_file(versionDirectory / L"CueGameModule.metadata.json", metadataBytes) ||
             (hasOversizedInventory && (!write_file(versionDirectory / L"RuntimeDependencyA.dll", moduleBytes) ||
-                                       !write_file(versionDirectory / L"RuntimeDependencyB.dll", moduleBytes))))
+                                       !write_file(versionDirectory / L"RuntimeDependencyB.dll", moduleBytes))) ||
+            (hasRuntimeHostOnlyOverflow &&
+             !write_file(versionDirectory / L"RuntimeDependencyC.dll", moduleBytes)))
         {
             cue::ErrorCode code = cue::ErrorCode::create(m_assertContext->fatal_handler(), "Cue.Package.Test", 1);
             return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(cue::Error::create(
@@ -592,17 +597,25 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         const std::uint64_t moduleSize = m_state->oversizedRuntimePeImage.load(std::memory_order_acquire)
                                              ? cue::package::k_maximumRuntimePeImageBytes + 1U
                                              : moduleBytes.size();
+        const std::uint64_t runtimeHostSize = hasRuntimeHostOnlyOverflow
+                                                  ? cue::package::k_maximumRuntimePeImageBytes
+                                                  : runtimeHostBytes.size();
         std::vector<cue::BuildArtifactFile> files = {{"CueGameModule.dll", moduleSize, std::move(moduleHash)},
                                                      {"CueGameModule.pdb", pdbBytes.size(), std::string(64U, 'a')},
                                                      {"CueGameModule.metadata.json", metadataBytes.size(),
                                                       std::string(metadataPayload.try_value()->entry().sha256())},
-                                                     {"CueRuntimeHost.exe", runtimeHostBytes.size(),
+                                                     {"CueRuntimeHost.exe", runtimeHostSize,
                                                       std::string(runtimeHostPayload.try_value()->entry().sha256())}};
         if (hasOversizedInventory)
         {
             const std::string dependencyHash(modulePayload.try_value()->entry().sha256());
             files.push_back({"RuntimeDependencyA.dll", cue::package::k_maximumRuntimePeImageBytes, dependencyHash});
             files.push_back({"RuntimeDependencyB.dll", cue::package::k_maximumRuntimePeImageBytes, dependencyHash});
+        }
+        if (hasRuntimeHostOnlyOverflow)
+        {
+            files.push_back({"RuntimeDependencyC.dll", cue::package::k_maximumRuntimePeImageBytes,
+                             std::string(modulePayload.try_value()->entry().sha256())});
         }
         auto inventory = cue::BuildArtifactInventory::create(a_plan, artifactId, std::move(files), *m_assertContext);
         if (!inventory)
@@ -977,6 +990,19 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
         return false;
     }
     publisher.oversizedRuntimePeInventory.store(false, std::memory_order_release);
+    publisher.runtimeHostOnlyInventoryOverflow.store(true, std::memory_order_release);
+    if (!require(service->retry("19234567-89ab-4cde-8f01-23456789abcd", {1U, 0U, 0U}, std::string(k_projectId),
+                                *runtimeData.try_value()) &&
+                 service->wait_for_package()))
+    {
+        return false;
+    }
+    if (!require(service->snapshot().state == cue::package::PackageWorkflowState::Failed &&
+                 publisher.artifactReadCalls.load(std::memory_order_acquire) > artifactReadsBeforeResourceLimits))
+    {
+        return false;
+    }
+    publisher.runtimeHostOnlyInventoryOverflow.store(false, std::memory_order_release);
     publisher.corruptInventory.store(true, std::memory_order_release);
     if (!require(service->retry("21234567-89ab-4cde-8f01-23456789abcd", {1U, 0U, 0U}, std::string(k_projectId),
                                 *runtimeData.try_value()) &&

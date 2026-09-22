@@ -6,6 +6,7 @@
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
+#include <Cue/Platform/Process.h>
 
 #include "WindowsDirectoryAncestryLock.h"
 #include "WindowsStablePath.h"
@@ -1782,13 +1783,19 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
         const DWORD renameError = GetLastError();
         require(renameError == ERROR_SHARING_VIOLATION || renameError == ERROR_ACCESS_DENIED);
         {
+            cue::ChildProcessCancellation buildCancellation;
             auto buildLease = cue::distribution::acquire_windows_installed_source_build_lease(
-                *executionLease.try_value(), a_assertContext);
-            require(buildLease.has_value());
+                *executionLease.try_value(), buildCancellation, a_assertContext);
+            require(buildLease.has_value() && buildLease.try_value()->has_value());
             HANDLE sourceWriter = CreateFileW(extended_path(installedSource).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             require(sourceWriter == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
         }
+        cue::ChildProcessCancellation cancelledBuild;
+        cancelledBuild.request_cancel();
+        auto cancelledBuildLease = cue::distribution::acquire_windows_installed_source_build_lease(
+            *executionLease.try_value(), cancelledBuild, a_assertContext);
+        require(cancelledBuildLease.has_value() && !cancelledBuildLease.try_value()->has_value());
         HANDLE sourceWriter = CreateFileW(extended_path(installedSource).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         require(sourceWriter != INVALID_HANDLE_VALUE);

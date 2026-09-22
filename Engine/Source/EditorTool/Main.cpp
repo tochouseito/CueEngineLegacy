@@ -236,20 +236,20 @@ class InstalledSourceBuildInputLeaseProvider final : public cue::BuildInputLease
             return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(nullptr);
         }
         auto acquired = cue::distribution::acquire_windows_installed_source_build_lease(
-            *m_executionLease, *m_assertContext);
+            *m_executionLease, a_cancellation, *m_assertContext);
         if (!acquired)
         {
             return cue::Result<std::unique_ptr<cue::BuildInputLease>>::failure(
                 std::move(*acquired.try_error()));
         }
-        if (a_cancellation.is_cancel_requested())
+        if (!acquired.try_value()->has_value() || a_cancellation.is_cancel_requested())
         {
             return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(nullptr);
         }
         try
         {
             std::unique_ptr<cue::BuildInputLease> lease =
-                std::make_unique<InstalledSourceBuildInputLease>(std::move(*acquired.try_value()));
+                std::make_unique<InstalledSourceBuildInputLease>(std::move(**acquired.try_value()));
             return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(std::move(lease));
         }
         catch (...)

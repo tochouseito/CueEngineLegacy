@@ -4,6 +4,7 @@
 #include <Cue/Foundation/Result.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,6 +12,7 @@
 namespace cue
 {
 class AssertContext;
+class ChildProcessCancellation;
 }
 
 namespace cue::distribution
@@ -205,8 +207,9 @@ class WindowsInstalledSourceBuildLease final
     ~WindowsInstalledSourceBuildLease() noexcept;
 
   private:
-    friend Result<WindowsInstalledSourceBuildLease> acquire_windows_installed_source_build_lease(
+    friend Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installed_source_build_lease(
         const WindowsInstalledVersionExecutionLease &a_executionLease,
+        const ChildProcessCancellation &a_cancellation,
         const AssertContext &a_assertContext) noexcept;
     /// @brief 再検証済みVersion Payloadを固定するHandle群を所有する
     explicit WindowsInstalledSourceBuildLease(std::vector<std::uintptr_t> a_handles) noexcept;
@@ -243,9 +246,12 @@ class WindowsInstalledSourceBuildLease final
 [[nodiscard]] Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_execution_lease(
     const WindowsInheritedVersionExecutionLeaseRequest &a_request, const AssertContext &a_assertContext) noexcept;
 
-/// @brief Installed Version Inventoryを再検証し、一回のBuild完了まで全Payloadを置換不能にする
-[[nodiscard]] Result<WindowsInstalledSourceBuildLease> acquire_windows_installed_source_build_lease(
+/// @brief Installed Version Inventoryを取消可能に再検証し、一回のBuild完了まで全Payloadを置換不能にする
+///
+/// 取消が検証中に観測された場合は成功した空Optionalを返す。
+[[nodiscard]] Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installed_source_build_lease(
     const WindowsInstalledVersionExecutionLease &a_executionLease,
+    const ChildProcessCancellation &a_cancellation,
     const AssertContext &a_assertContext) noexcept;
 
 /// @brief 検証済みVersion外Workerへ回復可能Uninstall Transactionを委譲する

@@ -552,7 +552,8 @@ class PackageRunGuard final
     std::uint64_t totalBytes = 0U;
     for (const cue::BuildArtifactFile &file : a_files)
     {
-        if (file.relativePath == "CueGameModule.pdb" || file.relativePath == "CueGameModule.metadata.json")
+        if (file.relativePath == "CueGameModule.pdb" || file.relativePath == "CueGameModule.metadata.json" ||
+            file.relativePath == "CueRuntimeHost.exe")
         {
             continue;
         }
