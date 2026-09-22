@@ -211,6 +211,17 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(installBytes.has_value());
     auto installRead = read_install_operation_journal(*installBytes.try_value(), a_assertContext);
     require(installRead.has_value() && *installRead.try_value() == install);
+    std::string legacyInstallBytes = *installBytes.try_value();
+    constexpr std::string_view emptyWorkerEvidence =
+        ",\"workerExecutableDigest\":\"\",\"workerMarkerDigest\":\"\"";
+    const std::size_t legacyInstallEvidence = legacyInstallBytes.find(emptyWorkerEvidence);
+    require(legacyInstallEvidence != std::string::npos);
+    legacyInstallBytes.erase(legacyInstallEvidence, emptyWorkerEvidence.size());
+    auto legacyInstallRead = read_install_operation_journal(legacyInstallBytes, a_assertContext);
+    require(legacyInstallRead.has_value() && *legacyInstallRead.try_value() == install);
+    auto upgradedInstallBytes = write_install_operation_journal(*legacyInstallRead.try_value(), a_assertContext);
+    require(upgradedInstallBytes.has_value() && upgradedInstallBytes.try_value()->find(emptyWorkerEvidence) !=
+                                                   std::string::npos);
 
     InstallOperationJournal uninstall = install;
     uninstall.kind = InstallOperationKind::Uninstall;
@@ -220,6 +231,13 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(uninstallBytes.has_value());
     auto uninstallRead = read_install_operation_journal(*uninstallBytes.try_value(), a_assertContext);
     require(uninstallRead.has_value() && *uninstallRead.try_value() == uninstall);
+    std::string legacyUninstallBytes = *uninstallBytes.try_value();
+    const std::string uninstallWorkerEvidence =
+        ",\"workerExecutableDigest\":\"" + hash('7') + "\",\"workerMarkerDigest\":\"" + hash('8') + "\"";
+    const std::size_t legacyUninstallEvidence = legacyUninstallBytes.find(uninstallWorkerEvidence);
+    require(legacyUninstallEvidence != std::string::npos);
+    legacyUninstallBytes.erase(legacyUninstallEvidence, uninstallWorkerEvidence.size());
+    require(!read_install_operation_journal(legacyUninstallBytes, a_assertContext));
     uninstall.workerMarkerDigest.clear();
     require(!write_install_operation_journal(uninstall, a_assertContext));
 

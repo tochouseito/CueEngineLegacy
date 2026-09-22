@@ -105,9 +105,9 @@ Publisher Build IdentityとしてManifestへ記録する。生成Binaryは期待
 Size／SHA-256を検証し、`builtFromRevision`で固定Commitへ結び付ける。Source管理Payloadと生成Binaryの検証を
 同じ規則で代用しない。
 
-Manifest v1の共通Publisher Build Identityは通常Toolの`dynamic` CRT Linkageを記録する。Bootstrap Roleだけは
-同じIdentityの`crtLinkage`を`static`へ置換した固定例外としてPublisher Evidenceで検証し、他のTool Roleへ
-`static`を許可しない。Bootstrapが`/MT`で自己完結する契約はRoleから一意に導出する。
+Manifest v1の共通Publisher Build Identityは通常Toolの`dynamic` CRT Linkageを記録する。Bootstrap Roleと
+Install Worker Roleだけは同じIdentityの`crtLinkage`を`static`へ置換した固定例外としてPublisher Evidenceで
+検証し、他のTool Roleへ`static`を許可しない。両Roleが`/MT`で自己完結する契約はRoleから一意に導出する。
 
 Inventory生成後にHEAD、Index、Tracked／Untracked状態を再読込して開始時と変化していれば公開を拒否する。
 Repository Rootからの場当たり的な再帰Copyは行わず、検証済みRevision、`clean` Source State、Source
@@ -277,6 +277,11 @@ Memberとする。Reader／Workerは対応外Schema、未知Member、欠落Membe
 Quarantineし、Payload／Registryを推測で変更しない。意味変更と移行は専用Issueで新Schemaと明示Migrationを
 定義し、暗黙Upgradeしない。
 
+初期Journal v1 Writerが生成したWorker executable Digest／Worker完了Marker Digestを持たないCanonical Byte列は、
+`uninstall`以外に限って旧v1 LayoutとしてReaderが受理する。欠落Digestを必要とする`uninstall`はFail-closedで拒否し、
+受理した旧Layoutは読取りだけで書き換えず、次に正当なStage更新をAtomic Publishするとき現行v1 Layoutへ更新する。
+現行Writerは常に両Digest Memberを出力し、未知Member、順序違い、非Canonical表現を移行扱いにしない。
+
 `registryRecovery`はExpected Registry Generation ID／Revision、単一Version／Bundle Identity、単一Manifest
 Digestを持たない。
 代わりに`sourceRegistryEvidence`を`prepared`から必須とする。既存破損Fileは`kind: corrupt`、退避Evidence
@@ -356,7 +361,12 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Bundleの最初のEntry PointはEngine LibraryへLinkしないFirst-party `CueEngineBootstrap.exe`とし、
   `/MT`で自己完結させる。BootstrapはHost Architecture、VC++ Runtime、InstallerのInventoryを検査し、
   Runtimeが利用可能な場合だけ`CueEngineInstallerTool.exe`を起動する。BootstrapはCRT Security更新時に
-  再Build／再配布する。通常のEditor、Project Hub、RuntimeHost、Shipping Productは`/MD`を維持する
+  再Build／再配布する
+- Version外から自己Uninstallを継続するFirst-party `CueEngineInstallWorker.exe`と、その専用First-party依存閉包も
+  `/MT`でBuildする。Workerは可変な対象Version内のApplication-local CRT DLLをProcess起動時に解決せず、
+  Importを`KERNEL32.dll`と`ole32.dll`だけに限定し、Delay Importを持たない。VC++ RedistributableをWorker向けに
+  同梱せず、MSVC CRTのSecurity更新時はWorkerと静的依存閉包を再Build／再配布する。通常のEditor、Project Hub、
+  RuntimeHost、Installer、Shipping Productは`/MD`を維持する
 - Microsoft VC++ Redistributable BinaryをRepositoryまたはBundleへ同梱しない。将来同梱する場合は、
   正確なVersion、Microsoftの再配布条件、取得元、署名、Silent Install、Reboot、更新責任を提示し、
   User承認を得る

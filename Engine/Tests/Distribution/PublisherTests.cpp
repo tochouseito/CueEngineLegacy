@@ -90,11 +90,11 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 {
     using cue::distribution::DistributionArchitecture;
     using cue::distribution::DistributionFileRole;
-    cue::distribution::PublisherBuildIdentity bootstrapIdentity = a_identity;
-    bootstrapIdentity.crtLinkage = "static";
+    cue::distribution::PublisherBuildIdentity staticIdentity = a_identity;
+    staticIdentity.crtLinkage = "static";
     return {
         {DistributionFileRole::Bootstrap, "CueEngineBootstrap", "Bin/CueEngineBootstrap.exe", "Release",
-         a_identity.builtFromRevision, bootstrapIdentity, DistributionArchitecture::X64, 10U, hash('1')},
+         a_identity.builtFromRevision, staticIdentity, DistributionArchitecture::X64, 10U, hash('1')},
         {DistributionFileRole::ProjectHub, "CueProjectHubTool", "Bin/CueProjectHubTool.exe", "Release",
          a_identity.builtFromRevision, a_identity, DistributionArchitecture::X64, 10U, hash('2')},
         {DistributionFileRole::Editor, "CueEditorTool", "Bin/CueEditorTool.exe", "Release",
@@ -104,7 +104,7 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
         {DistributionFileRole::Installer, "CueEngineInstallerTool", "Bin/CueEngineInstallerTool.exe", "Release",
          a_identity.builtFromRevision, a_identity, DistributionArchitecture::X64, 10U, hash('5')},
         {DistributionFileRole::InstallWorker, "CueEngineInstallWorker", "Bin/CueEngineInstallWorker.exe", "Release",
-         a_identity.builtFromRevision, a_identity, DistributionArchitecture::X64, 10U, hash('6')},
+         a_identity.builtFromRevision, staticIdentity, DistributionArchitecture::X64, 10U, hash('6')},
     };
 }
 
@@ -227,6 +227,11 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
 
     tools = make_tools(identity);
     tools[1].publisherBuildIdentity.crtLinkage = "static";
+    require(!cue::distribution::make_distribution_publisher_inventory(sources, tools, identity.builtFromRevision,
+                                                                      identity, a_assertContext));
+
+    tools = make_tools(identity);
+    tools.back().publisherBuildIdentity.crtLinkage = "dynamic";
     require(!cue::distribution::make_distribution_publisher_inventory(sources, tools, identity.builtFromRevision,
                                                                       identity, a_assertContext));
 

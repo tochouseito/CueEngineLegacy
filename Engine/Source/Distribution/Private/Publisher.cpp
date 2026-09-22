@@ -189,7 +189,8 @@ constexpr std::array k_expectedTools = {
     const cue::distribution::PublisherBuildIdentity &a_publisherIdentity)
 {
     cue::distribution::PublisherBuildIdentity expected = a_publisherIdentity;
-    if (a_role == cue::distribution::DistributionFileRole::Bootstrap)
+    if (a_role == cue::distribution::DistributionFileRole::Bootstrap ||
+        a_role == cue::distribution::DistributionFileRole::InstallWorker)
     {
         expected.crtLinkage = "static";
     }
