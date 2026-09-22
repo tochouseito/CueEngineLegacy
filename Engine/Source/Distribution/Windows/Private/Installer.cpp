@@ -2120,6 +2120,32 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
 
     if (journal.stage == InstallOperationStage::Prepared)
     {
+        std::size_t incompleteOperationCount = 0U;
+        for (const auto &current : *journals.try_value())
+        {
+            if (current.first.operationId == journal.operationId)
+            {
+                continue;
+            }
+            if (current.first.kind == InstallOperationKind::Rollback)
+            {
+                return cue::Result<InstalledVersionsRegistry>::failure(
+                    install_error(a_assertContext, DistributionError::InstallRecoveryBlocked,
+                                  "Registry Recovery cannot infer an incomplete Rollback selection"));
+            }
+            if (current.first.kind == InstallOperationKind::RegistryRecovery || !current.first.target)
+            {
+                return cue::Result<InstalledVersionsRegistry>::failure(
+                    install_error(a_assertContext, DistributionError::InstallRecoveryBlocked,
+                                  "Registry Recovery encountered a conflicting Journal"));
+            }
+            if (++incompleteOperationCount > 1U)
+            {
+                return cue::Result<InstalledVersionsRegistry>::failure(
+                    install_error(a_assertContext, DistributionError::InstallRecoveryBlocked,
+                                  "Multiple incomplete Install operations require explicit repair"));
+            }
+        }
         std::set<std::string> blockedDirectories;
         for (const auto &current : *journals.try_value())
         {

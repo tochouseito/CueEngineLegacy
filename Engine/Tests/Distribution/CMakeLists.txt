@@ -142,12 +142,17 @@ if(WIN32)
     )
     add_test(NAME Cue.Distribution.WindowsPublisher COMMAND CueDistributionWindowsPublisherTests)
     add_test(NAME Cue.Distribution.WindowsInstaller COMMAND CueDistributionWindowsInstallerTests)
+    add_test(
+        NAME Cue.Distribution.WindowsInstallerRecovery
+        COMMAND CueDistributionWindowsInstallerTests --registry-recovery
+    )
     list(
         APPEND
         cueDistributionTests
         Cue.Distribution.RestoreVcpkgContract
         Cue.Distribution.WindowsPublisher
         Cue.Distribution.WindowsInstaller
+        Cue.Distribution.WindowsInstallerRecovery
     )
 endif()
 
@@ -159,5 +164,9 @@ set_tests_properties(
 )
 
 if(WIN32)
-    set_tests_properties(Cue.Distribution.WindowsInstaller PROPERTIES TIMEOUT 240)
+    set_tests_properties(
+        Cue.Distribution.WindowsInstaller
+        Cue.Distribution.WindowsInstallerRecovery
+        PROPERTIES TIMEOUT 240
+    )
 endif()
