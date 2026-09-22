@@ -451,27 +451,36 @@ void ProjectHubPresenter::draw(bool a_canLaunchEditor) noexcept
                                            !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
         const bool createShortcut = canUseGlobalShortcuts && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
         const bool registerShortcut = canUseGlobalShortcuts && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
-        const std::span<const InstalledEngineVersionView> installedVersions = m_service->installed_engine_versions();
-        const InstalledEngineVersionView *selectedVersion = nullptr;
+        std::span<const InstalledEngineVersionView> installedVersions = m_service->installed_engine_versions();
+        const auto find_selected_version = [](std::span<const InstalledEngineVersionView> a_versions) noexcept
+            -> const InstalledEngineVersionView *
+        {
+            const auto selected = std::ranges::find_if(
+                a_versions, [](const InstalledEngineVersionView &a_version) { return a_version.isSelected; });
+            return selected == a_versions.end() ? nullptr : &*selected;
+        };
+        const InstalledEngineVersionView *selectedVersion = find_selected_version(installedVersions);
         if (!installedVersions.empty())
         {
-            const auto selectedVersionIterator = std::ranges::find_if(
-                installedVersions, [](const InstalledEngineVersionView &a_version) { return a_version.isSelected; });
-            if (selectedVersionIterator != installedVersions.end())
-            {
-                selectedVersion = &*selectedVersionIterator;
-            }
             const char *preview = selectedVersion == nullptr ? "選択されていません" : selectedVersion->displayName.c_str();
             ImGui::SetNextItemWidth(240.0F);
             if (ImGui::BeginCombo("Engine Version", preview))
             {
+                bool installedVersionsInvalidated = false;
                 for (const InstalledEngineVersionView &version : installedVersions)
                 {
                     ImGui::PushID(version.directoryName.c_str());
                     ImGui::BeginDisabled(!version.isAvailable);
-                    if (ImGui::Selectable(version.displayName.c_str(), version.isSelected))
+                    const bool wasSelected = ImGui::Selectable(version.displayName.c_str(), version.isSelected);
+                    ImGui::EndDisabled();
+                    if (!version.diagnostic.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     {
-                        Result<void> selected = m_service->select_installed_engine_version(version.directoryName);
+                        ImGui::SetTooltip("%s", version.diagnostic.c_str());
+                    }
+                    if (wasSelected)
+                    {
+                        std::string versionDirectory = version.directoryName;
+                        Result<void> selected = m_service->select_installed_engine_version(versionDirectory);
                         if (!selected)
                         {
                             set_error(*selected.try_error());
@@ -479,18 +488,23 @@ void ProjectHubPresenter::draw(bool a_canLaunchEditor) noexcept
                         else
                         {
                             m_installedEngineOperationRequest = InstalledEngineOperationRequest{
-                                InstalledEngineOperationKind::RollbackVersion, version.directoryName};
+                                InstalledEngineOperationKind::RollbackVersion, std::move(versionDirectory)};
                             set_status("Editorで使用するEngine Versionを変更しました。");
                         }
-                    }
-                    ImGui::EndDisabled();
-                    if (!version.diagnostic.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    {
-                        ImGui::SetTooltip("%s", version.diagnostic.c_str());
+                        installedVersionsInvalidated = true;
                     }
                     ImGui::PopID();
+                    if (installedVersionsInvalidated)
+                    {
+                        break;
+                    }
                 }
                 ImGui::EndCombo();
+                if (installedVersionsInvalidated)
+                {
+                    installedVersions = m_service->installed_engine_versions();
+                    selectedVersion = find_selected_version(installedVersions);
+                }
             }
             ImGui::SameLine();
         }

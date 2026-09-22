@@ -78,16 +78,32 @@ void compress_block(std::array<std::uint32_t, 8U> &a_state, std::span<const std:
 
 namespace cue::distribution_private
 {
-Sha256Digest compute_sha256(std::span<const std::byte> a_bytes) noexcept
+std::optional<Sha256Digest> compute_sha256_cancellable(
+    std::span<const std::byte> a_bytes, Sha256CancellationCallback a_cancellation,
+    const void *a_cancellationContext) noexcept
 {
+    constexpr std::size_t k_cancellationIntervalBytes = 1024U * 1024U;
     std::array<std::uint32_t, 8U> state = {
         0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU, 0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
     };
     std::size_t offset = 0U;
+    std::size_t nextCancellationCheck = 0U;
     while (a_bytes.size() - offset >= 64U)
     {
+        if (offset >= nextCancellationCheck)
+        {
+            if (a_cancellation != nullptr && a_cancellation(a_cancellationContext))
+            {
+                return std::nullopt;
+            }
+            nextCancellationCheck = offset + k_cancellationIntervalBytes;
+        }
         compress_block(state, std::span<const std::byte, 64U>(a_bytes.data() + offset, 64U));
         offset += 64U;
+    }
+    if (a_cancellation != nullptr && a_cancellation(a_cancellationContext))
+    {
+        return std::nullopt;
     }
 
     std::array<std::byte, 128U> tail{};
@@ -115,6 +131,11 @@ Sha256Digest compute_sha256(std::span<const std::byte> a_bytes) noexcept
         digest[index * 4U + 3U] = static_cast<std::uint8_t>(state[index]);
     }
     return digest;
+}
+
+Sha256Digest compute_sha256(std::span<const std::byte> a_bytes) noexcept
+{
+    return *compute_sha256_cancellable(a_bytes, nullptr, nullptr);
 }
 
 std::string sha256_text(std::string_view a_text)

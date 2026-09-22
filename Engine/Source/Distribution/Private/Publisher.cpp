@@ -234,6 +234,39 @@ Result<std::string> compute_distribution_sha256(std::span<const std::byte> a_byt
     }
 }
 
+Result<std::optional<std::string>> compute_distribution_sha256_cancellable(
+    std::span<const std::byte> a_bytes, DistributionHashCancellationCallback a_cancellation,
+    const void *a_cancellationContext, const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        constexpr char hexadecimal[] = "0123456789abcdef";
+        const std::optional<distribution_private::Sha256Digest> digest =
+            distribution_private::compute_sha256_cancellable(a_bytes, a_cancellation, a_cancellationContext);
+        if (!digest.has_value())
+        {
+            return Result<std::optional<std::string>>::success(std::nullopt);
+        }
+        std::string result;
+        result.reserve(digest->size() * 2U);
+        for (const std::uint8_t value : *digest)
+        {
+            result.push_back(hexadecimal[value >> 4U]);
+            result.push_back(hexadecimal[value & 0x0fU]);
+        }
+        return Result<std::optional<std::string>>::success(
+            std::optional<std::string>(std::move(result)));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
 Result<DistributionFileRole> classify_distribution_source_path(std::string_view a_relativePath,
                                                                const AssertContext &a_assertContext) noexcept
 {

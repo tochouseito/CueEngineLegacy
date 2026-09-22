@@ -619,6 +619,31 @@ struct ValidatedInstallWorker final
     return cue::distribution::compute_distribution_sha256(a_bytes, a_assertContext);
 }
 
+/// @brief Opaque ContextからInstalled Source検証の取消状態を返す
+[[nodiscard]] bool is_hash_cancel_requested(const void *a_context) noexcept
+{
+    return static_cast<const cue::ChildProcessCancellation *>(a_context)->is_cancel_requested();
+}
+
+/// @brief Byte列を1 MiB単位で取消可能なSHA-256へ変換する
+[[nodiscard]] cue::Result<std::optional<std::string>> hash_bytes_cancellable(
+    std::span<const std::byte> a_bytes, const cue::ChildProcessCancellation *a_cancellation,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    if (a_cancellation == nullptr)
+    {
+        auto digest = hash_bytes(a_bytes, a_assertContext);
+        if (!digest)
+        {
+            return cue::Result<std::optional<std::string>>::failure(std::move(*digest.try_error()));
+        }
+        return cue::Result<std::optional<std::string>>::success(
+            std::optional<std::string>(std::move(*digest.try_value())));
+    }
+    return cue::distribution::compute_distribution_sha256_cancellable(
+        a_bytes, &is_hash_cancel_requested, a_cancellation, a_assertContext);
+}
+
 /// @brief File全体を読んでSHA-256を返す
 [[nodiscard]] cue::Result<std::string> hash_file(const std::filesystem::path &a_path, std::uint64_t a_maximumBytes,
                                                  const cue::AssertContext &a_assertContext) noexcept
@@ -1020,8 +1045,18 @@ struct ValidatedInstallWorker final
                 install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                               "Bundle Inventory file size does not match"));
         }
-        auto digest = hash_bytes(*bytes.try_value(), a_assertContext);
-        if (!digest || *digest.try_value() != file.sha256)
+        auto digest = hash_bytes_cancellable(*bytes.try_value(), a_cancellation, a_assertContext);
+        if (!digest)
+        {
+            return cue::Result<void>::failure(std::move(*digest.try_error()));
+        }
+        if (!digest.try_value()->has_value())
+        {
+            return cue::Result<void>::failure(
+                install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                              "Installed Source inventory hashing was cancelled"));
+        }
+        if (**digest.try_value() != file.sha256)
         {
             return cue::Result<void>::failure(
                 install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
@@ -1150,7 +1185,7 @@ struct ValidatedInstallWorker final
     {
         return cue::Result<BundleSnapshot>::failure(std::move(*validated.try_error()));
     }
-    auto manifestDigest = hash_bytes(*bytes.try_value(), a_assertContext);
+    auto manifestDigest = hash_bytes_cancellable(*bytes.try_value(), a_cancellation, a_assertContext);
     auto workerId = cue::distribution::make_install_worker_id(*manifest.try_value(), a_assertContext);
     if (!manifestDigest || !workerId)
     {
@@ -1167,7 +1202,13 @@ struct ValidatedInstallWorker final
             install_error(a_assertContext, cue::distribution::DistributionError::MissingRequiredPayload,
                           "Bundle Install Worker is missing"));
     }
-    BundleSnapshot result{std::move(*manifest.try_value()), manifestBytes, std::move(*manifestDigest.try_value()),
+    if (!manifestDigest.try_value()->has_value())
+    {
+        return cue::Result<BundleSnapshot>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source Manifest hashing was cancelled"));
+    }
+    BundleSnapshot result{std::move(*manifest.try_value()), manifestBytes, std::move(**manifestDigest.try_value()),
                           *worker, std::move(*workerId.try_value())};
     return cue::Result<BundleSnapshot>::success(std::move(result));
 }
@@ -4967,15 +5008,16 @@ Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installe
         {
             return cancelled();
         }
+        std::vector<std::uintptr_t> ancestryHandles = ancestry.try_value()->take_handles();
         std::vector<HandleOwner> lockedHandles;
-        lockedHandles.reserve(expected.try_value()->bundle.manifest.files.size() + 32U);
-        for (const std::uintptr_t handle : ancestry.try_value()->take_handles())
+        lockedHandles.reserve(expected.try_value()->bundle.manifest.files.size() + ancestryHandles.size() + 1U);
+        for (const std::uintptr_t handle : ancestryHandles)
         {
-            if (a_cancellation.is_cancel_requested())
-            {
-                return cancelled();
-            }
             lockedHandles.emplace_back(reinterpret_cast<HANDLE>(handle));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
         }
         const auto lock_directory = [&](const std::filesystem::path &a_path) -> bool
         {
