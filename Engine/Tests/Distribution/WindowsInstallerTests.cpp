@@ -724,7 +724,15 @@ void test_registry_recovery_rejects_multiple_pending_operations(const cue::Asser
         write_text(journalPaths[index], *journalBytes.try_value());
         journalBytesBefore[index] = read_bytes(journalPaths[index]);
     }
-    write_text(installRoot / L"State" / L"InstalledVersions.json", "");
+    const std::filesystem::path registryPath = installRoot / L"State" / L"InstalledVersions.json";
+    const std::filesystem::path journalsRoot = installRoot / L"Operations" / L"Journals";
+    const std::filesystem::path evidenceRoot = installRoot / L"Operations" / L"Evidence";
+    write_text(registryPath, "");
+    const std::vector<std::byte> registryBytesBefore = read_bytes(registryPath);
+    const auto journalCountBefore = std::distance(std::filesystem::directory_iterator(journalsRoot),
+                                                  std::filesystem::directory_iterator{});
+    const auto evidenceCountBefore = std::distance(std::filesystem::directory_iterator(evidenceRoot),
+                                                   std::filesystem::directory_iterator{});
 
     auto blocked = cue::distribution::install_windows_source_sdk(request, a_assertContext);
     require(!blocked);
@@ -734,6 +742,11 @@ void test_registry_recovery_rejects_multiple_pending_operations(const cue::Asser
     {
         require(read_bytes(journalPaths[index]) == journalBytesBefore[index]);
     }
+    require(read_bytes(registryPath) == registryBytesBefore);
+    require(std::distance(std::filesystem::directory_iterator(journalsRoot),
+                          std::filesystem::directory_iterator{}) == journalCountBefore);
+    require(std::distance(std::filesystem::directory_iterator(evidenceRoot),
+                          std::filesystem::directory_iterator{}) == evidenceCountBefore);
 }
 
 /// @brief Read-only属性を持つPayloadとWorkerを属性保持したままInstallできることを検証する
