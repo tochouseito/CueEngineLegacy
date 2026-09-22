@@ -74,6 +74,8 @@ struct ShippingBuildProvenance final
     SourceInventoryIdentity gameSource;
     std::string vcpkgManifestHash;
     std::string vcpkgBaselineHash;
+    std::string distributionSourceInventoryHash;
+    std::string publisherBuildIdentityDigest;
 
     [[nodiscard]] bool operator==(const ShippingBuildProvenance &) const noexcept = default;
 };
@@ -1462,7 +1464,8 @@ void append_xml_double_quoted_attribute(std::string &a_output, std::string_view 
 /// @brief Project Binary Treeが実際に選択したCMake、MSVC、Windows SDKを検証する
 [[nodiscard]] cue::Result<std::optional<ShippingToolchainIdentity>> collect_shipping_toolchain_identity(
     const std::filesystem::path &a_binary, const cue::BuildPlan &a_plan,
-    const cue::ChildProcessCancellation &a_cancellation, const cue::AssertContext &a_assertContext) noexcept
+    const cue::ChildProcessCancellation &a_cancellation, std::string_view a_expectedEngineSourceRoot,
+    const cue::AssertContext &a_assertContext) noexcept
 {
     if (a_cancellation.is_cancel_requested())
     {
@@ -1504,7 +1507,7 @@ void append_xml_double_quoted_attribute(std::string &a_output, std::string_view 
         *generator != cue::build_metadata::k_cmakeGenerator || *generatorPlatform != "x64" ||
         *generatorToolset != expectedGeneratorToolset || !same_root(*cmakePath, cue::build_metadata::k_cmakeCommand) ||
         !same_root(*visualStudioPath, cue::build_metadata::k_visualStudioRoot) ||
-        !same_root(*engineSourcePath, cue::build_metadata::k_engineSourceRoot))
+        !same_root(*engineSourcePath, a_expectedEngineSourceRoot))
     {
         return cue::Result<std::optional<ShippingToolchainIdentity>>::failure(
             make_error(a_assertContext, cue::WindowsBuildArtifactError::CandidateInvalid,
@@ -1993,49 +1996,78 @@ enum class ArtifactProbeStatus : std::uint8_t
 [[nodiscard]] cue::Result<std::optional<ShippingBuildProvenance>> collect_shipping_provenance(
     const std::filesystem::path &a_projectRoot, cue::ChildProcessRunner &a_processRunner,
     const cue::ChildProcessCancellation &a_cancellation, cue::BuildArtifactLockDeadline a_deadline,
+    const std::optional<cue::WindowsInstalledEngineSourceProvenance> &a_installedEngineSource,
     const cue::AssertContext &a_assertContext) noexcept
 {
-    const std::optional<std::filesystem::path> engineRoot = to_path(cue::build_metadata::k_engineSourceRoot);
+    const std::string_view engineRootText = a_installedEngineSource
+                                                ? std::string_view(a_installedEngineSource->sourceRoot)
+                                                : cue::build_metadata::k_engineSourceRoot;
+    const std::optional<std::filesystem::path> engineRoot = to_path(engineRootText);
     if (!engineRoot || !engineRoot->is_absolute())
     {
         return cue::Result<std::optional<ShippingBuildProvenance>>::failure(
             make_error(a_assertContext, cue::WindowsBuildArtifactError::InvalidSettings,
                        "Engine source root for Shipping provenance is unavailable"));
     }
-    cue::Result<std::optional<std::string>> commit = read_git_output(
-        a_processRunner, *engineRoot, {"rev-parse", "--verify", "HEAD"}, a_cancellation, a_deadline, a_assertContext);
-    if (!commit)
+    std::string commitText;
+    std::string statusText;
+    if (a_installedEngineSource)
     {
-        return cue::Result<std::optional<ShippingBuildProvenance>>::failure(std::move(*commit.try_error()));
+        commitText = a_installedEngineSource->sourceRevision;
     }
-    if (!commit.try_value()->has_value())
+    else
     {
-        return cue::Result<std::optional<ShippingBuildProvenance>>::success(std::nullopt);
+        cue::Result<std::optional<std::string>> commit =
+            read_git_output(a_processRunner, *engineRoot, {"rev-parse", "--verify", "HEAD"}, a_cancellation,
+                            a_deadline, a_assertContext);
+        if (!commit)
+        {
+            return cue::Result<std::optional<ShippingBuildProvenance>>::failure(std::move(*commit.try_error()));
+        }
+        if (!commit.try_value()->has_value())
+        {
+            return cue::Result<std::optional<ShippingBuildProvenance>>::success(std::nullopt);
+        }
+        commitText = std::move(**commit.try_value());
     }
-    const std::string &commitText = **commit.try_value();
     const bool validCommit =
         (commitText.size() == 40U || commitText.size() == 64U) &&
         std::all_of(commitText.begin(), commitText.end(), [](char a_value)
                     { return (a_value >= '0' && a_value <= '9') || (a_value >= 'a' && a_value <= 'f'); });
-    if (!validCommit)
+    const auto isCanonicalSha256 = [](std::string_view a_value) noexcept
+    {
+        return a_value.size() == 64U &&
+               std::all_of(a_value.begin(), a_value.end(), [](char a_character)
+                           {
+                               return (a_character >= '0' && a_character <= '9') ||
+                                      (a_character >= 'a' && a_character <= 'f');
+                           });
+    };
+    if (!validCommit || (a_installedEngineSource &&
+                         (!isCanonicalSha256(a_installedEngineSource->sourceInventoryHash) ||
+                          !isCanonicalSha256(a_installedEngineSource->publisherBuildIdentityDigest))))
     {
         return cue::Result<std::optional<ShippingBuildProvenance>>::failure(
             make_error(a_assertContext, cue::WindowsBuildArtifactError::CandidateInvalid,
                        "Engine Git commit provenance is invalid"));
     }
-    cue::Result<std::optional<std::string>> status =
-        read_git_output(a_processRunner, *engineRoot,
-                        {"status", "--porcelain=v1", "--untracked-files=all", "--", "Engine/Source", "CMake",
-                         "CMakeLists.txt", "CMakePresets.json", "ThirdParty/vcpkg.json",
-                         "ThirdParty/vcpkg-configuration.json", "ThirdParty/vcpkg-tool.json"},
-                        a_cancellation, a_deadline, a_assertContext);
-    if (!status)
+    if (!a_installedEngineSource)
     {
-        return cue::Result<std::optional<ShippingBuildProvenance>>::failure(std::move(*status.try_error()));
-    }
-    if (!status.try_value()->has_value())
-    {
-        return cue::Result<std::optional<ShippingBuildProvenance>>::success(std::nullopt);
+        cue::Result<std::optional<std::string>> status =
+            read_git_output(a_processRunner, *engineRoot,
+                            {"status", "--porcelain=v1", "--untracked-files=all", "--", "Engine/Source", "CMake",
+                             "CMakeLists.txt", "CMakePresets.json", "ThirdParty/vcpkg.json",
+                             "ThirdParty/vcpkg-configuration.json", "ThirdParty/vcpkg-tool.json"},
+                            a_cancellation, a_deadline, a_assertContext);
+        if (!status)
+        {
+            return cue::Result<std::optional<ShippingBuildProvenance>>::failure(std::move(*status.try_error()));
+        }
+        if (!status.try_value()->has_value())
+        {
+            return cue::Result<std::optional<ShippingBuildProvenance>>::success(std::nullopt);
+        }
+        statusText = std::move(**status.try_value());
     }
 
     const std::array<std::filesystem::path, 2U> engineDirectories = {"Engine/Source", "CMake"};
@@ -2083,12 +2115,17 @@ enum class ArtifactProbeStatus : std::uint8_t
         return cue::Result<std::optional<ShippingBuildProvenance>>::success(std::nullopt);
     }
     ShippingBuildProvenance provenance;
-    provenance.engineCommit = commitText;
-    provenance.engineDirty = !(**status.try_value()).empty();
+    provenance.engineCommit = std::move(commitText);
+    provenance.engineDirty = !statusText.empty();
     provenance.engineSource = std::move(**engineSource.try_value());
     provenance.gameSource = std::move(**gameSource.try_value());
     provenance.vcpkgManifestHash = std::move(vcpkgManifest.try_value()->contentHash);
     provenance.vcpkgBaselineHash = std::move(vcpkgBaseline.try_value()->contentHash);
+    if (a_installedEngineSource)
+    {
+        provenance.distributionSourceInventoryHash = a_installedEngineSource->sourceInventoryHash;
+        provenance.publisherBuildIdentityDigest = a_installedEngineSource->publisherBuildIdentityDigest;
+    }
     return cue::Result<std::optional<ShippingBuildProvenance>>::success(
         std::optional<ShippingBuildProvenance>(std::move(provenance)));
 }
@@ -2379,7 +2416,31 @@ enum class ArtifactProbeStatus : std::uint8_t
     output.append(a_provenance.engineCommit);
     output.append("\",\n        \"engineSourceTreeState\": \"");
     output.append(a_provenance.engineDirty ? "dirty" : "clean");
-    output.append("\",\n        \"engineSourceInventory\": {\n            \"fileCount\": ");
+    output.append("\",\n        \"engineSourceOrigin\": \"");
+    output.append(a_provenance.distributionSourceInventoryHash.empty() ? "Repository" : "InstalledDistribution");
+    output.append("\",\n        \"distributionSourceInventorySha256\": ");
+    if (a_provenance.distributionSourceInventoryHash.empty())
+    {
+        output.append("null");
+    }
+    else
+    {
+        output.push_back('"');
+        output.append(a_provenance.distributionSourceInventoryHash);
+        output.push_back('"');
+    }
+    output.append(",\n        \"publisherBuildIdentitySha256\": ");
+    if (a_provenance.publisherBuildIdentityDigest.empty())
+    {
+        output.append("null");
+    }
+    else
+    {
+        output.push_back('"');
+        output.append(a_provenance.publisherBuildIdentityDigest);
+        output.push_back('"');
+    }
+    output.append(",\n        \"engineSourceInventory\": {\n            \"fileCount\": ");
     output.append(std::to_string(a_provenance.engineSource.fileCount));
     output.append(",\n            \"sha256\": \"");
     output.append(a_provenance.engineSource.hash);
@@ -2860,11 +2921,13 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
     WindowsBuildArtifactPublisher(std::filesystem::path a_projectRoot, std::string a_projectId,
                                   cue::EngineCompatibility a_compatibility, std::string a_probeExecutable,
                                   std::unique_ptr<cue::ChildProcessRunner> a_processRunner,
+                                  std::optional<cue::WindowsInstalledEngineSourceProvenance> a_installedEngineSource,
                                   cue::detail::WindowsProductSecuritySnapshotObserver *a_securityObserver,
                                   const cue::AssertContext &a_assertContext) noexcept
         : m_projectRoot(std::move(a_projectRoot)), m_projectId(std::move(a_projectId)),
           m_compatibility(std::move(a_compatibility)), m_probeExecutable(std::move(a_probeExecutable)),
-          m_processRunner(std::move(a_processRunner)), m_securityObserver(a_securityObserver),
+          m_processRunner(std::move(a_processRunner)), m_installedEngineSource(std::move(a_installedEngineSource)),
+          m_securityObserver(a_securityObserver),
           m_assertContext(&a_assertContext)
     {
     }
@@ -2934,7 +2997,8 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
             if (a_plan.profile().target() == cue::BuildTarget::ShippingProduct)
             {
                 cue::Result<std::optional<ShippingBuildProvenance>> collected = collect_shipping_provenance(
-                    m_projectRoot, *m_processRunner, a_cancellation, a_deadline, *m_assertContext);
+                    m_projectRoot, *m_processRunner, a_cancellation, a_deadline, m_installedEngineSource,
+                    *m_assertContext);
                 if (!collected)
                 {
                     return cue::Result<std::optional<std::unique_ptr<cue::BuildWorkspaceLease>>>::failure(
@@ -2991,7 +3055,8 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
             if (a_plan.profile().target() == cue::BuildTarget::ShippingProduct)
             {
                 cue::Result<std::optional<ShippingBuildProvenance>> currentProvenance = collect_shipping_provenance(
-                    m_projectRoot, *m_processRunner, a_cancellation, a_deadline, *m_assertContext);
+                    m_projectRoot, *m_processRunner, a_cancellation, a_deadline, m_installedEngineSource,
+                    *m_assertContext);
                 if (!currentProvenance)
                 {
                     return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
@@ -3051,7 +3116,11 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
             if (isShippingProduct)
             {
                 cue::Result<std::optional<ShippingToolchainIdentity>> collectedToolchain =
-                    collect_shipping_toolchain_identity(*binary, a_plan, a_cancellation, *m_assertContext);
+                    collect_shipping_toolchain_identity(
+                        *binary, a_plan, a_cancellation,
+                        m_installedEngineSource ? std::string_view(m_installedEngineSource->sourceRoot)
+                                                : cue::build_metadata::k_engineSourceRoot,
+                        *m_assertContext);
                 if (!collectedToolchain)
                 {
                     return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
@@ -3511,6 +3580,7 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
     cue::EngineCompatibility m_compatibility;
     std::string m_probeExecutable;
     std::unique_ptr<cue::ChildProcessRunner> m_processRunner;
+    std::optional<cue::WindowsInstalledEngineSourceProvenance> m_installedEngineSource;
     cue::detail::WindowsProductSecuritySnapshotObserver *m_securityObserver;
     const cue::AssertContext *m_assertContext;
     bool m_isAvailable = true;
@@ -3519,6 +3589,7 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
 /// @brief 任意のSecurity Snapshot Observerを借用してWindows Artifact Publisherを構築する
 [[nodiscard]] cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>> create_windows_build_artifact_publisher_impl(
     std::string a_projectRoot, const cue::ProjectDescriptor &a_descriptor,
+    std::optional<cue::WindowsInstalledEngineSourceProvenance> a_installedEngineSource,
     cue::detail::WindowsProductSecuritySnapshotObserver *a_securityObserver,
     const cue::AssertContext &a_assertContext) noexcept
 {
@@ -3530,6 +3601,17 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
         {
             return cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>>::failure(make_error(
                 a_assertContext, cue::WindowsBuildArtifactError::InvalidSettings, "Artifact Project Root is invalid"));
+        }
+        if (a_installedEngineSource)
+        {
+            const std::optional<std::filesystem::path> sourceRoot = to_path(a_installedEngineSource->sourceRoot);
+            if (!sourceRoot || !sourceRoot->is_absolute() ||
+                !std::filesystem::is_directory(*sourceRoot, error) || error)
+            {
+                return cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>>::failure(
+                    make_error(a_assertContext, cue::WindowsBuildArtifactError::InvalidSettings,
+                               "Installed Engine Source Root is invalid"));
+            }
         }
         cue::Result<void> rootValidated =
             validate_directory_chain(*root, *root, cue::WindowsBuildArtifactError::InvalidSettings, a_assertContext);
@@ -3556,7 +3638,8 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
         return cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>>::success(
             std::make_unique<WindowsBuildArtifactPublisher>(
                 *root, std::string(a_descriptor.project_id().text()), compatibility, probeExecutable,
-                std::move(*processRunner.try_value()), a_securityObserver, a_assertContext));
+                std::move(*processRunner.try_value()), std::move(a_installedEngineSource), a_securityObserver,
+                a_assertContext));
     }
     catch (...)
     {
@@ -3570,8 +3653,17 @@ namespace cue
 Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher(
     std::string a_projectRoot, const ProjectDescriptor &a_descriptor, const AssertContext &a_assertContext) noexcept
 {
-    return create_windows_build_artifact_publisher_impl(std::move(a_projectRoot), a_descriptor, nullptr,
-                                                        a_assertContext);
+    return create_windows_build_artifact_publisher_impl(std::move(a_projectRoot), a_descriptor, std::nullopt,
+                                                        nullptr, a_assertContext);
+}
+
+Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher(
+    std::string a_projectRoot, const ProjectDescriptor &a_descriptor,
+    WindowsInstalledEngineSourceProvenance a_engineSourceProvenance,
+    const AssertContext &a_assertContext) noexcept
+{
+    return create_windows_build_artifact_publisher_impl(
+        std::move(a_projectRoot), a_descriptor, std::move(a_engineSourceProvenance), nullptr, a_assertContext);
 }
 
 namespace detail
@@ -3580,8 +3672,17 @@ Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_pu
     std::string a_projectRoot, const ProjectDescriptor &a_descriptor,
     WindowsProductSecuritySnapshotObserver &a_observer, const AssertContext &a_assertContext) noexcept
 {
-    return create_windows_build_artifact_publisher_impl(std::move(a_projectRoot), a_descriptor, &a_observer,
-                                                        a_assertContext);
+    return create_windows_build_artifact_publisher_impl(std::move(a_projectRoot), a_descriptor, std::nullopt,
+                                                        &a_observer, a_assertContext);
+}
+
+Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher_for_test(
+    std::string a_projectRoot, const ProjectDescriptor &a_descriptor,
+    WindowsInstalledEngineSourceProvenance a_engineSourceProvenance,
+    WindowsProductSecuritySnapshotObserver &a_observer, const AssertContext &a_assertContext) noexcept
+{
+    return create_windows_build_artifact_publisher_impl(
+        std::move(a_projectRoot), a_descriptor, std::move(a_engineSourceProvenance), &a_observer, a_assertContext);
 }
 } // namespace detail
 

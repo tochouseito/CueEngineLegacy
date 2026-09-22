@@ -271,12 +271,21 @@ class TestDirectory final
         !build_preset(projectRootPath, L"windows-vs2026-debug") ||
         !build_preset(projectRootPath, L"windows-vs2026-development") ||
         !build_preset(projectRootPath, L"windows-vs2026-release") ||
+        !build_target_preset(projectRootPath, L"windows-vs2026-debug", L"CueRuntimeHostForProject") ||
+        !build_target_preset(projectRootPath, L"windows-vs2026-development", L"CueRuntimeHostForProject") ||
+        !build_target_preset(projectRootPath, L"windows-vs2026-release", L"CueRuntimeHostForProject") ||
         !is_file(directory.child(
             L"SampleProject\\Generated\\Build\\windows-vs2026-x64-debug\\bin\\Debug\\CueGameModule.dll")) ||
+        !is_file(directory.child(
+            L"SampleProject\\Generated\\Build\\windows-vs2026-x64-debug\\bin\\Debug\\CueRuntimeHost.exe")) ||
         !is_file(directory.child(L"SampleProject\\Generated\\Build\\windows-vs2026-x64-development\\bin\\"
                                  L"Development\\CueGameModule.dll")) ||
+        !is_file(directory.child(L"SampleProject\\Generated\\Build\\windows-vs2026-x64-development\\bin\\"
+                                 L"Development\\CueRuntimeHost.exe")) ||
         !is_file(directory.child(
-            L"SampleProject\\Generated\\Build\\windows-vs2026-x64-release\\bin\\Release\\CueGameModule.dll")))
+            L"SampleProject\\Generated\\Build\\windows-vs2026-x64-release\\bin\\Release\\CueGameModule.dll")) ||
+        !is_file(directory.child(
+            L"SampleProject\\Generated\\Build\\windows-vs2026-x64-release\\bin\\Release\\CueRuntimeHost.exe")))
     {
         return false;
     }

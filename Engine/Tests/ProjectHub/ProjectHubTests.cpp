@@ -483,7 +483,13 @@ class TestProjectHubPlatform final : public cue::project_hub::ProjectHubPlatform
     cue::project_hub::ProjectHubConfiguration configuration{
         cue::k_currentProjectDescriptorSchemaVersion, cue::EngineVersion{1U, 0U, 0U}, std::move(*profile.try_value()),
         std::move(*snapshot.try_value()),
-        cue::EngineCompatibility{cue::EngineVersion{1U, 0U, 0U}, cue::EngineVersion{2U, 0U, 0U}}};
+        cue::EngineCompatibility{cue::EngineVersion{1U, 0U, 0U}, cue::EngineVersion{2U, 0U, 0U}},
+        {cue::project_hub::InstalledEngineVersionView{"v1.0.0--11111111-1111-4111-8111-111111111111",
+                                                      "1.0.0", cue::EngineVersion{1U, 0U, 0U}, "bundle-one",
+                                                      "manifest-one", {}, true, true},
+         cue::project_hub::InstalledEngineVersionView{"v1.1.0--22222222-2222-4222-8222-222222222222",
+                                                      "1.1.0", cue::EngineVersion{1U, 1U, 0U}, "bundle-two",
+                                                      "manifest-two", {}, true, false}}};
     return cue::Result<cue::project_hub::ProjectHubConfiguration>::success(std::move(configuration));
 }
 
@@ -526,6 +532,8 @@ class TestProjectHubPlatform final : public cue::project_hub::ProjectHubPlatform
                                                                std::move(*configuration.try_value()), a_assertContext);
     if (!service || service.try_value()->get()->templates().size() != 1U ||
         service.try_value()->get()->templates()[0].id != cue::project_hub::k_blank3dTemplateId ||
+        service.try_value()->get()->installed_engine_versions().size() != 2U ||
+        !service.try_value()->get()->installed_engine_versions()[0].isSelected ||
         !service.try_value()->get()->projects().empty())
     {
         return false;
@@ -629,12 +637,40 @@ class TestProjectHubPlatform final : public cue::project_hub::ProjectHubPlatform
     {
         return false;
     }
+    if (!service.try_value()->get()->select_installed_engine_version(
+            "v1.1.0--22222222-2222-4222-8222-222222222222") ||
+        service.try_value()->get()->select_installed_engine_version("missing-version") ||
+        service.try_value()->get()->installed_engine_versions()[0].isSelected ||
+        !service.try_value()->get()->installed_engine_versions()[1].isSelected)
+    {
+        return false;
+    }
+    std::vector<cue::project_hub::InstalledEngineVersionView> refreshedVersions(
+        service.try_value()->get()->installed_engine_versions().begin(),
+        service.try_value()->get()->installed_engine_versions().end());
+    refreshedVersions[0].isAvailable = false;
+    refreshedVersions[0].diagnostic = "Installed Version payload is corrupt";
+    std::vector<cue::project_hub::InstalledEngineVersionView> duplicateVersions = refreshedVersions;
+    duplicateVersions[0].directoryName = duplicateVersions[1].directoryName;
+    if (service.try_value()->get()->replace_installed_engine_versions(std::move(duplicateVersions)) ||
+        !service.try_value()->get()->replace_installed_engine_versions(std::move(refreshedVersions)) ||
+        service.try_value()->get()->installed_engine_versions()[0].isAvailable ||
+        service.try_value()->get()->installed_engine_versions()[0].diagnostic.empty() ||
+        !service.try_value()->get()->installed_engine_versions()[1].isSelected)
+    {
+        return false;
+    }
     auto launch = service.try_value()->get()->open_project(alphaId, 400U, std::string_view("Scenes/Start.cuescene"));
     if (!launch || launch.try_value()->protocol_version() != cue::project_hub::k_editorLaunchProtocolVersion ||
         launch.try_value()->expected_project_id() != alphaId ||
         launch.try_value()->engine_compatibility_id() != "cue-engine:[1.0.0,2.0.0)" ||
         !launch.try_value()->initial_scene_locator().has_value() ||
         launch.try_value()->expected_initial_scene_asset_id().has_value() ||
+        !launch.try_value()->installed_engine_identity().has_value() ||
+        launch.try_value()->installed_engine_identity()->versionDirectory !=
+            "v1.1.0--22222222-2222-4222-8222-222222222222" ||
+        launch.try_value()->installed_engine_identity()->bundleId != "bundle-two" ||
+        launch.try_value()->installed_engine_identity()->manifestDigest != "manifest-two" ||
         launch.try_value()->project_descriptor_locator().find("CueProject.json") == std::string_view::npos)
     {
         return false;

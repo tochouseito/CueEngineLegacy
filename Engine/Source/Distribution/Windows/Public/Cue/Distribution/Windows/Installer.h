@@ -1,9 +1,12 @@
 #pragma once
 
+#include <Cue/Distribution/InstallState.h>
 #include <Cue/Foundation/Result.h>
 
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace cue
 {
@@ -46,6 +49,39 @@ struct WindowsInstalledVersionRequest final
 {
     std::string installRoot;
     std::string versionDirectory;
+};
+
+/// @brief Project Hubが表示する一つのInstalled Version検査結果
+struct WindowsInstalledVersionInspection final
+{
+    std::string directoryName;
+    std::string engineVersion;
+    std::string bundleId;
+    std::string manifestDigest;
+    std::string editorExecutable;
+    std::string engineSourceRoot;
+    std::string diagnostic;
+    InstalledVersionState state = InstalledVersionState::Selectable;
+    bool isSelected = false;
+    bool isAvailable = false;
+};
+
+/// @brief 共有Control Lease下で取得したInstalled Versions RegistryとVersion証拠の所有Snapshot
+struct WindowsInstalledVersionsInspection final
+{
+    std::string installRoot;
+    std::uint64_t registryRevision = 0U;
+    std::vector<WindowsInstalledVersionInspection> versions;
+};
+
+/// @brief Child Processが継承Execution LeaseとDistribution Identityを再検証する要求
+struct WindowsInheritedVersionExecutionLeaseRequest final
+{
+    std::uintptr_t inheritedLeaseHandle = 0U;
+    std::string installRoot;
+    std::string versionDirectory;
+    std::string bundleId;
+    std::string manifestDigest;
 };
 
 /// @brief Rollback選択Transactionの検証済み結果
@@ -104,17 +140,48 @@ class WindowsInstalledVersionExecutionLease final
     [[nodiscard]] const std::string &install_root() const noexcept;
     /// @brief Leaseが保護するVersion Directoryを返す
     [[nodiscard]] const std::string &version_directory() const noexcept;
+    /// @brief 再検証済みEngine Version文字列を返す
+    [[nodiscard]] const std::string &engine_version() const noexcept;
+    /// @brief 再検証済みBundle Identityを返す
+    [[nodiscard]] const std::string &bundle_id() const noexcept;
+    /// @brief 再検証済みDistribution Manifest Digestを返す
+    [[nodiscard]] const std::string &manifest_digest() const noexcept;
+    /// @brief 再検証済みEditor Entry Pointの絶対Pathを返す
+    [[nodiscard]] const std::string &editor_executable() const noexcept;
+    /// @brief CMake／Engine Source／Templateを含むImmutable Version Rootを返す
+    [[nodiscard]] const std::string &engine_source_root() const noexcept;
+    /// @brief Manifestで固定されたEngine Source Revisionを返す
+    [[nodiscard]] const std::string &engine_source_revision() const noexcept;
+    /// @brief Manifestで固定されたSource Inventory Hashを返す
+    [[nodiscard]] const std::string &source_inventory_hash() const noexcept;
+    /// @brief Manifest Publisher Build IdentityのCanonical Digestを返す
+    [[nodiscard]] const std::string &publisher_build_identity_digest() const noexcept;
 
   private:
     friend Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_execution_lease(
         const WindowsInstalledVersionRequest &a_request, const AssertContext &a_assertContext) noexcept;
-    /// @brief 検証済み共有HandleとIdentityからLeaseを構築する
+    friend Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_execution_lease(
+        const WindowsInheritedVersionExecutionLeaseRequest &a_request,
+        const AssertContext &a_assertContext) noexcept;
+    /// @brief 検証済み共有Handle、Identity、Entry PointからLeaseを構築する
     WindowsInstalledVersionExecutionLease(std::uintptr_t a_handle, std::string a_installRoot,
-                                          std::string a_versionDirectory) noexcept;
+                                          std::string a_versionDirectory, std::string a_engineVersion,
+                                          std::string a_bundleId, std::string a_manifestDigest,
+                                          std::string a_editorExecutable, std::string a_engineSourceRoot,
+                                          std::string a_engineSourceRevision, std::string a_sourceInventoryHash,
+                                          std::string a_publisherBuildIdentityDigest) noexcept;
 
     std::uintptr_t m_handle = 0U;
     std::string m_installRoot;
     std::string m_versionDirectory;
+    std::string m_engineVersion;
+    std::string m_bundleId;
+    std::string m_manifestDigest;
+    std::string m_editorExecutable;
+    std::string m_engineSourceRoot;
+    std::string m_engineSourceRevision;
+    std::string m_sourceInventoryHash;
+    std::string m_publisherBuildIdentityDigest;
 };
 
 /// @brief 検証済みLocal Developer Source SDKを排他Install Transactionで導入する
@@ -134,9 +201,17 @@ class WindowsInstalledVersionExecutionLease final
 [[nodiscard]] Result<WindowsRollbackOutcome> rollback_windows_installed_version(
     const WindowsInstalledVersionRequest &a_request, const AssertContext &a_assertContext) noexcept;
 
+/// @brief Installed Versions Registryと各VersionのManifest／Marker／Worker証拠を共有Control Lease下で列挙する
+[[nodiscard]] Result<WindowsInstalledVersionsInspection> inspect_windows_installed_versions(
+    std::string_view a_installRoot, const AssertContext &a_assertContext) noexcept;
+
 /// @brief 起動直前のVersion Evidenceを共有Control Lease下で再検証して共有Execution Leaseを返す
 [[nodiscard]] Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_execution_lease(
     const WindowsInstalledVersionRequest &a_request, const AssertContext &a_assertContext) noexcept;
+
+/// @brief 親から継承したExecution LeaseのFile Identityを検証しChild所有Leaseへ切れ目なく引き継ぐ
+[[nodiscard]] Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_execution_lease(
+    const WindowsInheritedVersionExecutionLeaseRequest &a_request, const AssertContext &a_assertContext) noexcept;
 
 /// @brief 検証済みVersion外Workerへ回復可能Uninstall Transactionを委譲する
 [[nodiscard]] Result<WindowsUninstallOutcome> uninstall_windows_installed_version(

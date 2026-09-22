@@ -173,6 +173,24 @@ class RecordingObserver final : public cue::CMakeStageObserver
            runner.m_arguments[0] == expectedBuild;
 }
 
+/// @brief Installed SDK設定ではGame ModuleとConfiguration一致RuntimeHostを同じTreeでBuildするか検証する
+[[nodiscard]] bool test_runtime_host_target(const cue::AssertContext &a_assertContext)
+{
+    cue::BuildPlan plan = make_plan(cue::BuildConfiguration::Development, a_assertContext);
+    RecordingRunner runner({cue::ChildProcessResult::exited(0U, {})});
+    RecordingObserver observer;
+    cue::ChildProcessCancellation cancellation;
+    cue::CMakeRunnerSettings settings = make_settings();
+    settings.buildsRuntimeHost = true;
+    auto result = cue::run_cmake_build(plan, settings, cue::CMakeConfigureMode::ReuseCompatibleTree, runner,
+                                       cancellation, observer, a_assertContext);
+    const std::vector<std::string> expectedBuild = {
+        "--build", std::string(plan.binary_directory()), "--config", "Development", "--target", "CueGameModule",
+        "CueRuntimeHostForProject", "--", "/p:VCToolsVersion=14.51.36231"};
+    return result && result.try_value()->succeeded() && runner.m_arguments.size() == 1U &&
+           runner.m_arguments[0] == expectedBuild;
+}
+
 /// @brief Configure失敗時にBuildを開始せず、既存Tree再利用時はBuildだけ実行するか検証する
 [[nodiscard]] bool test_configure_boundaries(const cue::AssertContext &a_assertContext)
 {
@@ -273,7 +291,8 @@ int main()
                                       assertContext) &&
                    test_configuration(cue::BuildConfiguration::Release, "windows-vs2026-release", "Release",
                                       assertContext) &&
-                   test_shipping_target(assertContext) && test_configure_boundaries(assertContext) &&
+                   test_shipping_target(assertContext) && test_runtime_host_target(assertContext) &&
+                   test_configure_boundaries(assertContext) &&
                    test_cancel_retry_timeout(assertContext) && test_invalid_settings(assertContext)
                ? 0
                : 1;

@@ -60,6 +60,13 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     }
 }
 
+/// @brief 長時間Process統合Testの現在段階をTimeout診断へ残す
+void report_stage(std::string_view a_stage) noexcept
+{
+    std::fprintf(stderr, "Version operations stage: %.*s\n", static_cast<int>(a_stage.size()), a_stage.data());
+    std::fflush(stderr);
+}
+
 /// @brief Test用Filesystem操作へ渡すWindows Extended-length Pathを返す
 [[nodiscard]] std::filesystem::path extended_path(const std::filesystem::path &a_path)
 {
@@ -1619,6 +1626,7 @@ void test_worker_publish_crash_resume(const cue::AssertContext &a_assertContext)
 /// @brief Side-by-side RollbackとExecution Lease保護付き外部Worker UninstallをProcess統合検証する
 void test_version_operations(const cue::AssertContext &a_assertContext)
 {
+    report_stage("version-operations-start");
     TemporaryRoot temporary;
     const std::filesystem::path bundleRoot = temporary.path() / L"BundleOne";
     const std::filesystem::path updateBundleRoot = temporary.path() / L"BundleTwo";
@@ -1634,6 +1642,7 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     create_bundle(bundleRoot, a_assertContext);
     create_bundle(updateBundleRoot, a_assertContext, installer_executable(), 0U, "22345678-1234-4abc-8def-1234567890ab",
                   "1.1.0", std::byte{'u'});
+    report_stage("version-bundles-created");
     constexpr std::array sentinelRoots = {L"Projects", L"Recent", L"Preferences", L"BuildArtifacts"};
     for (const wchar_t *root : sentinelRoots)
     {
@@ -1657,6 +1666,7 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
                      static_cast<int>(updated.try_error()->summary().size()), updated.try_error()->summary().data());
     }
     require(installed.has_value() && updated.has_value());
+    report_stage("side-by-side-install-complete");
     cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
     require(registry.versions.size() == 2U);
     require(registry.selectedVersion == installed.try_value()->versionDirectory);
@@ -1696,13 +1706,51 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     require(std::filesystem::directory_iterator(installRoot / L"Operations" / L"Journals") ==
             std::filesystem::directory_iterator{});
 
+    auto inspection = cue::distribution::inspect_windows_installed_versions(utf8_path(installRoot), a_assertContext);
+    require(inspection.has_value() && inspection.try_value()->versions.size() == 2U);
+    const auto inspectedSelected = std::ranges::find_if(
+        inspection.try_value()->versions, [](const cue::distribution::WindowsInstalledVersionInspection &a_version)
+        { return a_version.isSelected; });
+    require(inspectedSelected != inspection.try_value()->versions.end());
+    require(inspectedSelected->directoryName == installed.try_value()->versionDirectory &&
+            inspectedSelected->isAvailable && inspectedSelected->diagnostic.empty());
+    report_stage("initial-inspection-complete");
+    const std::filesystem::path inspectedVersionRoot =
+        installRoot / L"Versions" / std::filesystem::path(installed.try_value()->versionDirectory);
+    report_stage("editor-entry-point-check-start");
+    const std::string expectedEditor = utf8_path(inspectedVersionRoot / L"Bin" / L"CueEditorTool.exe");
+    std::string normalizedEditor = inspectedSelected->editorExecutable;
+    std::ranges::replace(normalizedEditor, '/', '\\');
+    require(normalizedEditor == expectedEditor);
+    report_stage("editor-entry-point-check-complete");
+    report_stage("engine-source-root-check-start");
+    require(inspectedSelected->engineSourceRoot == utf8_path(inspectedVersionRoot));
+    report_stage("engine-source-root-check-complete");
+
     const std::filesystem::path installedSource = installRoot / L"Versions" /
                                                   std::filesystem::path(installed.try_value()->versionDirectory) /
                                                   L"Engine" / L"Source" / L"Foundation" / L"Test.cpp";
+    report_stage("corrupt-version-write-start");
     write_text(installedSource, "bad\n");
-    require(!cue::distribution::acquire_windows_installed_version_execution_lease(installedVersion, a_assertContext));
+    report_stage("corrupt-version-write-complete");
+    report_stage("corrupt-version-lease-rejection-start");
+    auto corruptLease =
+        cue::distribution::acquire_windows_installed_version_execution_lease(installedVersion, a_assertContext);
+    report_stage("corrupt-version-lease-rejection-complete");
+    require(!corruptLease);
+    report_stage("corrupt-version-inspection-start");
+    inspection = cue::distribution::inspect_windows_installed_versions(utf8_path(installRoot), a_assertContext);
+    report_stage("corrupt-version-inspection-complete");
+    require(inspection.has_value());
+    const auto inspectedCorrupt = std::ranges::find_if(
+        inspection.try_value()->versions,
+        [&installed](const cue::distribution::WindowsInstalledVersionInspection &a_version)
+        { return a_version.directoryName == installed.try_value()->versionDirectory; });
+    require(inspectedCorrupt != inspection.try_value()->versions.end() && !inspectedCorrupt->isAvailable &&
+            !inspectedCorrupt->diagnostic.empty());
     require(CopyFileW(extended_path(bundleRoot / L"Engine" / L"Source" / L"Foundation" / L"Test.cpp").c_str(),
                       extended_path(installedSource).c_str(), FALSE) != FALSE);
+    report_stage("corrupt-version-diagnostic-complete");
 
     const std::filesystem::path operations = installRoot / L"Operations";
     const std::filesystem::path enabled = operations / L"TestProbeGate.enabled";
@@ -1714,10 +1762,45 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
         auto executionLease =
             cue::distribution::acquire_windows_installed_version_execution_lease(installedVersion, a_assertContext);
         require(executionLease.has_value());
+        std::string leasedEditor = executionLease.try_value()->editor_executable();
+        std::ranges::replace(leasedEditor, '/', '\\');
+        require(executionLease.try_value()->engine_version() == removedEntry.engineVersion &&
+                executionLease.try_value()->bundle_id() == removedEntry.bundleId &&
+                executionLease.try_value()->manifest_digest() == removedEntry.manifestDigest &&
+                executionLease.try_value()->engine_source_revision() == std::string(40U, 'b') &&
+                executionLease.try_value()->source_inventory_hash() == std::string(64U, '1') &&
+                executionLease.try_value()->publisher_build_identity_digest().size() == 64U &&
+                leasedEditor == expectedEditor);
+        HANDLE inheritedHandle = nullptr;
+        require(DuplicateHandle(GetCurrentProcess(),
+                                reinterpret_cast<HANDLE>(executionLease.try_value()->native_handle()),
+                                GetCurrentProcess(), &inheritedHandle, 0U, TRUE,
+                                DUPLICATE_SAME_ACCESS) != FALSE);
+        cue::distribution::WindowsInheritedVersionExecutionLeaseRequest inheritedRequest{
+            reinterpret_cast<std::uintptr_t>(inheritedHandle),
+            executionLease.try_value()->install_root(),
+            executionLease.try_value()->version_directory(),
+            executionLease.try_value()->bundle_id(),
+            executionLease.try_value()->manifest_digest(),
+        };
+        auto adoptedLease =
+            cue::distribution::adopt_windows_inherited_version_execution_lease(inheritedRequest, a_assertContext);
+        require(adoptedLease.has_value());
+        require(adoptedLease.try_value()->engine_source_revision() ==
+                    executionLease.try_value()->engine_source_revision() &&
+                adoptedLease.try_value()->source_inventory_hash() ==
+                    executionLease.try_value()->source_inventory_hash() &&
+                adoptedLease.try_value()->publisher_build_identity_digest() ==
+                    executionLease.try_value()->publisher_build_identity_digest());
+        DWORD adoptedFlags = HANDLE_FLAG_INHERIT;
+        require(GetHandleInformation(reinterpret_cast<HANDLE>(adoptedLease.try_value()->native_handle()),
+                                     &adoptedFlags) != FALSE &&
+                (adoptedFlags & HANDLE_FLAG_INHERIT) == 0U);
         auto process = start_execution_lease_holder(installRoot);
         require(process.has_value());
         leaseHolder = std::make_unique<ProcessOwner>(std::move(*process));
         require(wait_for_process_id(ready, std::chrono::seconds(30)).has_value());
+        report_stage("execution-lease-holder-ready");
     }
 
     auto busyUninstall = cue::distribution::uninstall_windows_installed_version(installedVersion, a_assertContext);
@@ -1728,6 +1811,7 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
                      busyUninstall.try_error()->summary().data());
     }
     require(busyUninstall.has_value());
+    report_stage("busy-uninstall-started");
     require(CopyFileW(extended_path(installer_executable()).c_str(), extended_path(removedWorker).c_str(), FALSE) ==
             FALSE);
     require(GetLastError() == ERROR_SHARING_VIOLATION);
@@ -1756,6 +1840,7 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
 
     auto blockedExit = wait_process_id(busyUninstall.try_value()->workerProcessId, 60000U);
     require(blockedExit.has_value() && *blockedExit != 0U);
+    report_stage("blocked-uninstall-worker-complete");
     registry = read_registry(installRoot, a_assertContext);
     const auto pendingRemoval =
         std::ranges::find_if(registry.versions, [&installed](const cue::distribution::InstalledVersionEntry &a_entry)
@@ -1763,6 +1848,15 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     require(pendingRemoval != registry.versions.end());
     require(pendingRemoval->state == cue::distribution::InstalledVersionState::PendingRemoval);
     require(registry.selectedVersion == updated.try_value()->versionDirectory);
+    inspection = cue::distribution::inspect_windows_installed_versions(utf8_path(installRoot), a_assertContext);
+    require(inspection.has_value());
+    const auto inspectedPendingRemoval = std::ranges::find_if(
+        inspection.try_value()->versions,
+        [&installed](const cue::distribution::WindowsInstalledVersionInspection &a_version)
+        { return a_version.directoryName == installed.try_value()->versionDirectory; });
+    require(inspectedPendingRemoval != inspection.try_value()->versions.end() &&
+            inspectedPendingRemoval->state == cue::distribution::InstalledVersionState::PendingRemoval &&
+            !inspectedPendingRemoval->isAvailable && !inspectedPendingRemoval->diagnostic.empty());
     const std::vector<std::byte> journalBytes = read_bytes(uninstallJournal);
     const std::string journalText(reinterpret_cast<const char *>(journalBytes.data()), journalBytes.size());
     auto blockedJournal = cue::distribution::read_install_operation_journal(journalText, a_assertContext);
@@ -1775,6 +1869,7 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     require(resumedUninstall.try_value()->operationId == busyUninstall.try_value()->operationId);
     auto workerExit = wait_process_id(resumedUninstall.try_value()->workerProcessId, 60000U);
     require(workerExit.has_value() && *workerExit == 0U);
+    report_stage("resumed-uninstall-complete");
     registry = read_registry(installRoot, a_assertContext);
     require(registry.versions.size() == 1U && registry.selectedVersion == updated.try_value()->versionDirectory);
     require(!path_exists(installRoot / L"Versions" / std::filesystem::path(installed.try_value()->versionDirectory)));
@@ -1824,6 +1919,7 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     require(cleanupResume.has_value());
     auto cleanupExit = wait_process_id(cleanupResume.try_value()->workerProcessId, 60000U);
     require(cleanupExit.has_value() && *cleanupExit == 0U);
+    report_stage("cleanup-resume-complete");
     require(!path_exists(cleanupJournalPath));
     require(read_registry(installRoot, a_assertContext) == registry);
 
@@ -1832,11 +1928,13 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
         cue::distribution::acquire_windows_installed_version_execution_lease(updatedVersion, a_assertContext);
     require(remainingLease.has_value());
     require_sentinels(installRoot);
+    report_stage("version-operations-complete");
 }
 
 /// @brief 削除対象Version内のInstallerが終了するまで外部Workerが自己Uninstallを待機することを検証する
 void test_version_installer_self_uninstall(const cue::AssertContext &a_assertContext)
 {
+    report_stage("self-uninstall-start");
     TemporaryRoot temporary;
     const std::filesystem::path bundleRoot = temporary.path() / L"SelfBundleOne";
     const std::filesystem::path updateBundleRoot = temporary.path() / L"SelfBundleTwo";
@@ -1844,12 +1942,14 @@ void test_version_installer_self_uninstall(const cue::AssertContext &a_assertCon
     create_bundle(bundleRoot, a_assertContext);
     create_bundle(updateBundleRoot, a_assertContext, installer_executable(), 0U, "22345678-1234-4abc-8def-1234567890ab",
                   "1.1.0", std::byte{'u'});
+    report_stage("self-uninstall-bundles-created");
     cue::distribution::WindowsInstallRequest installRequest{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
     cue::distribution::WindowsInstallRequest updateRequest{utf8_path(updateBundleRoot), utf8_path(installRoot), true,
                                                            true};
     auto installed = cue::distribution::install_windows_source_sdk(installRequest, a_assertContext);
     auto updated = cue::distribution::install_windows_source_sdk(updateRequest, a_assertContext);
     require(installed.has_value() && updated.has_value());
+    report_stage("self-uninstall-side-by-side-install-complete");
     const std::filesystem::path versionRoot =
         installRoot / L"Versions" / std::filesystem::path(installed.try_value()->versionDirectory);
     const std::filesystem::path installedTool = versionRoot / L"Bin" / L"CueEngineInstallerTool.exe";
@@ -1858,6 +1958,7 @@ void test_version_installer_self_uninstall(const cue::AssertContext &a_assertCon
     require(process.has_value());
     const auto processExit = wait_process(*process, 60000U);
     require(processExit.has_value() && *processExit == 0U);
+    report_stage("self-uninstall-source-process-complete");
 
     const std::filesystem::path journals = installRoot / L"Operations" / L"Journals";
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
@@ -1878,6 +1979,7 @@ void test_version_installer_self_uninstall(const cue::AssertContext &a_assertCon
     const cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
     require(registry.versions.size() == 1U);
     require(registry.selectedVersion == updated.try_value()->versionDirectory);
+    report_stage("self-uninstall-complete");
 }
 } // namespace
 

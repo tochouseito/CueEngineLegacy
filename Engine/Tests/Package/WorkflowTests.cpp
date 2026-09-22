@@ -826,8 +826,18 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     TestDirectory directory;
     const std::filesystem::path projectRoot = directory.path() / L"Project";
     const std::filesystem::path engineRoot = directory.path() / L"Engine";
-    const std::filesystem::path hostPath = engineRoot / L"bin" / L"Debug" / L"CueRuntimeHost.exe";
     std::filesystem::create_directories(projectRoot);
+    std::filesystem::create_directories(engineRoot);
+    constexpr std::string_view firstOperation = "01234567-89ab-4cde-8f01-23456789abcd";
+    cue::BuildRequest firstRequest =
+        make_request(projectRoot.generic_string(), std::string(firstOperation), a_assertContext);
+    auto firstPlan = cue::create_build_plan(firstRequest, a_assertContext);
+    if (!require(firstPlan.has_value()))
+    {
+        return false;
+    }
+    const std::filesystem::path hostPath = std::filesystem::path(firstPlan.try_value()->binary_directory()) / L"bin" /
+                                           L"Debug" / L"CueRuntimeHost.exe";
     std::filesystem::create_directories(hostPath.parent_path());
     {
         const std::vector<std::byte> hostBytes = make_test_pe();
@@ -854,18 +864,17 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     auto workflow = cue::package::GamePackageWorkflowService::create(
         std::move(buildService), std::make_unique<MaterializingArtifactReader>(publisher),
         std::move(guardedProjectFilesystem), std::move(*engineFilesystem.try_value()),
-        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {}, a_assertContext);
+        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {},
+        cue::package::RuntimeHostBuildSource::ProjectBuildTree, a_assertContext);
     auto runtimeData = make_runtime_data(a_assertContext);
     if (!require(workflow && runtimeData))
     {
         return false;
     }
     std::unique_ptr<cue::package::GamePackageWorkflowService> service = std::move(*workflow.try_value());
-    constexpr std::string_view firstOperation = "01234567-89ab-4cde-8f01-23456789abcd";
     if (!require(
-            service->start(make_request(projectRoot.generic_string(), std::string(firstOperation), a_assertContext),
-                           cue::CMakeConfigureMode::Required, {1U, 0U, 0U}, std::string(k_projectId),
-                           *runtimeData.try_value()) &&
+            service->start(std::move(firstRequest), cue::CMakeConfigureMode::Required, {1U, 0U, 0U},
+                           std::string(k_projectId), *runtimeData.try_value()) &&
             service->wait_for_package()))
     {
         return false;
@@ -1151,7 +1160,8 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     auto workflow = cue::package::GamePackageWorkflowService::create(
         std::move(*build.try_value()), std::make_unique<MaterializingArtifactReader>(publisher),
         std::move(guardedProjectFilesystem), std::move(*engineFilesystem.try_value()),
-        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {}, a_assertContext);
+        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {},
+        cue::package::RuntimeHostBuildSource::EngineBinaryRoot, a_assertContext);
     auto runtimeData = make_runtime_data(a_assertContext);
     if (!require(workflow && runtimeData))
     {

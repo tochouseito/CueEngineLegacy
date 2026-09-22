@@ -32,8 +32,9 @@ cue_add_shipping_engine_module(Renderer)
 cue_add_shipping_engine_module(RHI)
 cue_add_shipping_engine_module(Package)
 
-set(CUE_RUNTIME_HOST_BUILD_DYNAMIC OFF)
+set(CUE_RUNTIME_HOST_BUILD_DYNAMIC ON)
 cue_add_shipping_engine_module(RuntimeHost)
+add_custom_target(CueRuntimeHostForProject DEPENDS CueRuntimeHost)
 
 # Add the Engine-owned monolithic product entry around one project Static Game Module.
 function(cue_add_shipping_product targetName gameModuleTarget projectId)

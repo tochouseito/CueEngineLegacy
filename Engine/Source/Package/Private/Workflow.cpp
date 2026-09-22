@@ -578,18 +578,21 @@ struct GamePackageWorkflowService::Impl final
         EngineVersion engineVersion;
         std::string projectId;
         MinimalRuntimeDataPublication runtimeData;
+        std::optional<std::string> runtimeHostProjectPath;
     };
 
     /// @brief 検証済み依存とRoot Locatorの所有権をWorkflow実装へ移す
     Impl(std::unique_ptr<GameBuildService> a_buildService, std::unique_ptr<BuildArtifactReader> a_artifactReader,
          std::unique_ptr<FilesystemRoot> a_projectFilesystem, std::unique_ptr<FilesystemRoot> a_engineBinaryFilesystem,
          std::unique_ptr<ChildProcessRunner> a_runProcessRunner, std::string a_projectRoot,
-         std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, const AssertContext &a_assertContext) noexcept
+         std::vector<ChildProcessEnvironmentEntry> a_runEnvironment,
+         RuntimeHostBuildSource a_runtimeHostBuildSource, const AssertContext &a_assertContext) noexcept
         : buildService(std::move(a_buildService)), artifactReader(std::move(a_artifactReader)),
           projectFilesystem(std::move(a_projectFilesystem)),
           engineBinaryFilesystem(std::move(a_engineBinaryFilesystem)), runProcessRunner(std::move(a_runProcessRunner)),
           projectRoot(std::move(a_projectRoot)), runEnvironment(std::move(a_runEnvironment)),
-          assertContext(&a_assertContext), ownerThread(std::this_thread::get_id())
+          runtimeHostBuildSource(a_runtimeHostBuildSource), assertContext(&a_assertContext),
+          ownerThread(std::this_thread::get_id())
     {
     }
 
@@ -797,9 +800,13 @@ struct GamePackageWorkflowService::Impl final
 
             std::vector<PackageFilePayload> payloads;
             payloads.reserve(a_artifact.files().size() + 3U);
-            Result<PackageFilePayload> runtimeHost = read_payload(
-                *engineBinaryFilesystem, join_relative("bin", join_relative(configuration, "CueRuntimeHost.exe")),
-                PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
+            Result<PackageFilePayload> runtimeHost =
+                a_inputs.runtimeHostProjectPath
+                    ? read_payload(*projectFilesystem, *a_inputs.runtimeHostProjectPath, PackageFileRole::RuntimeHost,
+                                   "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes)
+                    : read_payload(*engineBinaryFilesystem,
+                                   join_relative("bin", join_relative(configuration, "CueRuntimeHost.exe")),
+                                   PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
             if (!runtimeHost)
             {
                 return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
@@ -981,6 +988,7 @@ struct GamePackageWorkflowService::Impl final
     std::unique_ptr<ChildProcessRunner> runProcessRunner;
     std::string projectRoot;
     std::vector<ChildProcessEnvironmentEntry> runEnvironment;
+    RuntimeHostBuildSource runtimeHostBuildSource = RuntimeHostBuildSource::EngineBinaryRoot;
     const AssertContext *assertContext;
     std::thread::id ownerThread;
     mutable std::mutex mutex;
@@ -1030,12 +1038,15 @@ Result<std::unique_ptr<GamePackageWorkflowService>> GamePackageWorkflowService::
     std::unique_ptr<GameBuildService> a_buildService, std::unique_ptr<BuildArtifactReader> a_artifactReader,
     std::unique_ptr<FilesystemRoot> a_projectFilesystem, std::unique_ptr<FilesystemRoot> a_engineBinaryFilesystem,
     std::unique_ptr<ChildProcessRunner> a_runProcessRunner, std::string a_projectRoot,
-    std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, const AssertContext &a_assertContext) noexcept
+    std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, RuntimeHostBuildSource a_runtimeHostBuildSource,
+    const AssertContext &a_assertContext) noexcept
 {
     try
     {
         if (!a_buildService || !a_artifactReader || !a_projectFilesystem || !a_engineBinaryFilesystem ||
-            !a_runProcessRunner || a_projectRoot.empty())
+            !a_runProcessRunner || a_projectRoot.empty() ||
+            (a_runtimeHostBuildSource != RuntimeHostBuildSource::EngineBinaryRoot &&
+             a_runtimeHostBuildSource != RuntimeHostBuildSource::ProjectBuildTree))
         {
             return Result<std::unique_ptr<GamePackageWorkflowService>>::failure(make_workflow_error(
                 a_assertContext, WorkflowError::MissingDependency, "Package workflow dependency is missing"));
@@ -1043,7 +1054,7 @@ Result<std::unique_ptr<GamePackageWorkflowService>> GamePackageWorkflowService::
         auto impl = std::make_unique<Impl>(std::move(a_buildService), std::move(a_artifactReader),
                                            std::move(a_projectFilesystem), std::move(a_engineBinaryFilesystem),
                                            std::move(a_runProcessRunner), std::move(a_projectRoot),
-                                           std::move(a_runEnvironment), a_assertContext);
+                                           std::move(a_runEnvironment), a_runtimeHostBuildSource, a_assertContext);
         return Result<std::unique_ptr<GamePackageWorkflowService>>::success(
             std::unique_ptr<GamePackageWorkflowService>(new GamePackageWorkflowService(std::move(impl))));
     }
@@ -1083,7 +1094,29 @@ Result<void> GamePackageWorkflowService::start(BuildRequest a_buildRequest, CMak
         {
             return recovered;
         }
-        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData)};
+        std::optional<std::string> runtimeHostProjectPath;
+        if (!monolithicShipping &&
+            m_impl->runtimeHostBuildSource == RuntimeHostBuildSource::ProjectBuildTree)
+        {
+            Result<BuildPlan> plan = create_build_plan(a_buildRequest, *m_impl->assertContext);
+            if (!plan)
+            {
+                return Result<void>::failure(std::move(*plan.try_error()));
+            }
+            const std::optional<std::string> binary =
+                make_project_relative(m_impl->projectRoot, plan.try_value()->binary_directory());
+            if (!binary)
+            {
+                return Result<void>::failure(make_workflow_error(
+                    *m_impl->assertContext, WorkflowError::InvalidInput,
+                    "RuntimeHost Build Tree is outside the Project root"));
+            }
+            runtimeHostProjectPath = join_relative(
+                *binary, join_relative("bin", join_relative(configuration_name(a_buildRequest.profile.configuration()),
+                                                              "CueRuntimeHost.exe")));
+        }
+        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData),
+                                   std::move(runtimeHostProjectPath)};
         {
             std::scoped_lock lock(m_impl->mutex);
             Result<void> started = m_impl->buildService->start(std::move(a_buildRequest), a_configureMode);
@@ -1125,6 +1158,7 @@ Result<void> GamePackageWorkflowService::retry(std::string a_operationId, Engine
                                                              "Package workflow retry requires owner thread"));
         }
         advance();
+        std::optional<std::string> runtimeHostProjectPath;
         {
             std::scoped_lock lock(m_impl->mutex);
             if (!m_impl->retryInputs)
@@ -1141,13 +1175,15 @@ Result<void> GamePackageWorkflowService::retry(std::string a_operationId, Engine
                                                                  WorkflowError::OperationAlreadyRunning,
                                                                  "Package workflow operation is already running"));
             }
+            runtimeHostProjectPath = m_impl->retryInputs->runtimeHostProjectPath;
         }
         Result<void> recovered = m_impl->retry_staging_recovery();
         if (!recovered)
         {
             return recovered;
         }
-        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData)};
+        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData),
+                                   std::move(runtimeHostProjectPath)};
         {
             std::scoped_lock lock(m_impl->mutex);
             Result<void> restarted = m_impl->buildService->retry(std::move(a_operationId));

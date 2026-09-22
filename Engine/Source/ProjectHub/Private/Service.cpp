@@ -53,11 +53,14 @@ namespace cue::project_hub
 EditorLaunchRequest::EditorLaunchRequest(std::string &&a_projectDescriptorLocator, std::string &&a_expectedProjectId,
                                          std::string &&a_engineCompatibilityId,
                                          std::optional<std::string> &&a_initialSceneLocator,
-                                         std::optional<std::string> &&a_expectedInitialSceneAssetId) noexcept
+                                         std::optional<std::string> &&a_expectedInitialSceneAssetId,
+                                         std::optional<InstalledEngineLaunchIdentity>
+                                             &&a_installedEngineIdentity) noexcept
     : m_projectDescriptorLocator(std::move(a_projectDescriptorLocator)),
       m_expectedProjectId(std::move(a_expectedProjectId)), m_engineCompatibilityId(std::move(a_engineCompatibilityId)),
       m_initialSceneLocator(std::move(a_initialSceneLocator)),
-      m_expectedInitialSceneAssetId(std::move(a_expectedInitialSceneAssetId))
+      m_expectedInitialSceneAssetId(std::move(a_expectedInitialSceneAssetId)),
+      m_installedEngineIdentity(std::move(a_installedEngineIdentity))
 {
 }
 
@@ -91,6 +94,11 @@ const std::optional<std::string> &EditorLaunchRequest::expected_initial_scene_as
     return m_expectedInitialSceneAssetId;
 }
 
+const std::optional<InstalledEngineLaunchIdentity> &EditorLaunchRequest::installed_engine_identity() const noexcept
+{
+    return m_installedEngineIdentity;
+}
+
 ProjectHubService::ProjectHubService(ConstructionKey, FilesystemRoot &a_workspaceFilesystem,
                                      ProjectHubPlatform &a_platform, ProjectHubConfiguration &&a_configuration,
                                      RecentProjectRegistry &&a_registry, const AssertContext &a_assertContext) noexcept
@@ -113,6 +121,45 @@ Result<std::unique_ptr<ProjectHubService>> ProjectHubService::create(FilesystemR
         {
             return Result<std::unique_ptr<ProjectHubService>>::failure(make_project_hub_error(
                 a_assertContext, ProjectHubError::InvalidConfiguration, "Project Hub configuration is invalid"));
+        }
+        std::size_t selectedEngineCount = 0U;
+        for (std::size_t index = 0U; index < a_configuration.installedEngineVersions.size(); ++index)
+        {
+            const InstalledEngineVersionView &version = a_configuration.installedEngineVersions[index];
+            if (version.directoryName.empty() || version.displayName.empty() || version.bundleId.empty() ||
+                version.manifestDigest.empty())
+            {
+                return Result<std::unique_ptr<ProjectHubService>>::failure(make_project_hub_error(
+                    a_assertContext, ProjectHubError::InvalidConfiguration,
+                    "Installed Engine Version configuration is incomplete"));
+            }
+            const bool duplicate = std::ranges::any_of(
+                a_configuration.installedEngineVersions.begin(),
+                a_configuration.installedEngineVersions.begin() + static_cast<std::ptrdiff_t>(index),
+                [&version](const InstalledEngineVersionView &a_candidate)
+                { return a_candidate.directoryName == version.directoryName; });
+            if (duplicate)
+            {
+                return Result<std::unique_ptr<ProjectHubService>>::failure(make_project_hub_error(
+                    a_assertContext, ProjectHubError::InvalidConfiguration,
+                    "Installed Engine Version configuration contains duplicate identities"));
+            }
+            if (version.isSelected)
+            {
+                ++selectedEngineCount;
+                if (version.engineVersion != a_configuration.currentEngineVersion)
+                {
+                    return Result<std::unique_ptr<ProjectHubService>>::failure(make_project_hub_error(
+                        a_assertContext, ProjectHubError::InvalidConfiguration,
+                        "Selected Installed Engine Version differs from the active compatibility version"));
+                }
+            }
+        }
+        if (!a_configuration.installedEngineVersions.empty() && selectedEngineCount != 1U)
+        {
+            return Result<std::unique_ptr<ProjectHubService>>::failure(make_project_hub_error(
+                a_assertContext, ProjectHubError::InvalidConfiguration,
+                "Installed Engine Version configuration must select exactly one version"));
         }
         auto registry = load_recent_project_registry(a_workspaceFilesystem, a_assertContext);
         if (!registry)
@@ -148,6 +195,108 @@ std::span<const ProjectTemplateView> ProjectHubService::templates() const noexce
 std::span<const ProjectRowView> ProjectHubService::projects() const noexcept
 {
     return m_projects;
+}
+
+std::span<const InstalledEngineVersionView> ProjectHubService::installed_engine_versions() const noexcept
+{
+    return m_configuration.installedEngineVersions;
+}
+
+Result<void> ProjectHubService::select_installed_engine_version(std::string_view a_versionDirectory) noexcept
+{
+    try
+    {
+        const auto selected = std::ranges::find_if(
+            m_configuration.installedEngineVersions,
+            [a_versionDirectory](const InstalledEngineVersionView &a_version)
+            { return a_version.directoryName == a_versionDirectory; });
+        if (selected == m_configuration.installedEngineVersions.end() || !selected->isAvailable)
+        {
+            return Result<void>::failure(make_project_hub_error(
+                *m_assertContext, ProjectHubError::ProjectUnsupported,
+                "Selected Installed Engine Version is unavailable"));
+        }
+        if (selected->isSelected)
+        {
+            return Result<void>::success();
+        }
+        const EngineVersion previousEngineVersion = m_configuration.currentEngineVersion;
+        std::vector<InstalledEngineVersionView> previousVersions = m_configuration.installedEngineVersions;
+        const EngineVersion selectedEngineVersion = selected->engineVersion;
+        for (InstalledEngineVersionView &version : m_configuration.installedEngineVersions)
+        {
+            version.isSelected = version.directoryName == a_versionDirectory;
+        }
+        m_configuration.currentEngineVersion = selectedEngineVersion;
+        Result<void> refreshed = refresh();
+        if (!refreshed)
+        {
+            m_configuration.currentEngineVersion = previousEngineVersion;
+            m_configuration.installedEngineVersions = std::move(previousVersions);
+        }
+        return refreshed;
+    }
+    catch (...)
+    {
+        m_assertContext->fatal_handler().terminate("Cue.ProjectHub Installed Engine Version selection failed");
+    }
+    std::terminate();
+}
+
+Result<void> ProjectHubService::replace_installed_engine_versions(
+    std::vector<InstalledEngineVersionView> a_versions) noexcept
+{
+    try
+    {
+        std::size_t selectedCount = 0U;
+        std::optional<EngineVersion> selectedEngineVersion;
+        for (std::size_t index = 0U; index < a_versions.size(); ++index)
+        {
+            const InstalledEngineVersionView &version = a_versions[index];
+            const bool duplicate = std::ranges::any_of(
+                a_versions.begin(), a_versions.begin() + static_cast<std::ptrdiff_t>(index),
+                [&version](const InstalledEngineVersionView &a_candidate)
+                { return a_candidate.directoryName == version.directoryName; });
+            if (version.directoryName.empty() || version.displayName.empty() || version.bundleId.empty() ||
+                version.manifestDigest.empty() || duplicate)
+            {
+                return Result<void>::failure(make_project_hub_error(
+                    *m_assertContext, ProjectHubError::InvalidConfiguration,
+                    "Installed Engine Version refresh contains an invalid identity"));
+            }
+            if (version.isSelected)
+            {
+                ++selectedCount;
+                selectedEngineVersion = version.engineVersion;
+            }
+        }
+        if (!a_versions.empty() && selectedCount != 1U)
+        {
+            return Result<void>::failure(make_project_hub_error(
+                *m_assertContext, ProjectHubError::InvalidConfiguration,
+                "Installed Engine Version refresh must select exactly one version"));
+        }
+        const EngineVersion previousEngineVersion = m_configuration.currentEngineVersion;
+        std::vector<InstalledEngineVersionView> previousVersions =
+            std::move(m_configuration.installedEngineVersions);
+        m_configuration.installedEngineVersions = std::move(a_versions);
+        if (selectedEngineVersion)
+        {
+            m_configuration.currentEngineVersion = *selectedEngineVersion;
+        }
+        Result<void> refreshed = refresh();
+        if (!refreshed)
+        {
+            m_configuration.currentEngineVersion = previousEngineVersion;
+            m_configuration.installedEngineVersions = std::move(previousVersions);
+        }
+        return refreshed;
+    }
+    catch (...)
+    {
+        m_assertContext->fatal_handler().terminate("Cue.ProjectHub Installed Engine Version refresh failed");
+    }
+    std::terminate();
 }
 
 ProjectCreationOutcome::ProjectCreationOutcome(std::string &&a_projectLocator, bool a_isRecentRegistered,
@@ -583,6 +732,21 @@ Result<EditorLaunchRequest> ProjectHubService::open_project(
             refresh_after_open_failure(primary);
             return Result<EditorLaunchRequest>::failure(std::move(primary));
         }
+        std::optional<InstalledEngineLaunchIdentity> installedEngineIdentity;
+        if (!m_configuration.installedEngineVersions.empty())
+        {
+            const auto selectedEngine = std::ranges::find_if(
+                m_configuration.installedEngineVersions,
+                [](const InstalledEngineVersionView &a_version) { return a_version.isSelected; });
+            if (selectedEngine == m_configuration.installedEngineVersions.end() || !selectedEngine->isAvailable)
+            {
+                return Result<EditorLaunchRequest>::failure(make_project_hub_error(
+                    *m_assertContext, ProjectHubError::ProjectUnsupported,
+                    "Selected Installed Engine Version cannot launch the Editor"));
+            }
+            installedEngineIdentity = InstalledEngineLaunchIdentity{
+                selectedEngine->directoryName, selectedEngine->bundleId, selectedEngine->manifestDigest};
+        }
         std::optional<std::string> sceneLocator;
         std::optional<std::string> expectedSceneAssetId;
         if (a_initialSceneLocator.has_value())
@@ -630,7 +794,8 @@ Result<EditorLaunchRequest> ProjectHubService::open_project(
         }
         return Result<EditorLaunchRequest>::success(
             EditorLaunchRequest(std::move(*descriptorLocator.try_value()), std::move(expectedProjectId),
-                                std::move(compatibilityId), std::move(sceneLocator), std::move(expectedSceneAssetId)));
+                                std::move(compatibilityId), std::move(sceneLocator), std::move(expectedSceneAssetId),
+                                std::move(installedEngineIdentity)));
     }
     catch (...)
     {

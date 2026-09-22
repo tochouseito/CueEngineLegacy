@@ -354,7 +354,13 @@ Result<CMakeBuildResult> run_cmake_build(const BuildPlan &a_plan, const CMakeRun
             "--build",  std::string(a_plan.binary_directory()),
             "--config", std::string(configuration_name(a_plan.profile().configuration())),
             "--target", std::string(a_plan.cmake_target_name()),
-            "--",       "/p:VCToolsVersion=" + a_settings.visualStudioToolsetVersion};
+        };
+        if (a_settings.buildsRuntimeHost && a_plan.profile().target() == BuildTarget::GameModule)
+        {
+            buildArguments.push_back("CueRuntimeHostForProject");
+        }
+        buildArguments.push_back("--");
+        buildArguments.push_back("/p:VCToolsVersion=" + a_settings.visualStudioToolsetVersion);
         auto built = run_stage(BuildStage::Build, std::move(buildArguments), a_settings.buildTimeout, a_plan,
                                a_settings, a_processRunner, a_cancellation, a_observer, a_assertContext);
         if (!built)

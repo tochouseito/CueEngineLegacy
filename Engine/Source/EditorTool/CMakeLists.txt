@@ -23,6 +23,7 @@ target_link_libraries(
     PRIVATE
         Cue.Editor.ImGui
         Cue.Editor.Windows
+        Cue.Distribution.Windows
         Cue.EngineAssets
         Cue.Build.Windows
         Cue.Foundation.Windows

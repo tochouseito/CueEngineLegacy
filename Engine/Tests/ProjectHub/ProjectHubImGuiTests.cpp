@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -180,6 +181,17 @@ void draw_frame(cue::project_hub::ProjectHubPresenter &a_presenter) noexcept
     if (!presenter || ImGui::CreateContext() == nullptr)
     {
         return 3;
+    }
+    presenter.try_value()->get()->apply_engine_bundle_selection("C:/LocalBundle");
+    std::optional<cue::project_hub::InstalledEngineOperationRequest> installRequest =
+        presenter.try_value()->get()->take_installed_engine_operation_request();
+    if (!installRequest ||
+        installRequest->kind != cue::project_hub::InstalledEngineOperationKind::InstallUnsignedLocalBundle ||
+        installRequest->target != "C:/LocalBundle" ||
+        presenter.try_value()->get()->take_installed_engine_operation_request())
+    {
+        ImGui::DestroyContext();
+        return 15;
     }
 
     ImGuiIO &input = ImGui::GetIO();

@@ -1,23 +1,29 @@
 #include "Resources/CueProjectHubToolResource.h"
 
+#include <Cue/Distribution/Windows/Installer.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
+#include <Cue/Foundation/NumberParsing.h>
 #include <Cue/Foundation/Windows/UtfConversion.h>
 #include <Cue/IO/RelativePath.h>
 #include <Cue/IO/Windows/WindowsFilesystem.h>
 #include <Cue/Platform/FileDialog.h>
 #include <Cue/Platform/Windows/WindowsFileDialog.h>
 #include <Cue/Project/Compatibility.h>
+#include <Cue/ProjectHub/Error.h>
 #include <Cue/ProjectHub/ImGui/ProjectHubPresenter.h>
 #include <Cue/ProjectHub/Windows/WindowsProjectHubPlatform.h>
 #include <Cue/ToolHost/WindowsD3D12/ToolHost.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -28,6 +34,38 @@ namespace
 {
 constexpr int k_initializationFailure = 1;
 constexpr int k_toolHostFailure = 2;
+
+/// @brief Project Hub実行Fileの配置からDeveloper／Installed起動境界を保持する
+struct ProjectHubExecutableEnvironment final
+{
+    std::string developerEditorExecutable;
+    std::optional<std::string> installRoot;
+};
+
+[[nodiscard]] cue::Result<std::vector<cue::project_hub::InstalledEngineVersionView>> make_installed_engine_views(
+    std::string_view a_installRoot, const cue::AssertContext &a_assertContext) noexcept;
+
+/// @brief Canonical major.minor.patch文字列をProject互換性Versionへ変換する
+[[nodiscard]] std::optional<cue::EngineVersion> parse_engine_version(std::string_view a_value) noexcept
+{
+    const std::size_t firstSeparator = a_value.find('.');
+    const std::size_t secondSeparator =
+        firstSeparator == std::string_view::npos ? firstSeparator : a_value.find('.', firstSeparator + 1U);
+    if (firstSeparator == std::string_view::npos || secondSeparator == std::string_view::npos ||
+        a_value.find('.', secondSeparator + 1U) != std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+    const auto major = cue::parse_unsigned_decimal<std::uint32_t>(a_value.substr(0U, firstSeparator));
+    const auto minor = cue::parse_unsigned_decimal<std::uint32_t>(
+        a_value.substr(firstSeparator + 1U, secondSeparator - firstSeparator - 1U));
+    const auto patch = cue::parse_unsigned_decimal<std::uint32_t>(a_value.substr(secondSeparator + 1U));
+    if (!major || !minor || !patch)
+    {
+        return std::nullopt;
+    }
+    return cue::EngineVersion{*major, *minor, *patch};
+}
 
 /// @brief Project Hub初期化ErrorをTool Host上でUserへ通知する
 class InitializationFailureClient final : public cue::tool_host::ToolHostClient
@@ -119,18 +157,22 @@ class InitializationFailureClient final : public cue::tool_host::ToolHostClient
 enum class FolderSelectionTarget
 {
     CreationDestination,
-    ExistingProject
+    ExistingProject,
+    EngineBundle
 };
 
 /// @brief Project Hub PresenterをTool Host CallbackとEditor Process Adapterへ接続する
 class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
 {
   public:
-    /// @brief PresenterとEditor実行File LocatorをClient全寿命へ関連付ける
-    ProjectHubToolClient(cue::project_hub::ProjectHubPresenter &a_presenter, std::string &&a_editorExecutableLocator,
+    /// @brief PresenterとDeveloper／Installed実行環境をClient全寿命へ関連付ける
+    ProjectHubToolClient(cue::project_hub::ProjectHubPresenter &a_presenter,
+                         cue::project_hub::ProjectHubService &a_service,
+                         ProjectHubExecutableEnvironment &&a_environment,
                          const cue::AssertContext &a_assertContext) noexcept
-        : m_presenter(&a_presenter), m_assertContext(&a_assertContext),
-          m_editorExecutableLocator(std::move(a_editorExecutableLocator)),
+        : m_presenter(&a_presenter), m_service(&a_service), m_assertContext(&a_assertContext),
+          m_editorExecutableLocator(std::move(a_environment.developerEditorExecutable)),
+          m_installRoot(std::move(a_environment.installRoot)),
           m_fileDialogService(cue::create_windows_file_dialog_service(a_assertContext))
     {
     }
@@ -172,13 +214,22 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
         {
             browse_folder(*registrationBrowseRequest, FolderSelectionTarget::ExistingProject);
         }
+        if (m_presenter->take_engine_bundle_browse_request())
+        {
+            browse_folder({}, FolderSelectionTarget::EngineBundle);
+        }
+        std::optional<cue::project_hub::InstalledEngineOperationRequest> engineOperation =
+            m_presenter->take_installed_engine_operation_request();
+        if (engineOperation)
+        {
+            perform_installed_engine_operation(*engineOperation);
+        }
         std::optional<cue::project_hub::EditorLaunchRequest> request = m_presenter->take_editor_launch_request();
         if (!request.has_value())
         {
             return;
         }
-        cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>> launched =
-            cue::project_hub::launch_windows_editor_process(m_editorExecutableLocator, *request, *m_assertContext);
+        cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>> launched = launch_editor(*request);
         if (!launched)
         {
             m_presenter->report_editor_launch_failure(*launched.try_error());
@@ -206,6 +257,136 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     }
 
   private:
+    /// @brief Presenterから受けたInstalled Engine操作を既存Installer Serviceへ接続する
+    void perform_installed_engine_operation(
+        const cue::project_hub::InstalledEngineOperationRequest &a_request) noexcept
+    {
+        if (!m_installRoot)
+        {
+            cue::Error error = cue::project_hub::make_project_hub_error(
+                *m_assertContext, cue::project_hub::ProjectHubError::InvalidConfiguration,
+                "Installed Engine management root is unavailable");
+            m_presenter->report_installed_engine_operation_failure(error);
+            return;
+        }
+        cue::Result<void> operation = cue::Result<void>::success();
+        std::string_view successMessage;
+        if (a_request.kind == cue::project_hub::InstalledEngineOperationKind::InstallUnsignedLocalBundle)
+        {
+            cue::distribution::WindowsInstallRequest request{a_request.target, *m_installRoot, false, true};
+            auto installed = cue::distribution::install_windows_source_sdk(request, *m_assertContext);
+            if (!installed)
+            {
+                operation = cue::Result<void>::failure(std::move(*installed.try_error()));
+            }
+            successMessage = "Local Developer BundleをInstallしました。";
+        }
+        else
+        {
+            cue::distribution::WindowsInstalledVersionRequest request{*m_installRoot, a_request.target};
+            if (a_request.kind == cue::project_hub::InstalledEngineOperationKind::RollbackVersion)
+            {
+                auto selected = cue::distribution::rollback_windows_installed_version(request, *m_assertContext);
+                if (!selected)
+                {
+                    operation = cue::Result<void>::failure(std::move(*selected.try_error()));
+                }
+                successMessage = "Installed Engine Versionを選択しました。";
+            }
+            else
+            {
+                auto uninstalled =
+                    cue::distribution::uninstall_windows_installed_version(request, *m_assertContext);
+                if (!uninstalled)
+                {
+                    operation = cue::Result<void>::failure(std::move(*uninstalled.try_error()));
+                }
+                successMessage = "Uninstallを外部Workerへ委譲しました。実行中VersionはHub終了後に削除されます。";
+            }
+        }
+        if (!operation)
+        {
+            m_presenter->report_installed_engine_operation_failure(*operation.try_error());
+            static_cast<void>(refresh_installed_engine_versions(false));
+            return;
+        }
+        if (!refresh_installed_engine_versions(true))
+        {
+            return;
+        }
+        m_presenter->report_installed_engine_operation_completed(successMessage);
+    }
+
+    /// @brief Installed Versions Registryを再検査してServiceの互換Viewへ反映する
+    [[nodiscard]] bool refresh_installed_engine_versions(bool a_reportFailure) noexcept
+    {
+        if (!m_installRoot)
+        {
+            return false;
+        }
+        auto versions = make_installed_engine_views(*m_installRoot, *m_assertContext);
+        if (!versions)
+        {
+            if (a_reportFailure)
+            {
+                m_presenter->report_installed_engine_operation_failure(*versions.try_error());
+            }
+            return false;
+        }
+        cue::Result<void> replaced =
+            m_service->replace_installed_engine_versions(std::move(*versions.try_value()));
+        if (!replaced && a_reportFailure)
+        {
+            m_presenter->report_installed_engine_operation_failure(*replaced.try_error());
+        }
+        return replaced.has_value();
+    }
+
+    /// @brief Developer隣接Editorまたは再検証済みInstalled VersionからEditor Processを起動する
+    [[nodiscard]] cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>> launch_editor(
+        const cue::project_hub::EditorLaunchRequest &a_request) noexcept
+    {
+        const std::optional<cue::project_hub::InstalledEngineLaunchIdentity> &installedIdentity =
+            a_request.installed_engine_identity();
+        if (!installedIdentity)
+        {
+            return cue::project_hub::launch_windows_editor_process(m_editorExecutableLocator, a_request,
+                                                                    *m_assertContext);
+        }
+        if (!m_installRoot)
+        {
+            return cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>>::failure(
+                cue::project_hub::make_project_hub_error(*m_assertContext,
+                                                         cue::project_hub::ProjectHubError::EditorLaunchFailed,
+                                                         "Installed Engine launch root is unavailable"));
+        }
+        cue::distribution::WindowsInstalledVersionRequest versionRequest{
+            *m_installRoot, installedIdentity->versionDirectory};
+        auto selected = cue::distribution::rollback_windows_installed_version(versionRequest, *m_assertContext);
+        if (!selected)
+        {
+            return cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>>::failure(
+                std::move(*selected.try_error()));
+        }
+        auto lease =
+            cue::distribution::acquire_windows_installed_version_execution_lease(versionRequest, *m_assertContext);
+        if (!lease)
+        {
+            return cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>>::failure(
+                std::move(*lease.try_error()));
+        }
+        if (lease.try_value()->bundle_id() != installedIdentity->bundleId ||
+            lease.try_value()->manifest_digest() != installedIdentity->manifestDigest)
+        {
+            return cue::Result<std::unique_ptr<cue::project_hub::WindowsEditorProcess>>::failure(
+                cue::project_hub::make_project_hub_error(*m_assertContext,
+                                                         cue::project_hub::ProjectHubError::EditorLaunchFailed,
+                                                         "Installed Engine identity changed after Hub inspection"));
+        }
+        return cue::project_hub::launch_windows_editor_process(lease.try_value()->editor_executable(), a_request,
+                                                                *m_assertContext, lease.try_value());
+    }
+
     /// @brief Project Folder 選択 Intent を既存 Windows Folder Dialog へ同期接続する
     void browse_folder(std::string_view a_initialLocation, FolderSelectionTarget a_target) noexcept
     {
@@ -239,6 +420,10 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
                     {
                         m_presenter->apply_registration_selection(*selectedPath);
                     }
+                    else if (a_target == FolderSelectionTarget::EngineBundle)
+                    {
+                        m_presenter->apply_engine_bundle_selection(*selectedPath);
+                    }
                     else
                     {
                         m_presenter->apply_destination_selection(*selectedPath);
@@ -253,16 +438,19 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     }
 
     cue::project_hub::ProjectHubPresenter *m_presenter;
+    cue::project_hub::ProjectHubService *m_service;
     const cue::AssertContext *m_assertContext;
     std::string m_editorExecutableLocator;
+    std::optional<std::string> m_installRoot;
     std::unique_ptr<cue::FileDialogService> m_fileDialogService;
     std::unique_ptr<cue::project_hub::WindowsEditorProcess> m_editorProcess;
     cue::Window *m_window = nullptr;
     bool m_closeRequested = false;
 };
 
-/// @brief 実行中Project Hubと同じDirectoryにあるCueEditorTool.exeをUTF-8 Locatorで返す
-[[nodiscard]] cue::Result<std::string> locate_editor_executable(const cue::AssertContext &a_assertContext) noexcept
+/// @brief 実行中Project Hubの配置をDeveloper隣接EditorまたはInstalled Version Rootとして検証する
+[[nodiscard]] cue::Result<ProjectHubExecutableEnvironment> inspect_executable_environment(
+    const cue::AssertContext &a_assertContext) noexcept
 {
     std::wstring modulePath(32768, L'\0');
     const DWORD capacity = static_cast<DWORD>(modulePath.size());
@@ -273,45 +461,96 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
         cue::ErrorCode code = cue::ErrorCode::create(a_assertContext.fatal_handler(), "Cue.ProjectHubTool", 1);
         cue::NativeError native =
             cue::NativeError::create(a_assertContext.fatal_handler(), "Win32", static_cast<std::int64_t>(nativeCode));
-        return cue::Result<std::string>::failure(cue::Error::create(a_assertContext.fatal_handler(), std::move(code),
-                                                                    "Project Hub executable path could not be read",
-                                                                    std::move(native)));
+        return cue::Result<ProjectHubExecutableEnvironment>::failure(cue::Error::create(
+            a_assertContext.fatal_handler(), std::move(code), "Project Hub executable path could not be read",
+            std::move(native)));
     }
     modulePath.resize(length);
-    const std::size_t separator = modulePath.find_last_of(L"\\/");
-    if (separator == std::wstring::npos)
+    const std::filesystem::path executablePath(modulePath);
+    const std::filesystem::path executableDirectory = executablePath.parent_path();
+    if (executableDirectory.empty())
     {
         cue::ErrorCode code = cue::ErrorCode::create(a_assertContext.fatal_handler(), "Cue.ProjectHubTool", 2);
-        return cue::Result<std::string>::failure(cue::Error::create(a_assertContext.fatal_handler(), std::move(code),
-                                                                    "Project Hub executable directory is invalid"));
+        return cue::Result<ProjectHubExecutableEnvironment>::failure(cue::Error::create(
+            a_assertContext.fatal_handler(), std::move(code), "Project Hub executable directory is invalid"));
     }
-    modulePath.resize(separator + 1);
-    try
-    {
-        modulePath.append(L"CueEditorTool.exe");
-    }
-    catch (...)
-    {
-        a_assertContext.fatal_handler().terminate("Project Hub editor executable path allocation failed");
-    }
-
-    std::string locator;
-    const cue::WindowsUtfConversionResult conversion =
-        cue::convert_windows_utf16_to_utf8(modulePath, locator, a_assertContext.fatal_handler());
+    const std::filesystem::path versionRoot = executableDirectory.parent_path();
+    const std::filesystem::path versionsRoot = versionRoot.parent_path();
+    const bool isInstalledLayout = _wcsicmp(executableDirectory.filename().c_str(), L"Bin") == 0 &&
+                                   _wcsicmp(versionsRoot.filename().c_str(), L"Versions") == 0 &&
+                                   !versionsRoot.parent_path().empty();
+    const std::filesystem::path selectedPath =
+        isInstalledLayout ? versionsRoot.parent_path() : executableDirectory / L"CueEditorTool.exe";
+    std::string convertedPath;
+    const cue::WindowsUtfConversionResult conversion = cue::convert_windows_utf16_to_utf8(
+        selectedPath.native(), convertedPath, a_assertContext.fatal_handler());
     if (conversion.status != cue::WindowsUtfConversionStatus::Success)
     {
         cue::ErrorCode code = cue::ErrorCode::create(a_assertContext.fatal_handler(), "Cue.ProjectHubTool", 3);
         cue::NativeError native =
             cue::NativeError::create(a_assertContext.fatal_handler(), "Win32", conversion.nativeCode);
-        return cue::Result<std::string>::failure(cue::Error::create(a_assertContext.fatal_handler(), std::move(code),
-                                                                    "Editor executable path conversion failed",
-                                                                    std::move(native)));
+        return cue::Result<ProjectHubExecutableEnvironment>::failure(cue::Error::create(
+            a_assertContext.fatal_handler(), std::move(code), "Project Hub executable path conversion failed",
+            std::move(native)));
     }
-    return cue::Result<std::string>::success(std::move(locator));
+    ProjectHubExecutableEnvironment environment;
+    if (isInstalledLayout)
+    {
+        environment.installRoot = std::move(convertedPath);
+    }
+    else
+    {
+        environment.developerEditorExecutable = std::move(convertedPath);
+    }
+    return cue::Result<ProjectHubExecutableEnvironment>::success(std::move(environment));
+}
+
+/// @brief Installed Versions Registry検査結果をUI非依存Project Hub Viewへ変換する
+[[nodiscard]] cue::Result<std::vector<cue::project_hub::InstalledEngineVersionView>>
+make_installed_engine_views(std::string_view a_installRoot, const cue::AssertContext &a_assertContext) noexcept
+{
+    auto inspected = cue::distribution::inspect_windows_installed_versions(a_installRoot, a_assertContext);
+    if (!inspected)
+    {
+        return cue::Result<std::vector<cue::project_hub::InstalledEngineVersionView>>::failure(
+            std::move(*inspected.try_error()));
+    }
+    try
+    {
+        std::vector<cue::project_hub::InstalledEngineVersionView> versions;
+        versions.reserve(inspected.try_value()->versions.size());
+        for (const cue::distribution::WindowsInstalledVersionInspection &version : inspected.try_value()->versions)
+        {
+            const std::optional<cue::EngineVersion> parsedVersion = parse_engine_version(version.engineVersion);
+            if (!parsedVersion)
+            {
+                cue::ErrorCode code =
+                    cue::ErrorCode::create(a_assertContext.fatal_handler(), "Cue.ProjectHubTool", 5);
+                return cue::Result<std::vector<cue::project_hub::InstalledEngineVersionView>>::failure(
+                    cue::Error::create(a_assertContext.fatal_handler(), std::move(code),
+                                       "Installed Engine Version is not canonical"));
+            }
+            std::string displayName = version.engineVersion;
+            if (!version.isAvailable)
+            {
+                displayName.append(" (利用不可)");
+            }
+            versions.push_back(cue::project_hub::InstalledEngineVersionView{
+                version.directoryName, std::move(displayName), *parsedVersion, version.bundleId,
+                version.manifestDigest, version.diagnostic, version.isAvailable, version.isSelected});
+        }
+        return cue::Result<std::vector<cue::project_hub::InstalledEngineVersionView>>::success(std::move(versions));
+    }
+    catch (...)
+    {
+        a_assertContext.fatal_handler().terminate("Installed Engine Version View allocation failed");
+    }
+    std::terminate();
 }
 
 /// @brief M12 Project Hubが生成・受理するProject VersionとCapability条件を構築する
 [[nodiscard]] cue::Result<cue::project_hub::ProjectHubConfiguration> make_configuration(
+    std::vector<cue::project_hub::InstalledEngineVersionView> a_installedEngineVersions,
     const cue::AssertContext &a_assertContext) noexcept
 {
     cue::Result<cue::ProjectCapabilityProfile> profile = cue::ProjectCapabilityProfile::create({}, a_assertContext);
@@ -324,10 +563,28 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     {
         return cue::Result<cue::project_hub::ProjectHubConfiguration>::failure(std::move(*snapshot.try_error()));
     }
+    cue::EngineVersion currentVersion{1U, 0U, 0U};
+    if (!a_installedEngineVersions.empty())
+    {
+        const auto selected = std::ranges::find_if(
+            a_installedEngineVersions,
+            [](const cue::project_hub::InstalledEngineVersionView &a_version) { return a_version.isSelected; });
+        if (selected == a_installedEngineVersions.end())
+        {
+            cue::ErrorCode code =
+                cue::ErrorCode::create(a_assertContext.fatal_handler(), "Cue.ProjectHubTool", 4);
+            return cue::Result<cue::project_hub::ProjectHubConfiguration>::failure(cue::Error::create(
+                a_assertContext.fatal_handler(), std::move(code), "Installed Engine Registry has no selected Version"));
+        }
+        currentVersion = selected->engineVersion;
+    }
     cue::project_hub::ProjectHubConfiguration configuration{
-        cue::k_currentProjectDescriptorSchemaVersion, cue::EngineVersion{1U, 0U, 0U}, std::move(*profile.try_value()),
+        cue::k_currentProjectDescriptorSchemaVersion,
+        currentVersion,
+        std::move(*profile.try_value()),
         std::move(*snapshot.try_value()),
-        cue::EngineCompatibility{cue::EngineVersion{1U, 0U, 0U}, cue::EngineVersion{2U, 0U, 0U}}};
+        cue::EngineCompatibility{cue::EngineVersion{1U, 0U, 0U}, cue::EngineVersion{2U, 0U, 0U}},
+        std::move(a_installedEngineVersions)};
     return cue::Result<cue::project_hub::ProjectHubConfiguration>::success(std::move(configuration));
 }
 
@@ -346,9 +603,25 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     {
         return show_initialization_failure(std::move(*workspace.try_error()), a_logger, a_assertContext);
     }
+    auto executableEnvironment = inspect_executable_environment(a_assertContext);
+    if (!executableEnvironment)
+    {
+        return show_initialization_failure(std::move(*executableEnvironment.try_error()), a_logger, a_assertContext);
+    }
+    std::vector<cue::project_hub::InstalledEngineVersionView> installedEngineVersions;
+    if (executableEnvironment.try_value()->installRoot)
+    {
+        auto inspected = make_installed_engine_views(*executableEnvironment.try_value()->installRoot, a_assertContext);
+        if (!inspected)
+        {
+            return show_initialization_failure(std::move(*inspected.try_error()), a_logger, a_assertContext);
+        }
+        installedEngineVersions = std::move(*inspected.try_value());
+    }
     cue::Result<std::unique_ptr<cue::project_hub::ProjectHubPlatform>> platform =
         cue::project_hub::create_windows_project_hub_platform(a_assertContext);
-    cue::Result<cue::project_hub::ProjectHubConfiguration> configuration = make_configuration(a_assertContext);
+    cue::Result<cue::project_hub::ProjectHubConfiguration> configuration =
+        make_configuration(std::move(installedEngineVersions), a_assertContext);
     if (!platform || !configuration)
     {
         cue::Error error = !platform ? std::move(*platform.try_error()) : std::move(*configuration.try_error());
@@ -364,16 +637,16 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     }
     cue::Result<std::unique_ptr<cue::project_hub::ProjectHubPresenter>> presenter =
         cue::project_hub::ProjectHubPresenter::create(**service.try_value(), a_assertContext);
-    cue::Result<std::string> editorExecutable = locate_editor_executable(a_assertContext);
-    if (!presenter || !editorExecutable)
+    if (!presenter)
     {
-        cue::Error error = !presenter ? std::move(*presenter.try_error()) : std::move(*editorExecutable.try_error());
         static_cast<void>(
-            a_logger.log(cue::LogLevel::Error, "Project Hub presentation initialization failed", std::move(error)));
+            a_logger.log(cue::LogLevel::Error, "Project Hub presentation initialization failed",
+                         std::move(*presenter.try_error())));
         return k_initializationFailure;
     }
 
-    ProjectHubToolClient client(**presenter.try_value(), std::move(*editorExecutable.try_value()), a_assertContext);
+    ProjectHubToolClient client(**presenter.try_value(), **service.try_value(),
+                                std::move(*executableEnvironment.try_value()), a_assertContext);
     const cue::tool_host::ToolHostDescriptor descriptor{
         "CueEngine Project Hub", {1280U, 720U}, 0U, static_cast<std::uint16_t>(IDI_CUE_PROJECT_HUB_TOOL)};
     cue::Result<void> hosted = cue::tool_host::run_windows_d3d12_tool_host(descriptor, client, a_assertContext);

@@ -451,6 +451,69 @@ void ProjectHubPresenter::draw(bool a_canLaunchEditor) noexcept
                                            !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
         const bool createShortcut = canUseGlobalShortcuts && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
         const bool registerShortcut = canUseGlobalShortcuts && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+        const std::span<const InstalledEngineVersionView> installedVersions = m_service->installed_engine_versions();
+        const InstalledEngineVersionView *selectedVersion = nullptr;
+        if (!installedVersions.empty())
+        {
+            const auto selectedVersionIterator = std::ranges::find_if(
+                installedVersions, [](const InstalledEngineVersionView &a_version) { return a_version.isSelected; });
+            if (selectedVersionIterator != installedVersions.end())
+            {
+                selectedVersion = &*selectedVersionIterator;
+            }
+            const char *preview = selectedVersion == nullptr ? "選択されていません" : selectedVersion->displayName.c_str();
+            ImGui::SetNextItemWidth(240.0F);
+            if (ImGui::BeginCombo("Engine Version", preview))
+            {
+                for (const InstalledEngineVersionView &version : installedVersions)
+                {
+                    ImGui::PushID(version.directoryName.c_str());
+                    ImGui::BeginDisabled(!version.isAvailable);
+                    if (ImGui::Selectable(version.displayName.c_str(), version.isSelected))
+                    {
+                        Result<void> selected = m_service->select_installed_engine_version(version.directoryName);
+                        if (!selected)
+                        {
+                            set_error(*selected.try_error());
+                        }
+                        else
+                        {
+                            m_installedEngineOperationRequest = InstalledEngineOperationRequest{
+                                InstalledEngineOperationKind::RollbackVersion, version.directoryName};
+                            set_status("Editorで使用するEngine Versionを変更しました。");
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    if (!version.diagnostic.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    {
+                        ImGui::SetTooltip("%s", version.diagnostic.c_str());
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+        }
+        if (ImGui::Button("Local BundleをInstall..."))
+        {
+            m_engineBundleBrowseRequested = true;
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("選択したLocal Developer Bundleを明示的にInstallします。公開配布の真正性は保証しません。");
+        }
+        if (!installedVersions.empty())
+        {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(selectedVersion == nullptr || !selectedVersion->isAvailable);
+            if (ImGui::Button("選択VersionをUninstall"))
+            {
+                m_pendingUninstallVersionDirectory = selectedVersion->directoryName;
+                m_openEngineUninstallDialog = true;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine();
         if (ImGui::Button("新しいProject (Ctrl+N)") || createShortcut)
         {
             m_openCreateDialog = true;
@@ -501,6 +564,7 @@ void ProjectHubPresenter::draw(bool a_canLaunchEditor) noexcept
     draw_create_dialog();
     draw_register_dialog();
     draw_remove_dialog();
+    draw_engine_uninstall_dialog();
     draw_migrate_dialog();
 }
 
@@ -941,6 +1005,43 @@ void ProjectHubPresenter::draw_remove_dialog() noexcept
     ImGui::EndPopup();
 }
 
+void ProjectHubPresenter::draw_engine_uninstall_dialog() noexcept
+{
+    if (m_openEngineUninstallDialog)
+    {
+        ImGui::OpenPopup("Installed EngineをUninstall");
+        m_openEngineUninstallDialog = false;
+    }
+    bool isOpen = true;
+    if (!ImGui::BeginPopupModal("Installed EngineをUninstall", &isOpen, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        if (!isOpen)
+        {
+            m_pendingUninstallVersionDirectory.clear();
+        }
+        return;
+    }
+    ImGui::TextUnformatted("選択したInstalled Engine Versionを削除対象にします。");
+    ImGui::TextUnformatted("実行中VersionはProject Hub終了後に外部Workerが削除します。");
+    if (ImGui::Button("Uninstall"))
+    {
+        m_installedEngineOperationRequest = InstalledEngineOperationRequest{
+            InstalledEngineOperationKind::UninstallVersion, std::move(m_pendingUninstallVersionDirectory)};
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("キャンセル") || ImGui::IsKeyPressed(ImGuiKey_Escape))
+    {
+        m_pendingUninstallVersionDirectory.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    if (!isOpen)
+    {
+        m_pendingUninstallVersionDirectory.clear();
+    }
+}
+
 void ProjectHubPresenter::draw_migrate_dialog() noexcept
 {
     if (m_openMigrateDialog)
@@ -1232,6 +1333,31 @@ void ProjectHubPresenter::apply_registration_selection(std::string_view a_projec
     }
 }
 
+bool ProjectHubPresenter::take_engine_bundle_browse_request() noexcept
+{
+    return std::exchange(m_engineBundleBrowseRequested, false);
+}
+
+void ProjectHubPresenter::apply_engine_bundle_selection(std::string_view a_bundleRoot) noexcept
+{
+    try
+    {
+        m_installedEngineOperationRequest = InstalledEngineOperationRequest{
+            InstalledEngineOperationKind::InstallUnsignedLocalBundle, std::string(a_bundleRoot)};
+    }
+    catch (...)
+    {
+        terminate_allocation(*m_assertContext);
+    }
+}
+
+std::optional<InstalledEngineOperationRequest> ProjectHubPresenter::take_installed_engine_operation_request() noexcept
+{
+    std::optional<InstalledEngineOperationRequest> request = std::move(m_installedEngineOperationRequest);
+    m_installedEngineOperationRequest.reset();
+    return request;
+}
+
 void ProjectHubPresenter::report_folder_browse_failure(const Error &a_error) noexcept
 {
     set_error(a_error);
@@ -1262,6 +1388,16 @@ void ProjectHubPresenter::report_editor_launch_failure(const Error &a_error) noe
 void ProjectHubPresenter::report_editor_process_completed() noexcept
 {
     set_status("Editorを終了しました。別のProjectを開けます。");
+}
+
+void ProjectHubPresenter::report_installed_engine_operation_completed(std::string_view a_message) noexcept
+{
+    set_status(a_message);
+}
+
+void ProjectHubPresenter::report_installed_engine_operation_failure(const Error &a_error) noexcept
+{
+    set_error(a_error);
 }
 
 bool ProjectHubPresenter::is_exit_requested() const noexcept

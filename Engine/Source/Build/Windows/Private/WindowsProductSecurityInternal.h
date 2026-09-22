@@ -77,4 +77,10 @@ class WindowsProductSecuritySnapshot final
 [[nodiscard]] Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher_for_test(
     std::string a_projectRoot, const ProjectDescriptor &a_descriptor,
     WindowsProductSecuritySnapshotObserver &a_observer, const AssertContext &a_assertContext) noexcept;
+
+/// @brief Installed SDK ProvenanceとSecurity Snapshot Observerを借用するTest用Publisherを構築する
+[[nodiscard]] Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher_for_test(
+    std::string a_projectRoot, const ProjectDescriptor &a_descriptor,
+    WindowsInstalledEngineSourceProvenance a_engineSourceProvenance,
+    WindowsProductSecuritySnapshotObserver &a_observer, const AssertContext &a_assertContext) noexcept;
 } // namespace cue::detail

@@ -3,6 +3,7 @@
 #include <Cue/Build/DiagnosticBundle.h>
 #include <Cue/Build/Windows/WindowsArtifactPublisher.h>
 #include <Cue/Build/Windows/WindowsToolchain.h>
+#include <Cue/Distribution/Windows/Installer.h>
 #include <Cue/Editor/ImGui/BuildPresenter.h>
 #include <Cue/Editor/ImGui/DebugView.h>
 #include <Cue/Editor/ImGui/EditorDockspace.h>
@@ -278,6 +279,7 @@ class WindowsBuildOperationIdSource final : public cue::editor::BuildOperationId
 struct EditorToolOptions final
 {
     cue::editor::WindowsEditorLaunchParameters parameters{};
+    cue::distribution::WindowsInheritedVersionExecutionLeaseRequest installedEngineRequest{};
     std::optional<std::string> processTestAction;
     std::uint64_t maximumFrameCount = 0U;
     bool hasProtocolVersion = false;
@@ -286,9 +288,36 @@ struct EditorToolOptions final
     bool hasCompatibilityId = false;
     bool hasInitialScene = false;
     bool hasExpectedInitialSceneAssetId = false;
+    bool hasEngineInstallRoot = false;
+    bool hasEngineVersionDirectory = false;
+    bool hasEngineBundleId = false;
+    bool hasEngineManifestDigest = false;
+    bool hasEngineExecutionLeaseHandle = false;
     bool hasMaximumFrameCount = false;
     bool hasProcessTestAction = false;
 };
+
+/// @brief Canonical major.minor.patch Engine Version文字列を所有Valueへ変換する
+[[nodiscard]] std::optional<cue::EngineVersion> parse_engine_version(std::string_view a_value) noexcept
+{
+    const std::size_t firstSeparator = a_value.find('.');
+    const std::size_t secondSeparator =
+        firstSeparator == std::string_view::npos ? firstSeparator : a_value.find('.', firstSeparator + 1U);
+    if (firstSeparator == std::string_view::npos || secondSeparator == std::string_view::npos ||
+        a_value.find('.', secondSeparator + 1U) != std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+    const auto major = cue::parse_unsigned_decimal<std::uint32_t>(a_value.substr(0U, firstSeparator));
+    const auto minor = cue::parse_unsigned_decimal<std::uint32_t>(
+        a_value.substr(firstSeparator + 1U, secondSeparator - firstSeparator - 1U));
+    const auto patch = cue::parse_unsigned_decimal<std::uint32_t>(a_value.substr(secondSeparator + 1U));
+    if (!major || !minor || !patch)
+    {
+        return std::nullopt;
+    }
+    return cue::EngineVersion{*major, *minor, *patch};
+}
 
 /// @brief Document終了後に継続するSceneまたはProject操作
 enum class PendingTransition : std::uint8_t
@@ -653,6 +682,77 @@ struct PlayWorkflowDocumentState final
                 options.parameters.expectedInitialSceneAssetId = std::move(*converted.try_value());
                 options.hasExpectedInitialSceneAssetId = true;
             }
+            else if (option == L"--engine-install-root")
+            {
+                if (options.hasEngineInstallRoot)
+                {
+                    return cue::Result<EditorToolOptions>::failure(
+                        make_tool_error(a_context, k_invalidArguments, "Engine install root is duplicated"));
+                }
+                cue::Result<std::string> converted = convert_argument(value, a_context);
+                if (!converted)
+                {
+                    return cue::Result<EditorToolOptions>::failure(std::move(*converted.try_error()));
+                }
+                options.installedEngineRequest.installRoot = std::move(*converted.try_value());
+                options.hasEngineInstallRoot = true;
+            }
+            else if (option == L"--engine-version-directory")
+            {
+                if (options.hasEngineVersionDirectory)
+                {
+                    return cue::Result<EditorToolOptions>::failure(
+                        make_tool_error(a_context, k_invalidArguments, "Engine version directory is duplicated"));
+                }
+                cue::Result<std::string> converted = convert_argument(value, a_context);
+                if (!converted)
+                {
+                    return cue::Result<EditorToolOptions>::failure(std::move(*converted.try_error()));
+                }
+                options.installedEngineRequest.versionDirectory = std::move(*converted.try_value());
+                options.hasEngineVersionDirectory = true;
+            }
+            else if (option == L"--engine-bundle-id")
+            {
+                if (options.hasEngineBundleId)
+                {
+                    return cue::Result<EditorToolOptions>::failure(
+                        make_tool_error(a_context, k_invalidArguments, "Engine bundle identity is duplicated"));
+                }
+                cue::Result<std::string> converted = convert_argument(value, a_context);
+                if (!converted)
+                {
+                    return cue::Result<EditorToolOptions>::failure(std::move(*converted.try_error()));
+                }
+                options.installedEngineRequest.bundleId = std::move(*converted.try_value());
+                options.hasEngineBundleId = true;
+            }
+            else if (option == L"--engine-manifest-digest")
+            {
+                if (options.hasEngineManifestDigest)
+                {
+                    return cue::Result<EditorToolOptions>::failure(
+                        make_tool_error(a_context, k_invalidArguments, "Engine manifest digest is duplicated"));
+                }
+                cue::Result<std::string> converted = convert_argument(value, a_context);
+                if (!converted)
+                {
+                    return cue::Result<EditorToolOptions>::failure(std::move(*converted.try_error()));
+                }
+                options.installedEngineRequest.manifestDigest = std::move(*converted.try_value());
+                options.hasEngineManifestDigest = true;
+            }
+            else if (option == L"--engine-execution-lease-handle")
+            {
+                const auto handleValue = cue::parse_unsigned_decimal<std::uintptr_t>(value);
+                if (options.hasEngineExecutionLeaseHandle || !handleValue || *handleValue == 0U)
+                {
+                    return cue::Result<EditorToolOptions>::failure(make_tool_error(
+                        a_context, k_invalidArguments, "Engine Execution Lease handle is duplicated or invalid"));
+                }
+                options.installedEngineRequest.inheritedLeaseHandle = *handleValue;
+                options.hasEngineExecutionLeaseHandle = true;
+            }
             else if (option == L"--maximum-frame-count")
             {
                 const std::optional<std::uint64_t> frameCount = cue::parse_unsigned_decimal<std::uint64_t>(value);
@@ -696,6 +796,16 @@ struct PlayWorkflowDocumentState final
             return cue::Result<EditorToolOptions>::failure(make_tool_error(
                 a_context, k_invalidArguments, "Expected initial SceneAssetId requires an initial scene locator"));
         }
+        const std::size_t installedOptionCount = static_cast<std::size_t>(options.hasEngineInstallRoot) +
+                                                 static_cast<std::size_t>(options.hasEngineVersionDirectory) +
+                                                 static_cast<std::size_t>(options.hasEngineBundleId) +
+                                                 static_cast<std::size_t>(options.hasEngineManifestDigest) +
+                                                 static_cast<std::size_t>(options.hasEngineExecutionLeaseHandle);
+        if (installedOptionCount != 0U && installedOptionCount != 5U)
+        {
+            return cue::Result<EditorToolOptions>::failure(make_tool_error(
+                a_context, k_invalidArguments, "Installed Engine launch options must be supplied as one contract"));
+        }
         if (options.hasProcessTestAction &&
             (!options.hasInitialScene || !options.hasMaximumFrameCount ||
              (*options.processTestAction != "autosave-recovery" && *options.processTestAction != "autosave-new-scene" &&
@@ -719,7 +829,7 @@ struct PlayWorkflowDocumentState final
 
 /// @brief 現在BuildがM12で対応するProject互換性入力を生成する
 [[nodiscard]] cue::Result<cue::editor::WindowsEditorEngineConfiguration> make_engine_configuration(
-    const cue::AssertContext &a_context) noexcept
+    cue::EngineVersion a_engineVersion, const cue::AssertContext &a_context) noexcept
 {
     cue::Result<cue::ProjectCapabilityProfile> profile = cue::ProjectCapabilityProfile::create({}, a_context);
     if (!profile)
@@ -732,7 +842,7 @@ struct PlayWorkflowDocumentState final
         return cue::Result<cue::editor::WindowsEditorEngineConfiguration>::failure(std::move(*snapshot.try_error()));
     }
     return cue::Result<cue::editor::WindowsEditorEngineConfiguration>::success(
-        {cue::k_currentProjectDescriptorSchemaVersion, cue::EngineVersion{1U, 0U, 0U}, std::move(*profile.try_value()),
+        {cue::k_currentProjectDescriptorSchemaVersion, a_engineVersion, std::move(*profile.try_value()),
          std::move(*snapshot.try_value())});
 }
 
@@ -744,6 +854,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
     EditorToolClient(cue::editor::WindowsEditorSession &a_session, cue::Logger &a_logger,
                      cue::editor::EditorSessionLogRouter &a_logRouter,
                      std::span<const cue::runtime::RuntimeSystemFactory *const> a_systemFactories,
+                     const cue::distribution::WindowsInstalledVersionExecutionLease *a_installedEngineLease,
                      const cue::AssertContext &a_assertContext) noexcept
         : m_session(&a_session), m_assertContext(&a_assertContext), m_rendererSystemFactory(m_runtimeRenderSnapshot)
     {
@@ -823,7 +934,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                 cue::editor::PlaySessionPresenter::create(*m_playController, a_logger, a_logRouter, a_assertContext);
             m_filesPresenter =
                 std::make_unique<cue::editor::FilesPresenter>(a_session.files_workspace(), a_assertContext);
-            initialize_build_workflow(a_logger);
+            initialize_build_workflow(a_logger, a_installedEngineLease);
             refresh_recovery_candidates();
             rebuild_presenter();
         }
@@ -1677,9 +1788,28 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
 
   private:
     /// @brief 現在のWindows ToolchainをBuild Service、Artifact Publisher、ImGui Presenterへ接続する
-    void initialize_build_workflow(cue::Logger &a_logger) noexcept
+    void initialize_build_workflow(
+        cue::Logger &a_logger,
+        const cue::distribution::WindowsInstalledVersionExecutionLease *a_installedEngineLease) noexcept
     {
-        cue::BuildEnvironmentReport environment = cue::validate_current_windows_build_environment(*m_assertContext);
+        cue::BuildEnvironmentReport environment;
+        if (a_installedEngineLease != nullptr)
+        {
+            cue::BuildEnvironmentInventory inventory =
+                cue::discover_current_windows_build_environment(*m_assertContext);
+            inventory.engineSourceRoot = a_installedEngineLease->engine_source_root();
+            inventory.engineSourceAvailable = true;
+            inventory.engineBinaryRoot.clear();
+            inventory.engineBinaryAvailable = false;
+            cue::BuildEnvironmentRequirements requirements =
+                cue::current_windows_build_requirements(*m_assertContext);
+            requirements.requiresEngineBinary = false;
+            environment = cue::validate_build_environment(inventory, requirements, *m_assertContext);
+        }
+        else
+        {
+            environment = cue::validate_current_windows_build_environment(*m_assertContext);
+        }
         if (environment.support != cue::BuildEnvironmentSupport::Supported)
         {
             m_buildUnavailableMessage = "Game Buildは現在のToolchain構成では利用できません。";
@@ -1746,14 +1876,24 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                               processRunner ? std::move(*packageBuildProcessRunner.try_error())
                                             : std::move(*processRunner.try_error()));
         }
-        cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>> artifactPublisher =
-            cue::create_windows_build_artifact_publisher(std::string(m_session->project_locator()),
-                                                         m_session->controller().session().project_descriptor(),
-                                                         *m_assertContext);
-        cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>> packageArtifactPublisher =
-            cue::create_windows_build_artifact_publisher(std::string(m_session->project_locator()),
-                                                         m_session->controller().session().project_descriptor(),
-                                                         *m_assertContext);
+        auto createArtifactPublisher = [&]() noexcept
+        {
+            if (a_installedEngineLease == nullptr)
+            {
+                return cue::create_windows_build_artifact_publisher(
+                    std::string(m_session->project_locator()),
+                    m_session->controller().session().project_descriptor(), *m_assertContext);
+            }
+            cue::WindowsInstalledEngineSourceProvenance provenance{
+                a_installedEngineLease->engine_source_root(), a_installedEngineLease->engine_source_revision(),
+                a_installedEngineLease->source_inventory_hash(),
+                a_installedEngineLease->publisher_build_identity_digest()};
+            return cue::create_windows_build_artifact_publisher(
+                std::string(m_session->project_locator()),
+                m_session->controller().session().project_descriptor(), std::move(provenance), *m_assertContext);
+        };
+        cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>> artifactPublisher = createArtifactPublisher();
+        cue::Result<std::unique_ptr<cue::BuildArtifactPublisher>> packageArtifactPublisher = createArtifactPublisher();
         cue::Result<std::unique_ptr<cue::BuildArtifactReader>> packageArtifactReader =
             cue::create_windows_build_artifact_reader(std::string(m_session->project_locator()),
                                                       m_session->controller().session().project_descriptor(),
@@ -1770,6 +1910,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         cue::CMakeRunnerSettings runnerSettings{
             cmake->nativePath,       environment.engineSourceRoot, std::move(environmentAllowlist),
             std::chrono::minutes(5), std::chrono::minutes(30),     *toolsetVersion};
+        runnerSettings.buildsRuntimeHost = a_installedEngineLease != nullptr;
         cue::Result<std::unique_ptr<cue::GameBuildService>> service =
             cue::GameBuildService::create(runnerSettings, std::move(*processRunner.try_value()),
                                           std::move(*artifactPublisher.try_value()), *m_assertContext);
@@ -1791,8 +1932,11 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             std::make_unique<WindowsBuildOperationIdSource>(*m_assertContext), *m_assertContext);
         cue::Result<std::unique_ptr<cue::FilesystemRoot>> projectFilesystem =
             cue::create_windows_filesystem_root(m_session->project_locator(), *m_assertContext);
+        const std::string_view engineBinaryRoot = a_installedEngineLease != nullptr
+                                                      ? m_session->project_locator()
+                                                      : std::string_view(environment.engineBinaryRoot);
         cue::Result<std::unique_ptr<cue::FilesystemRoot>> engineBinaryFilesystem =
-            cue::create_windows_filesystem_root(environment.engineBinaryRoot, *m_assertContext);
+            cue::create_windows_filesystem_root(engineBinaryRoot, *m_assertContext);
         cue::Result<std::unique_ptr<cue::ChildProcessRunner>> runProcessRunner =
             cue::create_windows_child_process_runner(*m_assertContext);
         if (!projectFilesystem || !engineBinaryFilesystem || !runProcessRunner)
@@ -1809,6 +1953,8 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                 std::move(*packageBuildService.try_value()), std::move(*packageArtifactReader.try_value()),
                 std::move(*projectFilesystem.try_value()), std::move(*engineBinaryFilesystem.try_value()),
                 std::move(*runProcessRunner.try_value()), std::string(m_session->project_locator()), runEnvironment,
+                a_installedEngineLease != nullptr ? cue::package::RuntimeHostBuildSource::ProjectBuildTree
+                                                  : cue::package::RuntimeHostBuildSource::EngineBinaryRoot,
                 *m_assertContext);
         if (!packageService)
         {
@@ -2969,8 +3115,31 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                       cue::editor::EditorSessionLogRouter &a_logRouter,
                       const cue::AssertContext &a_assertContext) noexcept
 {
+    cue::EngineVersion engineVersion{1U, 0U, 0U};
+    std::optional<cue::distribution::WindowsInstalledVersionExecutionLease> installedEngineLease;
+    if (a_options.hasEngineInstallRoot)
+    {
+        auto adoptedLease = cue::distribution::adopt_windows_inherited_version_execution_lease(
+            a_options.installedEngineRequest, a_assertContext);
+        if (!adoptedLease)
+        {
+            return report_error(a_logger, "Installed Engine lease adoption failed",
+                                std::move(*adoptedLease.try_error()), k_sessionInitializationFailed);
+        }
+        const std::optional<cue::EngineVersion> installedVersion =
+            parse_engine_version(adoptedLease.try_value()->engine_version());
+        if (!installedVersion)
+        {
+            return report_error(a_logger, "Installed Engine version is invalid",
+                                make_tool_error(a_assertContext, k_sessionInitializationFailed,
+                                                "Validated Installed Engine Version is not canonical"),
+                                k_sessionInitializationFailed);
+        }
+        engineVersion = *installedVersion;
+        installedEngineLease.emplace(std::move(*adoptedLease.try_value()));
+    }
     cue::Result<cue::editor::WindowsEditorEngineConfiguration> configuration =
-        make_engine_configuration(a_assertContext);
+        make_engine_configuration(engineVersion, a_assertContext);
     if (!configuration)
     {
         return report_error(a_logger, "Editor engine configuration failed", std::move(*configuration.try_error()),
@@ -3007,7 +3176,8 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
         systemFactories = playWorkflowFactories;
     }
     {
-        EditorToolClient client(**session.try_value(), a_logger, a_logRouter, systemFactories, a_assertContext);
+        EditorToolClient client(**session.try_value(), a_logger, a_logRouter, systemFactories,
+                                installedEngineLease ? &*installedEngineLease : nullptr, a_assertContext);
         if (buildWorkflowConfiguration)
         {
             cue::Result<void> workflow = client.run_build_workflow_process_test(*buildWorkflowConfiguration);
@@ -3086,6 +3256,9 @@ int wmain(int a_argumentCount, wchar_t **a_arguments)
         {
             std::fputws(L"Usage: CueEditorTool --protocol-version <version> --project-descriptor <absolute path> "
                         L"--expected-project-id <uuid> --engine-compatibility-id <id> [--initial-scene <path>] "
+                        L"[--engine-install-root <absolute path> --engine-version-directory <name> "
+                        L"--engine-bundle-id <uuid> --engine-manifest-digest <sha256> "
+                        L"--engine-execution-lease-handle <handle>] "
                         L"[--maximum-frame-count <count>]\n",
                         stderr);
             return report_error(logger, "Editor command line is invalid", std::move(*options.try_error()),

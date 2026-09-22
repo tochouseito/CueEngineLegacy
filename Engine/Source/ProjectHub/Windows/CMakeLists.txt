@@ -17,6 +17,7 @@ target_link_libraries(
     PUBLIC
         Cue.ProjectHub
     PRIVATE
+        Cue.Distribution.Windows
         Cue.Foundation.Windows
         Cue.IO.Windows
         bcrypt

@@ -87,6 +87,7 @@ struct BuildEnvironmentRequirements final
     BuildArchitecture hostArchitecture = BuildArchitecture::X64;
     std::vector<BuildToolRequirement> tools;
     std::vector<BuildConfiguration> supportedConfigurations;
+    bool requiresEngineBinary = true;
 };
 
 /// @brief 検出結果全体または個別問題の対応可否

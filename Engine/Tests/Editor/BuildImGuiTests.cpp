@@ -446,7 +446,8 @@ void test_package_retry_and_diagnostic(const cue::AssertContext &a_assertContext
     auto workflow = cue::package::GamePackageWorkflowService::create(
         std::move(*build.try_value()), std::make_unique<TestArtifactReader>(),
         std::move(*projectFilesystem.try_value()), std::move(*engineFilesystem.try_value()),
-        std::make_unique<ControlledRunner>(runState), projectRoot.generic_string(), {}, a_assertContext);
+        std::make_unique<ControlledRunner>(runState), projectRoot.generic_string(), {},
+        cue::package::RuntimeHostBuildSource::EngineBinaryRoot, a_assertContext);
     require(workflow.has_value());
     std::unique_ptr<cue::package::GamePackageWorkflowService> service = std::move(*workflow.try_value());
 
