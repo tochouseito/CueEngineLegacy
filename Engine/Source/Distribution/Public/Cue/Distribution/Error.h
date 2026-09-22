@@ -40,7 +40,9 @@ enum class DistributionError : std::int64_t
     UnsupportedInstallSchema = 23,
     NonCanonicalInstallState = 24,
     InstallConflict = 25,
-    InstallRecoveryBlocked = 26
+    InstallRecoveryBlocked = 26,
+    InstalledVersionBusy = 27,
+    InstalledVersionProtected = 28
 };
 
 /// @brief Distribution Domainの回復可能Errorを生成する

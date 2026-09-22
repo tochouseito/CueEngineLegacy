@@ -147,6 +147,55 @@ namespace
     return 0;
 }
 
+/// @brief Install済みVersionのRollback選択または外部WorkerへのUninstall委譲を実行する
+[[nodiscard]] int run_version_operation(int a_argumentCount, wchar_t **a_arguments, cue::Logger &a_logger,
+                                        const cue::AssertContext &a_assertContext)
+{
+    const std::wstring_view command = a_argumentCount > 1 ? std::wstring_view(a_arguments[1]) : std::wstring_view{};
+    auto installRoot = argument_value(a_argumentCount, a_arguments, L"--install-root");
+    auto versionDirectory = argument_value(a_argumentCount, a_arguments, L"--version-directory");
+    if (!installRoot)
+    {
+        installRoot = default_install_root();
+    }
+    if ((command != L"rollback" && command != L"uninstall") || !installRoot || !versionDirectory)
+    {
+        static_cast<void>(a_logger.log(cue::LogLevel::Error,
+                                       "Usage: CueEngineInstallerTool <rollback|uninstall> --version-directory <name> "
+                                       "[--install-root <absolute>]"));
+        return 2;
+    }
+
+    cue::distribution::WindowsInstalledVersionRequest request;
+    request.installRoot = std::move(*installRoot);
+    request.versionDirectory = std::move(*versionDirectory);
+    if (command == L"rollback")
+    {
+        auto rolledBack = cue::distribution::rollback_windows_installed_version(request, a_assertContext);
+        if (!rolledBack)
+        {
+            static_cast<void>(a_logger.log(cue::LogLevel::Error, "Installed Version rollback failed",
+                                           std::move(*rolledBack.try_error())));
+            return 1;
+        }
+        static_cast<void>(a_logger.log(cue::LogLevel::Info, rolledBack.try_value()->wasAlreadySelected
+                                                                ? "Installed Version is already selected"
+                                                                : "Installed Version rollback completed"));
+        return 0;
+    }
+
+    auto uninstalled = cue::distribution::uninstall_windows_installed_version(request, a_assertContext);
+    if (!uninstalled)
+    {
+        static_cast<void>(a_logger.log(cue::LogLevel::Error, "Installed Version uninstall failed",
+                                       std::move(*uninstalled.try_error())));
+        return 1;
+    }
+    static_cast<void>(a_logger.log(cue::LogLevel::Info, "Installed Version uninstall was delegated to worker process " +
+                                                            std::to_string(uninstalled.try_value()->workerProcessId)));
+    return 0;
+}
+
 /// @brief Installer CLIのModeを選択して実行する
 [[nodiscard]] int run(int a_argumentCount, wchar_t **a_arguments, cue::Logger &a_logger,
                       const cue::AssertContext &a_assertContext)
@@ -154,6 +203,11 @@ namespace
     if (has_argument(a_argumentCount, a_arguments, L"--install-probe"))
     {
         return run_probe(a_argumentCount, a_arguments, a_logger, a_assertContext);
+    }
+    if (a_argumentCount > 1 &&
+        (std::wstring_view(a_arguments[1]) == L"rollback" || std::wstring_view(a_arguments[1]) == L"uninstall"))
+    {
+        return run_version_operation(a_argumentCount, a_arguments, a_logger, a_assertContext);
     }
     return run_install(a_argumentCount, a_arguments, a_logger, a_assertContext);
 }

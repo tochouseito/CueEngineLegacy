@@ -68,6 +68,7 @@ if(WIN32)
     add_dependencies(
         CueDistributionWindowsInstallerTests
         CueEngineInstallerTool
+        CueEngineInstallWorker
         CueDistributionInstallerProbeHelper
     )
     add_dependencies(
@@ -78,6 +79,11 @@ if(WIN32)
     )
     target_link_libraries(CueDistributionWindowsPublisherTests PRIVATE Cue.Distribution.Windows)
     target_link_libraries(CueDistributionWindowsInstallerTests PRIVATE Cue.Distribution.Windows)
+    target_include_directories(
+        CueDistributionWindowsInstallerTests
+        PRIVATE
+            "${CMAKE_SOURCE_DIR}/Engine/Source/Distribution/Windows/Private"
+    )
     target_compile_features(CueDistributionWindowsPublisherTests PRIVATE cxx_std_20)
     target_compile_features(CueDistributionWindowsInstallerTests PRIVATE cxx_std_20)
     target_compile_features(CueDistributionInstallerProbeHelper PRIVATE cxx_std_20)
@@ -146,6 +152,10 @@ if(WIN32)
         NAME Cue.Distribution.WindowsInstallerRecovery
         COMMAND CueDistributionWindowsInstallerTests --registry-recovery
     )
+    add_test(
+        NAME Cue.Distribution.WindowsInstallerVersionOperations
+        COMMAND CueDistributionWindowsInstallerTests --version-operations
+    )
     list(
         APPEND
         cueDistributionTests
@@ -153,6 +163,7 @@ if(WIN32)
         Cue.Distribution.WindowsPublisher
         Cue.Distribution.WindowsInstaller
         Cue.Distribution.WindowsInstallerRecovery
+        Cue.Distribution.WindowsInstallerVersionOperations
     )
 endif()
 
@@ -167,6 +178,7 @@ if(WIN32)
     set_tests_properties(
         Cue.Distribution.WindowsInstaller
         Cue.Distribution.WindowsInstallerRecovery
-        PROPERTIES TIMEOUT 240
+        Cue.Distribution.WindowsInstallerVersionOperations
+        PROPERTIES TIMEOUT 360
     )
 endif()

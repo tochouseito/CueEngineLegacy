@@ -134,6 +134,8 @@ struct InstallOperationJournal final
     InstallOperationKind kind = InstallOperationKind::Install;
     InstallOperationStage stage = InstallOperationStage::Prepared;
     std::string workerId;
+    std::string workerExecutableDigest;
+    std::string workerMarkerDigest;
     std::optional<ExpectedRegistry> expectedRegistry;
     std::optional<InstallOperationTarget> target;
     std::optional<RegistrySourceEvidence> sourceRegistryEvidence;

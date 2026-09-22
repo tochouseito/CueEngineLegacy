@@ -198,8 +198,12 @@ void append_identity_number(std::string &a_output, std::uint64_t a_value)
         return false;
     }
     const bool isRecovery = a_journal.kind == InstallOperationKind::RegistryRecovery;
+    const bool hasWorkerEvidence =
+        is_canonical_sha256(a_journal.workerExecutableDigest) && is_canonical_sha256(a_journal.workerMarkerDigest);
+    const bool hasNoWorkerEvidence = a_journal.workerExecutableDigest.empty() && a_journal.workerMarkerDigest.empty();
     if (isRecovery != a_journal.sourceRegistryEvidence.has_value() ||
-        isRecovery == a_journal.expectedRegistry.has_value() || isRecovery == a_journal.target.has_value())
+        isRecovery == a_journal.expectedRegistry.has_value() || isRecovery == a_journal.target.has_value() ||
+        (a_journal.kind == InstallOperationKind::Uninstall ? !hasWorkerEvidence : !hasNoWorkerEvidence))
     {
         return false;
     }
@@ -705,8 +709,16 @@ void append_source_evidence(std::string &a_output,
     return cursor.consume("}") && cursor.at_end() ? std::optional(std::move(registry)) : std::nullopt;
 }
 
-/// @brief Journalを検証済みCanonical Byte列へ変換する
-[[nodiscard]] std::string serialize_journal(const cue::distribution::InstallOperationJournal &a_journal)
+/// @brief ParseしたJournalと入力LayoutのCanonical化情報を保持する
+struct ParsedInstallOperationJournal final
+{
+    cue::distribution::InstallOperationJournal journal;
+    bool hasWorkerEvidenceFields = false;
+};
+
+/// @brief Journalを指定v1 Layoutの検証済みCanonical Byte列へ変換する
+[[nodiscard]] std::string serialize_journal(const cue::distribution::InstallOperationJournal &a_journal,
+                                            bool a_includeWorkerEvidence = true)
 {
     using namespace cue::distribution;
     std::string output;
@@ -718,6 +730,13 @@ void append_source_evidence(std::string &a_output,
     append_string(output, install_operation_stage_name(a_journal.stage));
     output.append(",\"workerId\":");
     append_string(output, a_journal.workerId);
+    if (a_includeWorkerEvidence)
+    {
+        output.append(",\"workerExecutableDigest\":");
+        append_string(output, a_journal.workerExecutableDigest);
+        output.append(",\"workerMarkerDigest\":");
+        append_string(output, a_journal.workerMarkerDigest);
+    }
     output.append(",\"expectedRegistry\":");
     append_expected_registry(output, a_journal.expectedRegistry);
     output.append(",\"target\":");
@@ -758,7 +777,7 @@ void append_source_evidence(std::string &a_output,
 }
 
 /// @brief Journal Byte列を既知SchemaへParseする
-[[nodiscard]] std::optional<cue::distribution::InstallOperationJournal> parse_journal(std::string_view a_bytes)
+[[nodiscard]] std::optional<ParsedInstallOperationJournal> parse_journal(std::string_view a_bytes)
 {
     using namespace cue::distribution;
     if (a_bytes.empty() || a_bytes.size() > k_maximumInstallStateBytes || a_bytes.back() != '\n')
@@ -776,7 +795,7 @@ void append_source_evidence(std::string &a_output,
     auto worker = read_string_member(cursor, "workerId", ",");
     auto kind = kindName ? parse_kind(*kindName) : std::nullopt;
     auto stage = stageName ? parse_stage(*stageName) : std::nullopt;
-    if (!operation || !worker || !kind || !stage || !cursor.consume(",\"expectedRegistry\":"))
+    if (!operation || !worker || !kind || !stage)
     {
         return std::nullopt;
     }
@@ -785,6 +804,23 @@ void append_source_evidence(std::string &a_output,
     journal.kind = *kind;
     journal.stage = *stage;
     journal.workerId = std::move(*worker);
+    bool hasWorkerEvidenceFields = false;
+    if (cursor.consume(",\"workerExecutableDigest\":"))
+    {
+        auto workerExecutableDigest = cursor.read_string();
+        auto workerMarkerDigest = read_string_member(cursor, "workerMarkerDigest", ",");
+        if (!workerExecutableDigest || !workerMarkerDigest)
+        {
+            return std::nullopt;
+        }
+        journal.workerExecutableDigest = std::move(*workerExecutableDigest);
+        journal.workerMarkerDigest = std::move(*workerMarkerDigest);
+        hasWorkerEvidenceFields = true;
+    }
+    if (!cursor.consume(",\"expectedRegistry\":"))
+    {
+        return std::nullopt;
+    }
     if (!read_expected_registry(cursor, journal.expectedRegistry) || !cursor.consume(",\"target\":") ||
         !read_target(cursor, journal.target) || !cursor.consume(",\"sourceRegistryEvidence\":") ||
         !read_source_evidence(cursor, journal.sourceRegistryEvidence) || !cursor.consume(",\"blockedOperations\":["))
@@ -842,7 +878,9 @@ void append_source_evidence(std::string &a_output,
             }
         }
     }
-    return cursor.consume("}") && cursor.at_end() ? std::optional(std::move(journal)) : std::nullopt;
+    return cursor.consume("}") && cursor.at_end()
+               ? std::optional(ParsedInstallOperationJournal{std::move(journal), hasWorkerEvidenceFields})
+               : std::nullopt;
 }
 
 /// @brief 三つのIdentity文字列を持つMarkerを固定順で生成する
@@ -1183,13 +1221,14 @@ Result<InstallOperationJournal> read_install_operation_journal(std::string_view 
     }
     try
     {
-        auto journal = parse_journal(a_bytes);
-        if (!journal || !is_valid_journal(*journal) || serialize_journal(*journal) != a_bytes)
+        auto parsed = parse_journal(a_bytes);
+        if (!parsed || !is_valid_journal(parsed->journal) ||
+            serialize_journal(parsed->journal, parsed->hasWorkerEvidenceFields) != a_bytes)
         {
             return parse_failure<InstallOperationJournal>(a_assertContext,
                                                           "Install Operation Journal is not canonical v1");
         }
-        return Result<InstallOperationJournal>::success(std::move(*journal));
+        return Result<InstallOperationJournal>::success(std::move(parsed->journal));
     }
     catch (const std::bad_alloc &)
     {

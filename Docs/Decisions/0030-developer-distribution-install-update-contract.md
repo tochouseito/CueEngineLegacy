@@ -105,9 +105,9 @@ Publisher Build IdentityとしてManifestへ記録する。生成Binaryは期待
 Size／SHA-256を検証し、`builtFromRevision`で固定Commitへ結び付ける。Source管理Payloadと生成Binaryの検証を
 同じ規則で代用しない。
 
-Manifest v1の共通Publisher Build Identityは通常Toolの`dynamic` CRT Linkageを記録する。Bootstrap Roleだけは
-同じIdentityの`crtLinkage`を`static`へ置換した固定例外としてPublisher Evidenceで検証し、他のTool Roleへ
-`static`を許可しない。Bootstrapが`/MT`で自己完結する契約はRoleから一意に導出する。
+Manifest v1の共通Publisher Build Identityは通常Toolの`dynamic` CRT Linkageを記録する。Bootstrap Roleと
+Install Worker Roleだけは同じIdentityの`crtLinkage`を`static`へ置換した固定例外としてPublisher Evidenceで
+検証し、他のTool Roleへ`static`を許可しない。両Roleが`/MT`で自己完結する契約はRoleから一意に導出する。
 
 Inventory生成後にHEAD、Index、Tracked／Untracked状態を再読込して開始時と変化していれば公開を拒否する。
 Repository Rootからの場当たり的な再帰Copyは行わず、検証済みRevision、`clean` Source State、Source
@@ -277,6 +277,11 @@ Memberとする。Reader／Workerは対応外Schema、未知Member、欠落Membe
 Quarantineし、Payload／Registryを推測で変更しない。意味変更と移行は専用Issueで新Schemaと明示Migrationを
 定義し、暗黙Upgradeしない。
 
+初期Journal v1 Writerが生成したWorker executable Digest／Worker完了Marker Digestを持たないCanonical Byte列は、
+`uninstall`以外に限って旧v1 LayoutとしてReaderが受理する。欠落Digestを必要とする`uninstall`はFail-closedで拒否し、
+受理した旧Layoutは読取りだけで書き換えず、次に正当なStage更新をAtomic Publishするとき現行v1 Layoutへ更新する。
+現行Writerは常に両Digest Memberを出力し、未知Member、順序違い、非Canonical表現を移行扱いにしない。
+
 `registryRecovery`はExpected Registry Generation ID／Revision、単一Version／Bundle Identity、単一Manifest
 Digestを持たない。
 代わりに`sourceRegistryEvidence`を`prepared`から必須とする。既存破損Fileは`kind: corrupt`、退避Evidence
@@ -331,6 +336,13 @@ Journal削除だけを再実行する。
   Worker executable、Worker完了MarkerのIdentity／Inventory／Digestを検証した後、対象Versionの共有Execution Leaseを
   取得する。取得後にRegistryと同じWorker証拠を再確認してからControl Leaseを解放し、Execution Lease Handleを
   Child Processへ継承してProcess終了まで保持する。不一致Versionは起動せずSelectableとして表示しない
+- Install Worker起動はVolume Root直下からWorker Directoryまでの全Directoryを非Reparse Handleで順に開き、
+  `FILE_SHARE_DELETE`なしで検証開始から`CreateProcessW`完了まで祖先Renameを拒否する。Processは
+  検証済みWorker Handleから物理Volume側へ解決した正規DOS Pathを使用してSUBST Aliasへの依存を減らし、
+  `CREATE_SUSPENDED`でImage Mappingを完了させる。停止中ProcessのNative Image Device Pathを
+  `\\?\GLOBALROOT`経由で開き、検証済みWorker HandleとVolume Serial NumberおよびFile IDが一致した場合だけ
+  Primary Threadを再開して祖先Handleを解放する。DOS Drive文字を最終的な信頼根拠にしない。
+  Child側の補助照合もPath文字列ではなくVolume Serial NumberとFile IDを使用する
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
 - 自分自身を含むVersionのUninstallは対象Version内のProcessから直接削除しない。Install時にInventory検証して
@@ -340,6 +352,10 @@ Journal削除だけを再実行する。
   `pendingRemoval`へAtomic Publishして新規起動を止め、Versionを同一VolumeのQuarantineへRenameし、Registryから
   Entryを削除する。各段階をJournalからRollbackまたは再開できる場合だけQuarantineを最終削除する
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
+- Registry Recoveryが未完了Uninstall対象を除外した結果、別のSelectable Versionを再構築できない場合は、
+  Journal Stageや対象Entryの有無にかかわらず最後の有効Payloadを削除しない
+- 代替Selectable VersionはRegistry Entryだけを信用せず、Manifest、Payload／Probe Marker、Worker証拠まで
+  起動時と同じ基準で再検証してからUninstallを続行する
 - `workerPublished` StageとWorker完了MarkerがJournalのWorker Identity／Digestに一致しないVersionはSelectableにせず、
   そのWorkerへRollback／Uninstallを委譲しない
 - Worker IDはManifestの検証済みIdentity／Inventoryから導出する64文字lowercase SHA-256 hexだけを許可し、
@@ -356,7 +372,12 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Bundleの最初のEntry PointはEngine LibraryへLinkしないFirst-party `CueEngineBootstrap.exe`とし、
   `/MT`で自己完結させる。BootstrapはHost Architecture、VC++ Runtime、InstallerのInventoryを検査し、
   Runtimeが利用可能な場合だけ`CueEngineInstallerTool.exe`を起動する。BootstrapはCRT Security更新時に
-  再Build／再配布する。通常のEditor、Project Hub、RuntimeHost、Shipping Productは`/MD`を維持する
+  再Build／再配布する
+- Version外から自己Uninstallを継続するFirst-party `CueEngineInstallWorker.exe`と、その専用First-party依存閉包も
+  `/MT`でBuildする。Workerは可変な対象Version内のApplication-local CRT DLLをProcess起動時に解決せず、
+  Importを`KERNEL32.dll`と`ole32.dll`だけに限定し、Delay Importを持たない。VC++ RedistributableをWorker向けに
+  同梱せず、MSVC CRTのSecurity更新時はWorkerと静的依存閉包を再Build／再配布する。通常のEditor、Project Hub、
+  RuntimeHost、Installer、Shipping Productは`/MD`を維持する
 - Microsoft VC++ Redistributable BinaryをRepositoryまたはBundleへ同梱しない。将来同梱する場合は、
   正確なVersion、Microsoftの再配布条件、取得元、署名、Silent Install、Reboot、更新責任を提示し、
   User承認を得る
@@ -412,6 +433,9 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Worker IDのCanonical Path境界、Worker executable Digest、Worker完了Marker DigestをRecovery候補と
   `candidatesValidated` Stageで検証し、欠落Workerを持つVersionをSelectableへ復活させない
 - Operation Journalの未知Schema／Member、Kind別v1列挙外Stage／遷移、旧Worker互換性違反、破損をFail-closedで拒否する
+- DOS Device割当てをWorker Image Mapping後に復元しても、停止中Processの実Image File ID不一致を検出して実行しない
+- 破損Registryの復旧中に代替Versionが消失しても、`prepared`、`removalBlocked`、`versionQuarantined`の
+  各再開Stageで未完了Uninstallが最後の有効Payloadを削除しない
 - 各Journal Stage間へCrashを注入し、完全一致する直後の副作用だけを冪等再開して想定外状態を隔離する
 - 同一Dependency Root IDの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
