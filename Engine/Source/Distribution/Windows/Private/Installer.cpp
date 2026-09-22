@@ -2731,17 +2731,48 @@ Result<void> run_windows_install_probe(const WindowsInstallProbeRequest &a_reque
         HANDLE leaseHandle = reinterpret_cast<HANDLE>(a_request.leaseHandle);
         DWORD handleFlags = 0U;
         FILE_STANDARD_INFO information{};
-        auto inheritedPath = handle_path(leaseHandle);
-        const std::wstring expectedPath = win32_path(*installRoot / L"Operations" / L"CueEngine.control.lock");
-        if (GetHandleInformation(leaseHandle, &handleFlags) == FALSE || (handleFlags & HANDLE_FLAG_INHERIT) == 0U ||
-            GetFileInformationByHandleEx(leaseHandle, FileStandardInfo, &information, sizeof(information)) == FALSE ||
-            !inheritedPath ||
-            CompareStringOrdinal(inheritedPath->data(), static_cast<int>(inheritedPath->size()), expectedPath.data(),
-                                 static_cast<int>(expectedPath.size()), TRUE) != CSTR_EQUAL)
+        if (GetHandleInformation(leaseHandle, &handleFlags) == FALSE || (handleFlags & HANDLE_FLAG_INHERIT) == 0U)
         {
             return Result<void>::failure(
                 make_distribution_error(a_assertContext, DistributionError::InstallConflict,
                                         "Install Probe did not inherit the Install Root Control Lease handle"));
+        }
+        if (GetFileInformationByHandleEx(leaseHandle, FileStandardInfo, &information, sizeof(information)) == FALSE ||
+            information.Directory != FALSE)
+        {
+            return Result<void>::failure(make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                                 "Install Probe Control Lease handle is not a file"));
+        }
+        const std::filesystem::path operations = *installRoot / L"Operations";
+        HandleOwner operationsHandle(CreateFileW(win32_path(operations).c_str(), FILE_READ_ATTRIBUTES,
+                                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                                 OPEN_EXISTING,
+                                                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (!operationsHandle.valid())
+        {
+            return Result<void>::failure(make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                                 "Install Probe Operations directory is invalid"));
+        }
+        FILE_ATTRIBUTE_TAG_INFO operationsInformation{};
+        auto expectedDirectory = handle_path(operationsHandle.get());
+        if (GetFileInformationByHandleEx(operationsHandle.get(), FileAttributeTagInfo, &operationsInformation,
+                                         sizeof(operationsInformation)) == FALSE ||
+            (operationsInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+            (operationsInformation.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U || !expectedDirectory)
+        {
+            return Result<void>::failure(make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                                 "Install Probe Operations directory is invalid"));
+        }
+        expectedDirectory->push_back(L'\\');
+        expectedDirectory->append(L"CueEngine.control.lock");
+        auto inheritedPath = handle_path(leaseHandle);
+        if (!inheritedPath || CompareStringOrdinal(inheritedPath->data(), static_cast<int>(inheritedPath->size()),
+                                                   expectedDirectory->data(),
+                                                   static_cast<int>(expectedDirectory->size()), TRUE) != CSTR_EQUAL)
+        {
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Install Probe Control Lease path does not match the Install Root"));
         }
         if (SetHandleInformation(leaseHandle, HANDLE_FLAG_INHERIT, 0U) == FALSE)
         {
