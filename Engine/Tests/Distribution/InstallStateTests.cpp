@@ -234,7 +234,13 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     require(!write_install_operation_journal(recovery, a_assertContext));
     recovery.expectedRegistry.reset();
     recovery.sourceRegistryEvidence = RegistrySourceEvidence{
-        false, "../InstalledVersions.corrupt-dddddddd-dddd-4ddd-8ddd-dddddddddddd.json", 10U, hash('5')};
+        false, "InstalledVersions.corrupt-dddddddd-dddd-4ddd-8ddd-dddddddddddd.json", 0U, hash('5')};
+    auto emptyEvidenceBytes = write_install_operation_journal(recovery, a_assertContext);
+    require(emptyEvidenceBytes.has_value());
+    auto emptyEvidenceRead = read_install_operation_journal(*emptyEvidenceBytes.try_value(), a_assertContext);
+    require(emptyEvidenceRead.has_value() && *emptyEvidenceRead.try_value() == recovery);
+    recovery.sourceRegistryEvidence = RegistrySourceEvidence{
+        false, "../InstalledVersions.corrupt-dddddddd-dddd-4ddd-8ddd-dddddddddddd.json", 10U, hash('6')};
     return !write_install_operation_journal(recovery, a_assertContext);
 }
 

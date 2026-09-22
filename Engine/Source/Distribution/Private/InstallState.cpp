@@ -182,7 +182,7 @@ void append_identity_number(std::string &a_output, std::uint64_t a_value)
         return false;
     }
     const std::string_view evidenceId = std::string_view(a_evidence.evidenceName).substr(prefix.size(), 36U);
-    return cue::distribution::is_canonical_bundle_id(evidenceId) && a_evidence.byteSize != 0U &&
+    return cue::distribution::is_canonical_bundle_id(evidenceId) &&
            cue::distribution::is_canonical_sha256(a_evidence.sha256);
 }
 

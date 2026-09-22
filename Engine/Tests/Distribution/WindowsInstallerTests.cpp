@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <source_location>
 #include <span>
 #include <string>
@@ -256,19 +257,22 @@ void write_text(const std::filesystem::path &a_path, std::string_view a_text)
     return GetExitCodeProcess(a_process.process(), &exitCode) != FALSE ? std::optional(exitCode) : std::nullopt;
 }
 
-/// @brief 指定FileがTimeout内に現れるまで待機する
-[[nodiscard]] bool wait_for_file(const std::filesystem::path &a_path, std::chrono::seconds a_timeout) noexcept
+/// @brief Ready通知Fileへ有効なProcess IDが書き終わるまで待機する
+[[nodiscard]] std::optional<DWORD> wait_for_process_id(const std::filesystem::path &a_path,
+                                                       std::chrono::seconds a_timeout) noexcept
 {
     const auto deadline = std::chrono::steady_clock::now() + a_timeout;
     while (std::chrono::steady_clock::now() < deadline)
     {
-        if (GetFileAttributesW(a_path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        std::ifstream input(a_path);
+        unsigned long value = 0UL;
+        if ((input >> value) && value != 0UL)
         {
-            return true;
+            return static_cast<DWORD>(value);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    return false;
+    return std::nullopt;
 }
 
 /// @brief Publisher Build Identityの有効なTest値を生成する
@@ -530,6 +534,23 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
                                              L"InstalledVersions.corrupt-33333333-3333-4333-8333-333333333333.json"));
     require_sentinels(installRoot);
 
+    write_text(installRoot / L"State" / L"InstalledVersions.json", "");
+    auto emptyRecovered = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(emptyRecovered.has_value() && emptyRecovered.try_value()->wasAlreadyInstalled);
+    registry = read_registry(installRoot, a_assertContext);
+    require(registry.revision == 1U && registry.versions.size() == 2U);
+    bool hasEmptyEvidence = false;
+    for (const std::filesystem::directory_entry &entry :
+         std::filesystem::directory_iterator(installRoot / L"Operations" / L"Evidence"))
+    {
+        if (entry.is_regular_file() && entry.file_size() == 0U)
+        {
+            hasEmptyEvidence = true;
+        }
+    }
+    require(hasEmptyEvidence);
+    require_sentinels(installRoot);
+
     const std::filesystem::path unsignedRoot = temporary.path() / L"UnsignedRejected";
     cue::distribution::WindowsInstallRequest unsignedRequest{utf8_path(bundleRoot), utf8_path(unsignedRoot), false,
                                                              false};
@@ -599,6 +620,55 @@ void test_reparse_ancestor_rejected(const cue::AssertContext &a_assertContext)
     cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
     require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
     require(!std::filesystem::exists(targetRoot / L"Install"));
+}
+
+/// @brief Probe MarkerのAtomic一時Fileが残ったVersionPublished Journalを再開できることを検証する
+void test_probe_marker_temporary_resume(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    create_bundle(bundleRoot, a_assertContext);
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    auto installed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(installed.has_value());
+    cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
+    require(registry.versions.size() == 1U);
+    const cue::distribution::InstalledVersionEntry entry = registry.versions.front();
+
+    constexpr std::string_view operationId = "88888888-8888-4888-8888-888888888888";
+    cue::distribution::InstallOperationJournal journal;
+    journal.operationId = operationId;
+    journal.kind = cue::distribution::InstallOperationKind::Install;
+    journal.stage = cue::distribution::InstallOperationStage::VersionPublished;
+    journal.workerId = installed.try_value()->workerId;
+    journal.expectedRegistry = cue::distribution::ExpectedRegistry{registry.generationId, 1U};
+    journal.target =
+        cue::distribution::InstallOperationTarget{entry.directoryName, entry.bundleId, entry.manifestDigest};
+    auto journalBytes = cue::distribution::write_install_operation_journal(journal, a_assertContext);
+    require(journalBytes.has_value());
+    const std::filesystem::path journalPath =
+        installRoot / L"Operations" / L"Journals" / L"88888888-8888-4888-8888-888888888888.json";
+    write_text(journalPath, *journalBytes.try_value());
+
+    registry.versions.clear();
+    registry.selectedVersion.clear();
+    registry.revision = 1U;
+    auto registryBytes = cue::distribution::write_installed_versions_registry(registry, a_assertContext);
+    require(registryBytes.has_value());
+    write_text(installRoot / L"State" / L"InstalledVersions.json", *registryBytes.try_value());
+
+    const std::filesystem::path versionRoot = installRoot / L"Versions" / std::filesystem::path(entry.directoryName);
+    require(DeleteFileW((versionRoot / L"CueEngineProbe.complete.json").c_str()) != FALSE);
+    const std::filesystem::path temporaryMarker =
+        versionRoot / L"CueEngineProbe.complete.json.tmp-99999999-9999-4999-8999-999999999999";
+    write_text(temporaryMarker, "{\"partial\":");
+
+    auto resumed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(resumed.has_value());
+    require(!std::filesystem::exists(temporaryMarker));
+    require(std::filesystem::is_regular_file(versionRoot / L"CueEngineProbe.complete.json"));
+    require(!std::filesystem::exists(journalPath));
 }
 
 /// @brief Probe失敗VersionのQuarantine直後に停止しても決定的PathからJournalを解消できることを検証する
@@ -684,17 +754,6 @@ void test_corrupt_journal_quarantine(const cue::AssertContext &a_assertContext)
     require(read_bytes(registryPath) == registryBefore);
 }
 
-/// @brief Ready通知FileからBlocking Probe Process IDを読み込む
-[[nodiscard]] DWORD read_process_id(const std::filesystem::path &a_path)
-{
-    std::ifstream input(a_path);
-    unsigned long value = 0UL;
-    input >> value;
-    require(input.good() || input.eof());
-    require(value != 0UL);
-    return static_cast<DWORD>(value);
-}
-
 /// @brief Parent Crash後もProbe継承Handleが排他Leaseを保持しJournal再開できることを検証する
 void test_probe_inherited_lease(const cue::AssertContext &a_assertContext)
 {
@@ -710,9 +769,9 @@ void test_probe_inherited_lease(const cue::AssertContext &a_assertContext)
 
     auto owner = start_installer_process(bundleRoot, installRoot);
     require(owner.has_value());
-    require(wait_for_file(ready, std::chrono::seconds(60)));
-    const DWORD probeId = read_process_id(ready);
-    HANDLE probeProcess = OpenProcess(SYNCHRONIZE, FALSE, probeId);
+    auto probeId = wait_for_process_id(ready, std::chrono::seconds(60));
+    require(probeId.has_value());
+    HANDLE probeProcess = OpenProcess(SYNCHRONIZE, FALSE, *probeId);
     require(probeProcess != nullptr);
 
     auto contender = start_installer_process(bundleRoot, installRoot);
@@ -808,6 +867,7 @@ int main()
     test_install_transaction(assertContext);
     test_probe_clears_lease_inheritance(assertContext);
     test_reparse_ancestor_rejected(assertContext);
+    test_probe_marker_temporary_resume(assertContext);
     test_probe_quarantine_crash_resume(assertContext);
     test_corrupt_journal_quarantine(assertContext);
     test_probe_inherited_lease(assertContext);

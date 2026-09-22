@@ -308,6 +308,15 @@ struct RegistrySnapshot final
            cue::distribution::is_canonical_bundle_id(std::string_view(*name).substr(36U + separator.size()));
 }
 
+/// @brief Probe Marker Atomic ReplaceがPublish前に残したCanonical一時File名か返す
+[[nodiscard]] bool is_probe_marker_atomic_temporary(const std::filesystem::path &a_path)
+{
+    const auto name = to_utf8(a_path.filename().native());
+    constexpr std::string_view prefix = "CueEngineProbe.complete.json.tmp-";
+    return name && name->size() == prefix.size() + 36U && name->starts_with(prefix) &&
+           cue::distribution::is_canonical_bundle_id(std::string_view(*name).substr(prefix.size()));
+}
+
 /// @brief Path EntryがReparse Pointでない既存Directoryか返す
 [[nodiscard]] bool is_plain_directory(const std::filesystem::path &a_path) noexcept
 {
@@ -322,6 +331,47 @@ struct RegistrySnapshot final
     const DWORD attributes = GetFileAttributesW(win32_path(a_path).c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U &&
            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U;
+}
+
+/// @brief VersionPublished再開前にCanonicalなProbe Marker一時Fileだけを回収する
+[[nodiscard]] cue::Result<void> cleanup_probe_marker_temporaries(const std::filesystem::path &a_versionRoot,
+                                                                 const cue::AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        std::vector<std::filesystem::path> temporaries;
+        std::size_t entryCount = 0U;
+        for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(a_versionRoot))
+        {
+            ++entryCount;
+            if (entryCount > k_maximumInstallEntries)
+            {
+                return cue::Result<void>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::ResourceLimitExceeded,
+                                  "Published Version entry count exceeds its limit"));
+            }
+            if (is_plain_file(entry.path()) && is_probe_marker_atomic_temporary(entry.path()))
+            {
+                temporaries.push_back(entry.path());
+            }
+        }
+        for (const std::filesystem::path &temporary : temporaries)
+        {
+            if (DeleteFileW(win32_path(temporary).c_str()) == FALSE && GetLastError() != ERROR_FILE_NOT_FOUND)
+            {
+                return cue::Result<void>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                                  "Abandoned Install Probe Marker temporary file could not be removed"));
+            }
+        }
+        return cue::Result<void>::success();
+    }
+    catch (...)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Published Version entries could not be enumerated"));
+    }
 }
 
 /// @brief Install Rootまでの既存DirectoryをHandleで辿りReparse Point経由の書込を拒否する
@@ -2477,6 +2527,14 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
     }
     if (a_journal.stage == InstallOperationStage::VersionPublished)
     {
+        if (is_plain_directory(versionRoot))
+        {
+            auto probeTemporariesCleaned = cleanup_probe_marker_temporaries(versionRoot, a_assertContext);
+            if (!probeTemporariesCleaned)
+            {
+                return Result<WindowsInstallOutcome>::failure(std::move(*probeTemporariesCleaned.try_error()));
+            }
+        }
         auto probe = run_probe_process(a_installRoot, versionRoot, directoryName, a_journal.operationId,
                                        a_bundle.manifestDigest, a_lease.handle(), a_assertContext);
         if (!probe)
