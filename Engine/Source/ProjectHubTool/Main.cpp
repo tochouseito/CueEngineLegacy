@@ -21,9 +21,11 @@
 #include <exception>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -161,6 +163,14 @@ enum class FolderSelectionTarget
     EngineBundle
 };
 
+/// @brief Workerで完了したInstalled Engine操作をUI Threadへ一度だけ引き渡す
+struct InstalledEngineOperationCompletion final
+{
+    cue::project_hub::InstalledEngineOperationKind kind =
+        cue::project_hub::InstalledEngineOperationKind::RollbackVersion;
+    std::optional<cue::Error> failure;
+};
+
 /// @brief Project Hub PresenterをTool Host CallbackとEditor Process Adapterへ接続する
 class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
 {
@@ -181,12 +191,13 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     ProjectHubToolClient(const ProjectHubToolClient &) = delete;
     /// @brief Presentation Callback Stateの複製を禁止する
     ProjectHubToolClient &operator=(const ProjectHubToolClient &) = delete;
-    /// @brief Presentationと診断Contextの非所有参照だけを破棄する
+    /// @brief 実行中WorkerをJoinしてからPresentationと診断Contextの非所有参照を破棄する
     ~ProjectHubToolClient() override = default;
 
     /// @brief Project Hub画面を描画し、生成されたLaunch RequestをWindows Adapterへ渡す
     void draw_frame() noexcept override
     {
+        poll_installed_engine_operation();
         if (m_editorProcess != nullptr)
         {
             cue::Result<bool> processState = m_editorProcess->poll();
@@ -202,7 +213,8 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
             }
         }
 
-        m_presenter->draw(m_editorProcess == nullptr);
+        m_presenter->draw(m_editorProcess == nullptr && !m_installedEngineOperationRunning, m_installRoot.has_value(),
+                          m_installedEngineOperationRunning);
         const std::optional<std::string_view> browseRequest = m_presenter->take_destination_browse_request();
         if (browseRequest.has_value())
         {
@@ -222,7 +234,7 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
             m_presenter->take_installed_engine_operation_request();
         if (engineOperation)
         {
-            perform_installed_engine_operation(*engineOperation);
+            start_installed_engine_operation(std::move(*engineOperation));
         }
         std::optional<cue::project_hub::EditorLaunchRequest> request = m_presenter->take_editor_launch_request();
         if (!request.has_value())
@@ -253,14 +265,65 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     /// @brief EscapeまたはWindow終了だけをTool Host終了要求として返す
     [[nodiscard]] bool should_close() const noexcept override
     {
-        return m_closeRequested || m_presenter->is_exit_requested();
+        return !m_installedEngineOperationRunning && (m_closeRequested || m_presenter->is_exit_requested());
     }
 
   private:
-    /// @brief Presenterから受けたInstalled Engine操作を既存Installer Serviceへ接続する
-    void perform_installed_engine_operation(
-        const cue::project_hub::InstalledEngineOperationRequest &a_request) noexcept
+    /// @brief Installed Engine操作Kindに対応する完了Messageを返す
+    [[nodiscard]] static std::string_view installed_engine_operation_success_message(
+        cue::project_hub::InstalledEngineOperationKind a_kind) noexcept
     {
+        switch (a_kind)
+        {
+        case cue::project_hub::InstalledEngineOperationKind::InstallUnsignedLocalBundle:
+            return "Local Developer BundleをInstallしました。";
+        case cue::project_hub::InstalledEngineOperationKind::RollbackVersion:
+            return "Installed Engine Versionを選択しました。";
+        case cue::project_hub::InstalledEngineOperationKind::UninstallVersion:
+            return "Uninstallを外部Workerへ委譲しました。実行中VersionはHub終了後に削除されます。";
+        }
+        return "Installed Engine操作が完了しました。";
+    }
+
+    /// @brief Worker完了状態をUI Threadへ回収し、Registry再検査とMessage更新を行う
+    void poll_installed_engine_operation() noexcept
+    {
+        std::optional<InstalledEngineOperationCompletion> completion;
+        {
+            std::lock_guard lock(m_installedEngineOperationMutex);
+            if (!m_installedEngineOperationCompletion)
+            {
+                return;
+            }
+            completion.emplace(std::move(*m_installedEngineOperationCompletion));
+            m_installedEngineOperationCompletion.reset();
+        }
+        if (m_installedEngineOperationWorker.joinable())
+        {
+            m_installedEngineOperationWorker.join();
+        }
+        m_installedEngineOperationRunning = false;
+        if (completion->failure)
+        {
+            m_presenter->report_installed_engine_operation_failure(*completion->failure);
+            static_cast<void>(refresh_installed_engine_versions(false));
+            return;
+        }
+        if (!refresh_installed_engine_versions(true))
+        {
+            return;
+        }
+        m_presenter->report_installed_engine_operation_completed(
+            installed_engine_operation_success_message(completion->kind));
+    }
+
+    /// @brief Presenterから受けたInstalled Engine操作を描画Thread外のWorkerで実行する
+    void start_installed_engine_operation(cue::project_hub::InstalledEngineOperationRequest a_request) noexcept
+    {
+        if (m_installedEngineOperationRunning)
+        {
+            return;
+        }
         if (!m_installRoot)
         {
             cue::Error error = cue::project_hub::make_project_hub_error(
@@ -269,52 +332,57 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
             m_presenter->report_installed_engine_operation_failure(error);
             return;
         }
-        cue::Result<void> operation = cue::Result<void>::success();
-        std::string_view successMessage;
-        if (a_request.kind == cue::project_hub::InstalledEngineOperationKind::InstallUnsignedLocalBundle)
+        try
         {
-            cue::distribution::WindowsInstallRequest request{a_request.target, *m_installRoot, false, true};
-            auto installed = cue::distribution::install_windows_source_sdk(request, *m_assertContext);
-            if (!installed)
-            {
-                operation = cue::Result<void>::failure(std::move(*installed.try_error()));
-            }
-            successMessage = "Local Developer BundleをInstallしました。";
-        }
-        else
-        {
-            cue::distribution::WindowsInstalledVersionRequest request{*m_installRoot, a_request.target};
-            if (a_request.kind == cue::project_hub::InstalledEngineOperationKind::RollbackVersion)
-            {
-                auto selected = cue::distribution::rollback_windows_installed_version(request, *m_assertContext);
-                if (!selected)
+            const std::string installRoot = *m_installRoot;
+            m_installedEngineOperationRunning = true;
+            m_presenter->report_installed_engine_operation_started();
+            m_installedEngineOperationWorker = std::jthread(
+                [this, request = std::move(a_request), installRoot]() mutable noexcept
                 {
-                    operation = cue::Result<void>::failure(std::move(*selected.try_error()));
-                }
-                successMessage = "Installed Engine Versionを選択しました。";
-            }
-            else
-            {
-                auto uninstalled =
-                    cue::distribution::uninstall_windows_installed_version(request, *m_assertContext);
-                if (!uninstalled)
-                {
-                    operation = cue::Result<void>::failure(std::move(*uninstalled.try_error()));
-                }
-                successMessage = "Uninstallを外部Workerへ委譲しました。実行中VersionはHub終了後に削除されます。";
-            }
+                    std::optional<cue::Error> failure;
+                    if (request.kind == cue::project_hub::InstalledEngineOperationKind::InstallUnsignedLocalBundle)
+                    {
+                        cue::distribution::WindowsInstallRequest installRequest{request.target, installRoot, false,
+                                                                                 true};
+                        auto installed =
+                            cue::distribution::install_windows_source_sdk(installRequest, *m_assertContext);
+                        if (!installed)
+                        {
+                            failure.emplace(std::move(*installed.try_error()));
+                        }
+                    }
+                    else
+                    {
+                        cue::distribution::WindowsInstalledVersionRequest versionRequest{installRoot, request.target};
+                        if (request.kind == cue::project_hub::InstalledEngineOperationKind::RollbackVersion)
+                        {
+                            auto selected = cue::distribution::rollback_windows_installed_version(versionRequest,
+                                                                                                    *m_assertContext);
+                            if (!selected)
+                            {
+                                failure.emplace(std::move(*selected.try_error()));
+                            }
+                        }
+                        else
+                        {
+                            auto uninstalled = cue::distribution::uninstall_windows_installed_version(
+                                versionRequest, *m_assertContext);
+                            if (!uninstalled)
+                            {
+                                failure.emplace(std::move(*uninstalled.try_error()));
+                            }
+                        }
+                    }
+                    std::lock_guard lock(m_installedEngineOperationMutex);
+                    m_installedEngineOperationCompletion.emplace(
+                        InstalledEngineOperationCompletion{request.kind, std::move(failure)});
+                });
         }
-        if (!operation)
+        catch (...)
         {
-            m_presenter->report_installed_engine_operation_failure(*operation.try_error());
-            static_cast<void>(refresh_installed_engine_versions(false));
-            return;
+            m_assertContext->fatal_handler().terminate("Installed Engine operation worker could not be started");
         }
-        if (!refresh_installed_engine_versions(true))
-        {
-            return;
-        }
-        m_presenter->report_installed_engine_operation_completed(successMessage);
     }
 
     /// @brief Installed Versions Registryを再検査してServiceの互換Viewへ反映する
@@ -446,6 +514,10 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
     std::unique_ptr<cue::project_hub::WindowsEditorProcess> m_editorProcess;
     cue::Window *m_window = nullptr;
     bool m_closeRequested = false;
+    bool m_installedEngineOperationRunning = false;
+    std::mutex m_installedEngineOperationMutex;
+    std::optional<InstalledEngineOperationCompletion> m_installedEngineOperationCompletion;
+    std::jthread m_installedEngineOperationWorker;
 };
 
 /// @brief 実行中Project Hubの配置をDeveloper隣接EditorまたはInstalled Version Rootとして検証する

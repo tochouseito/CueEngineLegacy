@@ -4852,14 +4852,13 @@ Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_ex
                                         "An incomplete Install operation blocks inherited Version launch"));
         }
         auto snapshot = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
-        if (!snapshot || snapshot.try_value()->registry.selectedVersion != a_request.versionDirectory ||
-            snapshot.try_value()->entry.bundleId != a_request.bundleId ||
+        if (!snapshot || snapshot.try_value()->entry.bundleId != a_request.bundleId ||
             snapshot.try_value()->entry.manifestDigest != a_request.manifestDigest)
         {
             return Result<WindowsInstalledVersionExecutionLease>::failure(
                 snapshot ? make_distribution_error(
                                a_assertContext, DistributionError::InstallConflict,
-                               "Inherited Distribution Identity no longer matches the selected Version")
+                               "Inherited Distribution Identity no longer matches the requested Version")
                          : std::move(*snapshot.try_error()));
         }
         const InstalledVersionSnapshot expected = *snapshot.try_value();
@@ -4881,9 +4880,7 @@ Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_ex
                                         "Inherited Execution Lease File Identity changed before adoption"));
         }
         auto revalidated = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
-        if (!revalidated || revalidated.try_value()->registry != expected.registry ||
-            revalidated.try_value()->entry != expected.entry ||
-            revalidated.try_value()->registry.selectedVersion != a_request.versionDirectory)
+        if (!revalidated || revalidated.try_value()->entry != expected.entry)
         {
             return Result<WindowsInstalledVersionExecutionLease>::failure(
                 revalidated ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,

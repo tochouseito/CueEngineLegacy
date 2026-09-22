@@ -1825,6 +1825,10 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
             executionLease.try_value()->bundle_id(),
             executionLease.try_value()->manifest_digest(),
         };
+        auto selectedUpdateBeforeAdoption =
+            cue::distribution::rollback_windows_installed_version(updatedVersion, a_assertContext);
+        require(selectedUpdateBeforeAdoption.has_value() &&
+                !selectedUpdateBeforeAdoption.try_value()->wasAlreadySelected);
         auto adoptedLease =
             cue::distribution::adopt_windows_inherited_version_execution_lease(inheritedRequest, a_assertContext);
         require(adoptedLease.has_value());
@@ -1835,6 +1839,10 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
                     executionLease.try_value()->source_inventory_hash() &&
                 adoptedLease.try_value()->publisher_build_identity_digest() ==
                     executionLease.try_value()->publisher_build_identity_digest());
+        auto selectedOriginalAfterAdoption =
+            cue::distribution::rollback_windows_installed_version(installedVersion, a_assertContext);
+        require(selectedOriginalAfterAdoption.has_value() &&
+                !selectedOriginalAfterAdoption.try_value()->wasAlreadySelected);
         DWORD adoptedFlags = HANDLE_FLAG_INHERIT;
         require(GetHandleInformation(reinterpret_cast<HANDLE>(adoptedLease.try_value()->native_handle()),
                                      &adoptedFlags) != FALSE &&

@@ -50,8 +50,9 @@ class ProjectHubPresenter final
     [[nodiscard]] static Result<std::unique_ptr<ProjectHubPresenter>> create(
         ProjectHubService &a_service, const AssertContext &a_assertContext) noexcept;
 
-    /// @brief 現在のService ViewからProject Hub画面を描画し、Editor起動可否を操作へ反映する
-    void draw(bool a_canLaunchEditor = true) noexcept;
+    /// @brief 現在のService ViewからProject Hub画面を描画し、Editor起動とInstalled Engine管理可否を操作へ反映する
+    void draw(bool a_canLaunchEditor = true, bool a_canManageInstalledEngines = false,
+              bool a_isInstalledEngineOperationRunning = false) noexcept;
 
     /// @brief Open操作で生成されたEditor Launch Requestを一度だけ移動して返す
     [[nodiscard]] std::optional<EditorLaunchRequest> take_editor_launch_request() noexcept;
@@ -88,6 +89,9 @@ class ProjectHubPresenter final
 
     /// @brief Installed Engine管理操作の成功を日本語Messageへ反映する
     void report_installed_engine_operation_completed(std::string_view a_message) noexcept;
+
+    /// @brief Workerで開始したInstalled Engine管理操作を進行中Messageへ反映する
+    void report_installed_engine_operation_started() noexcept;
 
     /// @brief Installed Engine管理操作の失敗を日本語Messageへ反映する
     void report_installed_engine_operation_failure(const Error &a_error) noexcept;
