@@ -898,9 +898,34 @@ struct RegistrySnapshot final
 [[nodiscard]] cue::Result<void> flush_copied_file(const std::filesystem::path &a_path,
                                                   const cue::AssertContext &a_assertContext) noexcept
 {
-    HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!handle.valid() || FlushFileBuffers(handle.get()) == FALSE)
+    const std::wstring path = win32_path(a_path);
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Copied Install file attributes could not be read"));
+    }
+    const bool restoreReadOnly = (attributes & FILE_ATTRIBUTE_READONLY) != 0U;
+    if (restoreReadOnly && SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY) == FALSE)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Copied Install file could not be made writable for flush"));
+    }
+    bool flushed = false;
+    {
+        HandleOwner handle(CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr));
+        flushed = handle.valid() && FlushFileBuffers(handle.get()) != FALSE;
+    }
+    if (restoreReadOnly && SetFileAttributesW(path.c_str(), attributes) == FALSE)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Copied Install file read-only attribute could not be restored"));
+    }
+    if (!flushed)
     {
         return cue::Result<void>::failure(install_error(a_assertContext,
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
@@ -1080,7 +1105,10 @@ struct RegistrySnapshot final
     {
         result.registry = std::move(*registry.try_value());
     }
-    else if (text.find("\"schemaVersion\"") != std::string::npos)
+    constexpr std::string_view knownSchemaPrefix = "{\"schemaVersion\":1,";
+    const bool identifiesKnownSchema = text == "{\"schemaVersion\":1" || text.starts_with(knownSchemaPrefix);
+    if (!registry && text.find("\"schemaVersion\"") != std::string::npos &&
+        (!identifiesKnownSchema || text.ends_with("}\n")))
     {
         return cue::Result<RegistrySnapshot>::failure(std::move(*registry.try_error()));
     }
@@ -1542,6 +1570,13 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     const cue::AssertContext &a_assertContext) noexcept
 {
     const std::filesystem::path executable = a_workerRoot / L"CueEngineInstallWorker.exe";
+    const std::filesystem::path markerPath = a_workerRoot / k_workerMarkerName;
+    if (!is_plain_directory(a_workerRoot) || !is_plain_file(executable) || !is_plain_file(markerPath))
+    {
+        return cue::Result<std::pair<std::string, std::string>>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
+                          "Published Install Worker evidence is not plain"));
+    }
     auto executableBytes = read_file(executable, k_maximumPayloadBytes, a_assertContext);
     if (!executableBytes || executableBytes.try_value()->size() != a_bundle.worker.byteSize ||
         !is_x64_pe(*executableBytes.try_value()))
@@ -1557,7 +1592,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
             install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                           "Published Install Worker digest does not match"));
     }
-    auto markerText = read_text(a_workerRoot / k_workerMarkerName, a_assertContext);
+    auto markerText = read_text(markerPath, a_assertContext);
     if (!markerText)
     {
         return cue::Result<std::pair<std::string, std::string>>::failure(std::move(*markerText.try_error()));

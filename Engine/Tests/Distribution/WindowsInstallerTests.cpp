@@ -506,6 +506,20 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
     require(std::string(reinterpret_cast<const char *>(preservedUnsupported.data()), preservedUnsupported.size()) ==
             unsupportedRegistry);
 
+    const std::string truncatedUnsupportedRegistry = "{\"schemaVersion\":2";
+    write_text(installRoot / L"State" / L"InstalledVersions.json", truncatedUnsupportedRegistry);
+    require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
+    const std::vector<std::byte> preservedTruncatedUnsupported =
+        read_bytes(installRoot / L"State" / L"InstalledVersions.json");
+    require(std::string(reinterpret_cast<const char *>(preservedTruncatedUnsupported.data()),
+                        preservedTruncatedUnsupported.size()) == truncatedUnsupportedRegistry);
+
+    write_text(installRoot / L"State" / L"InstalledVersions.json", "{\"schemaVersion\":1");
+    auto truncatedRecovered = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(truncatedRecovered.has_value() && truncatedRecovered.try_value()->wasAlreadyInstalled);
+    registry = read_registry(installRoot, a_assertContext);
+    require(registry.revision == 1U && registry.versions.size() == 2U);
+
     const std::string corruptRegistry = "{broken}\n";
     write_text(installRoot / L"State" / L"InstalledVersions.json", corruptRegistry);
     const auto *corruptBegin = reinterpret_cast<const std::byte *>(corruptRegistry.data());
@@ -572,6 +586,66 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
     require(!cue::distribution::install_windows_source_sdk(pathCollisionRequest, a_assertContext));
     require(!std::filesystem::exists(collisionRoot / L"State" / L"InstalledVersions.json"));
     require(!std::filesystem::exists(collisionRoot / L"Versions" / L"v1.0.0--12345678-1234-4abc-8def-1234567890ab"));
+}
+
+/// @brief Read-only属性を持つPayloadとWorkerを属性保持したままInstallできることを検証する
+void test_read_only_payload_install(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    create_bundle(bundleRoot, a_assertContext);
+    const std::filesystem::path sourcePayload = bundleRoot / L"Engine" / L"Source" / L"Foundation" / L"Test.cpp";
+    const std::filesystem::path sourceWorker = bundleRoot / L"Bin" / L"CueEngineInstallWorker.exe";
+    require(SetFileAttributesW(sourcePayload.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE);
+    require(SetFileAttributesW(sourceWorker.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE);
+
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    auto installed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(installed.has_value());
+    const std::filesystem::path versionRoot =
+        installRoot / L"Versions" / std::filesystem::path(installed.try_value()->versionDirectory);
+    const std::filesystem::path installedPayload =
+        versionRoot / L"Engine" / L"Source" / L"Foundation" / L"Test.cpp";
+    const std::filesystem::path versionWorker = versionRoot / L"Bin" / L"CueEngineInstallWorker.exe";
+    const std::filesystem::path publishedWorker = installRoot / L"Operations" / L"Workers" /
+                                                  std::filesystem::path(installed.try_value()->workerId) /
+                                                  L"CueEngineInstallWorker.exe";
+    require((GetFileAttributesW(installedPayload.c_str()) & FILE_ATTRIBUTE_READONLY) != 0U);
+    require((GetFileAttributesW(publishedWorker.c_str()) & FILE_ATTRIBUTE_READONLY) != 0U);
+
+    for (const std::filesystem::path &path :
+         {sourcePayload, sourceWorker, installedPayload, versionWorker, publishedWorker})
+    {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        require(attributes != INVALID_FILE_ATTRIBUTES);
+        require(SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY) != FALSE);
+    }
+}
+
+/// @brief Install Worker EvidenceがReparse Pointへ置換された場合に再検証を拒否する
+void test_worker_reparse_rejected(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    const std::filesystem::path outsideWorker = temporary.path() / L"OutsideWorker.exe";
+    create_bundle(bundleRoot, a_assertContext);
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    auto installed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(installed.has_value());
+    const std::filesystem::path worker = installRoot / L"Operations" / L"Workers" /
+                                         std::filesystem::path(installed.try_value()->workerId) /
+                                         L"CueEngineInstallWorker.exe";
+    require(CopyFileW(worker.c_str(), outsideWorker.c_str(), TRUE) != FALSE);
+    require(DeleteFileW(worker.c_str()) != FALSE);
+    if (CreateSymbolicLinkW(worker.c_str(), outsideWorker.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) == FALSE)
+    {
+        const DWORD linkError = GetLastError();
+        require(linkError == ERROR_PRIVILEGE_NOT_HELD || linkError == ERROR_INVALID_PARAMETER);
+        return;
+    }
+    require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
 }
 
 /// @brief Probe入口が検証済みControl Leaseの子Process再継承を無効化することを検証する
@@ -865,6 +939,8 @@ int main()
     cue::Logger logger(fatalHandler, std::move(sinks));
     cue::AssertContext assertContext(logger, fatalHandler);
     test_install_transaction(assertContext);
+    test_read_only_payload_install(assertContext);
+    test_worker_reparse_rejected(assertContext);
     test_probe_clears_lease_inheritance(assertContext);
     test_reparse_ancestor_rejected(assertContext);
     test_probe_marker_temporary_resume(assertContext);
