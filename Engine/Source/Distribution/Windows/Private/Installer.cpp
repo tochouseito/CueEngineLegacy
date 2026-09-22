@@ -689,11 +689,29 @@ struct InstalledVersionSnapshot final
 {
     FILE_ATTRIBUTE_TAG_INFO attributeInfo{};
     const auto finalPath = handle_path(a_handle);
-    const std::wstring expected = win32_path(a_path);
+    const std::filesystem::path parent = a_path.parent_path();
+    HandleOwner parentHandle(CreateFileW(win32_path(parent).c_str(), FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    FILE_ATTRIBUTE_TAG_INFO parentAttributeInfo{};
+    auto expected = parentHandle.valid() ? handle_path(parentHandle.get()) : std::nullopt;
+    if (expected && !expected->ends_with(L'\\'))
+    {
+        expected->push_back(L'\\');
+    }
+    if (expected)
+    {
+        expected->append(a_path.filename().native());
+    }
     return GetFileInformationByHandleEx(a_handle, FileAttributeTagInfo, &attributeInfo, sizeof(attributeInfo)) !=
                FALSE &&
            (attributeInfo.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
-           finalPath && _wcsicmp(finalPath->c_str(), expected.c_str()) == 0;
+           parentHandle.valid() &&
+           GetFileInformationByHandleEx(parentHandle.get(), FileAttributeTagInfo, &parentAttributeInfo,
+                                        sizeof(parentAttributeInfo)) != FALSE &&
+           (parentAttributeInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U &&
+           (parentAttributeInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U && finalPath && expected &&
+           _wcsicmp(finalPath->c_str(), expected->c_str()) == 0;
 }
 
 /// @brief Versions直下へ入力可能なCanonical Directory名か返す
