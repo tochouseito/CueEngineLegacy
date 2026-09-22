@@ -212,6 +212,17 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     auto installRead = read_install_operation_journal(*installBytes.try_value(), a_assertContext);
     require(installRead.has_value() && *installRead.try_value() == install);
 
+    InstallOperationJournal uninstall = install;
+    uninstall.kind = InstallOperationKind::Uninstall;
+    uninstall.workerExecutableDigest = hash('7');
+    uninstall.workerMarkerDigest = hash('8');
+    auto uninstallBytes = write_install_operation_journal(uninstall, a_assertContext);
+    require(uninstallBytes.has_value());
+    auto uninstallRead = read_install_operation_journal(*uninstallBytes.try_value(), a_assertContext);
+    require(uninstallRead.has_value() && *uninstallRead.try_value() == uninstall);
+    uninstall.workerMarkerDigest.clear();
+    require(!write_install_operation_journal(uninstall, a_assertContext));
+
     InstallOperationJournal recovery;
     recovery.operationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     recovery.kind = InstallOperationKind::RegistryRecovery;

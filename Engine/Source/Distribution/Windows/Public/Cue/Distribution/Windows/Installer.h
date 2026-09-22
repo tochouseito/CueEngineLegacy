@@ -66,10 +66,17 @@ struct WindowsUninstallOutcome final
     std::uint32_t workerProcessId = 0U;
 };
 
-/// @brief 継承済みGate HandleからUninstall Journalを再開する外部Worker要求
+/// @brief 継承済みGate／Worker Evidence HandleからUninstall Journalを再開する外部Worker要求
+///
+/// Worker Directory、Executable、Marker Handleは検証済みFile IdentityをChild終了まで置換不能にする。
+/// `sourceProcessHandle`は呼出元Imageが削除対象Version内にある場合だけ設定され、Childは終了を待ってから削除する。
 struct WindowsUninstallWorkerRequest final
 {
     std::uintptr_t gateHandle = 0U;
+    std::uintptr_t workerDirectoryHandle = 0U;
+    std::uintptr_t workerExecutableHandle = 0U;
+    std::uintptr_t workerMarkerHandle = 0U;
+    std::uintptr_t sourceProcessHandle = 0U;
     std::string installRoot;
     std::string operationId;
     std::string workerId;

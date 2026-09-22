@@ -65,11 +65,20 @@ namespace
                       const cue::AssertContext &a_assertContext)
 {
     auto gateText = argument_value(a_argumentCount, a_arguments, L"--gate-handle");
+    auto workerDirectoryText = argument_value(a_argumentCount, a_arguments, L"--worker-directory-handle");
+    auto workerExecutableText = argument_value(a_argumentCount, a_arguments, L"--worker-executable-handle");
+    auto workerMarkerText = argument_value(a_argumentCount, a_arguments, L"--worker-marker-handle");
+    auto sourceProcessText = argument_value(a_argumentCount, a_arguments, L"--source-process-handle");
     auto installRoot = argument_value(a_argumentCount, a_arguments, L"--install-root");
     auto operationId = argument_value(a_argumentCount, a_arguments, L"--operation-id");
     auto workerId = argument_value(a_argumentCount, a_arguments, L"--worker-id");
     auto gateHandle = gateText ? handle_value(*gateText) : std::nullopt;
-    if (!has_argument(a_argumentCount, a_arguments, L"--uninstall-worker") || !gateHandle || !installRoot ||
+    auto workerDirectoryHandle = workerDirectoryText ? handle_value(*workerDirectoryText) : std::nullopt;
+    auto workerExecutableHandle = workerExecutableText ? handle_value(*workerExecutableText) : std::nullopt;
+    auto workerMarkerHandle = workerMarkerText ? handle_value(*workerMarkerText) : std::nullopt;
+    auto sourceProcessHandle = sourceProcessText ? handle_value(*sourceProcessText) : std::nullopt;
+    if (!has_argument(a_argumentCount, a_arguments, L"--uninstall-worker") || !gateHandle || !workerDirectoryHandle ||
+        !workerExecutableHandle || !workerMarkerHandle || (sourceProcessText && !sourceProcessHandle) || !installRoot ||
         !operationId || !workerId)
     {
         static_cast<void>(a_logger.log(cue::LogLevel::Error, "Install Worker arguments are invalid"));
@@ -78,6 +87,10 @@ namespace
 
     cue::distribution::WindowsUninstallWorkerRequest request;
     request.gateHandle = *gateHandle;
+    request.workerDirectoryHandle = *workerDirectoryHandle;
+    request.workerExecutableHandle = *workerExecutableHandle;
+    request.workerMarkerHandle = *workerMarkerHandle;
+    request.sourceProcessHandle = sourceProcessHandle.value_or(0U);
     request.installRoot = std::move(*installRoot);
     request.operationId = std::move(*operationId);
     request.workerId = std::move(*workerId);

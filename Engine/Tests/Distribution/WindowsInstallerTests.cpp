@@ -285,6 +285,28 @@ void write_text(const std::filesystem::path &a_path, std::string_view a_text)
     return ProcessOwner(process);
 }
 
+/// @brief Installed Version内のInstaller CLIから自己Uninstallを開始する
+[[nodiscard]] std::optional<ProcessOwner> start_version_uninstall_process(const std::filesystem::path &a_executable,
+                                                                          const std::filesystem::path &a_installRoot,
+                                                                          std::wstring_view a_versionDirectory)
+{
+    std::wstring command = quote_argument(a_executable.native());
+    command.append(L" uninstall --install-root ");
+    command.append(quote_argument(a_installRoot.native()));
+    command.append(L" --version-directory ");
+    command.append(quote_argument(a_versionDirectory));
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const std::wstring workingDirectory = a_executable.parent_path().native();
+    if (CreateProcessW(a_executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                       workingDirectory.c_str(), &startup, &process) == FALSE)
+    {
+        return std::nullopt;
+    }
+    return ProcessOwner(process);
+}
+
 /// @brief 継承したExecution Leaseを保持するBlocking Child Processを起動する
 [[nodiscard]] std::optional<ProcessOwner> start_execution_lease_holder(const std::filesystem::path &a_installRoot)
 {
@@ -1225,6 +1247,9 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
                              { return a_entry.directoryName == updated.try_value()->versionDirectory; });
     require(installedEntry != registry.versions.end() && updatedEntry != registry.versions.end());
     const cue::distribution::InstalledVersionEntry removedEntry = *installedEntry;
+    const std::filesystem::path removedWorker = installRoot / L"Operations" / L"Workers" /
+                                                std::filesystem::path(removedEntry.workerId) /
+                                                L"CueEngineInstallWorker.exe";
     const std::filesystem::path updatedWorker = installRoot / L"Operations" / L"Workers" /
                                                 std::filesystem::path(updatedEntry->workerId) /
                                                 L"CueEngineInstallWorker.exe";
@@ -1274,7 +1299,16 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     }
 
     auto busyUninstall = cue::distribution::uninstall_windows_installed_version(installedVersion, a_assertContext);
+    if (!busyUninstall)
+    {
+        std::fprintf(stderr, "Busy uninstall delegation failed: %.*s\n",
+                     static_cast<int>(busyUninstall.try_error()->summary().size()),
+                     busyUninstall.try_error()->summary().data());
+    }
     require(busyUninstall.has_value());
+    require(CopyFileW(extended_path(installer_executable()).c_str(), extended_path(removedWorker).c_str(), FALSE) ==
+            FALSE);
+    require(GetLastError() == ERROR_SHARING_VIOLATION);
     const std::filesystem::path uninstallJournal =
         operations / L"Journals" / (std::filesystem::path(busyUninstall.try_value()->operationId).native() + L".json");
     require(is_regular_file_extended(uninstallJournal));
@@ -1333,6 +1367,8 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     cleanupJournal.kind = cue::distribution::InstallOperationKind::Uninstall;
     cleanupJournal.stage = cue::distribution::InstallOperationStage::RegistryEntryRemoved;
     cleanupJournal.workerId = removedEntry.workerId;
+    cleanupJournal.workerExecutableDigest = removedEntry.workerExecutableDigest;
+    cleanupJournal.workerMarkerDigest = removedEntry.workerMarkerDigest;
     cleanupJournal.expectedRegistry =
         cue::distribution::ExpectedRegistry{registry.generationId, registry.revision - 2U};
     cleanupJournal.target = cue::distribution::InstallOperationTarget{removedEntry.directoryName, removedEntry.bundleId,
@@ -1342,6 +1378,26 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
     const std::filesystem::path cleanupJournalPath =
         operations / L"Journals" / L"66666666-6666-4666-8666-666666666666.json";
     write_text(cleanupJournalPath, *cleanupJournalBytes.try_value());
+    const std::filesystem::path removedWorkerMarker =
+        removedWorker.parent_path() / L"CueEngineInstallWorker.complete.json";
+    const std::vector<std::byte> originalWorkerBytes = read_bytes(removedWorker);
+    const std::vector<std::byte> originalMarkerBytes = read_bytes(removedWorkerMarker);
+    const std::string originalMarkerText(reinterpret_cast<const char *>(originalMarkerBytes.data()),
+                                         originalMarkerBytes.size());
+    auto replacementMarker = cue::distribution::read_install_worker_marker(originalMarkerText, a_assertContext);
+    require(replacementMarker.has_value());
+    const std::vector<std::byte> replacementBytes = read_bytes(installer_executable());
+    replacementMarker.try_value()->executable.byteSize = replacementBytes.size();
+    replacementMarker.try_value()->executable.sha256 = file_digest(installer_executable(), a_assertContext);
+    auto replacementMarkerText =
+        cue::distribution::write_install_worker_marker(*replacementMarker.try_value(), a_assertContext);
+    require(replacementMarkerText.has_value());
+    require(CopyFileW(extended_path(installer_executable()).c_str(), extended_path(removedWorker).c_str(), FALSE) !=
+            FALSE);
+    write_text(removedWorkerMarker, *replacementMarkerText.try_value());
+    require(!cue::distribution::uninstall_windows_installed_version(installedVersion, a_assertContext));
+    write_bytes(removedWorker, originalWorkerBytes);
+    write_bytes(removedWorkerMarker, originalMarkerBytes);
     auto cleanupResume = cue::distribution::uninstall_windows_installed_version(installedVersion, a_assertContext);
     require(cleanupResume.has_value());
     auto cleanupExit = wait_process_id(cleanupResume.try_value()->workerProcessId, 60000U);
@@ -1354,6 +1410,52 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
         cue::distribution::acquire_windows_installed_version_execution_lease(updatedVersion, a_assertContext);
     require(remainingLease.has_value());
     require_sentinels(installRoot);
+}
+
+/// @brief 削除対象Version内のInstallerが終了するまで外部Workerが自己Uninstallを待機することを検証する
+void test_version_installer_self_uninstall(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"SelfBundleOne";
+    const std::filesystem::path updateBundleRoot = temporary.path() / L"SelfBundleTwo";
+    const std::filesystem::path installRoot = temporary.path() / L"SelfInstall";
+    create_bundle(bundleRoot, a_assertContext);
+    create_bundle(updateBundleRoot, a_assertContext, installer_executable(), 0U, "22345678-1234-4abc-8def-1234567890ab",
+                  "1.1.0", std::byte{'u'});
+    cue::distribution::WindowsInstallRequest installRequest{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    cue::distribution::WindowsInstallRequest updateRequest{utf8_path(updateBundleRoot), utf8_path(installRoot), true,
+                                                           true};
+    auto installed = cue::distribution::install_windows_source_sdk(installRequest, a_assertContext);
+    auto updated = cue::distribution::install_windows_source_sdk(updateRequest, a_assertContext);
+    require(installed.has_value() && updated.has_value());
+    const std::filesystem::path versionRoot =
+        installRoot / L"Versions" / std::filesystem::path(installed.try_value()->versionDirectory);
+    const std::filesystem::path installedTool = versionRoot / L"Bin" / L"CueEngineInstallerTool.exe";
+    auto process = start_version_uninstall_process(
+        installedTool, installRoot, std::filesystem::path(installed.try_value()->versionDirectory).native());
+    require(process.has_value());
+    const auto processExit = wait_process(*process, 60000U);
+    require(processExit.has_value() && *processExit == 0U);
+
+    const std::filesystem::path journals = installRoot / L"Operations" / L"Journals";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    bool completed = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        std::error_code error;
+        const bool journalsEmpty = std::filesystem::directory_iterator(extended_path(journals), error) ==
+                                   std::filesystem::directory_iterator{};
+        if (!error && !path_exists(versionRoot) && journalsEmpty)
+        {
+            completed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(completed);
+    const cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
+    require(registry.versions.size() == 1U);
+    require(registry.selectedVersion == updated.try_value()->versionDirectory);
 }
 } // namespace
 
@@ -1373,6 +1475,7 @@ int main(int a_argumentCount, char **a_arguments)
     if (a_argumentCount == 2 && std::string_view(a_arguments[1]) == "--version-operations")
     {
         test_version_operations(assertContext);
+        test_version_installer_self_uninstall(assertContext);
         return 0;
     }
     if (a_argumentCount != 1)

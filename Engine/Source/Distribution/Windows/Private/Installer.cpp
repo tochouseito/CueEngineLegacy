@@ -168,6 +168,17 @@ struct InstalledVersionSnapshot final
     BundleSnapshot bundle;
 };
 
+/// @brief 検証時からChild終了まで置換を拒否するInstall Worker Evidence Handle群
+struct ValidatedInstallWorker final
+{
+    std::filesystem::path root;
+    std::filesystem::path executable;
+    std::filesystem::path marker;
+    HandleOwner rootHandle;
+    HandleOwner executableHandle;
+    HandleOwner markerHandle;
+};
+
 /// @brief Allocation失敗をDistribution Fatalへ変換する
 [[noreturn]] void terminate_allocation(const cue::AssertContext &a_assertContext) noexcept
 {
@@ -711,6 +722,31 @@ struct InstalledVersionSnapshot final
                                         sizeof(parentAttributeInfo)) != FALSE &&
            (parentAttributeInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U &&
            (parentAttributeInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U && finalPath && expected &&
+           _wcsicmp(finalPath->c_str(), expected->c_str()) == 0;
+}
+
+/// @brief Directory Handleが指定Pathそのものを指しReparse Pointでないことを確認する
+[[nodiscard]] bool handle_matches_plain_directory(HANDLE a_handle, const std::filesystem::path &a_path) noexcept
+{
+    FILE_ATTRIBUTE_TAG_INFO attributeInfo{};
+    const auto finalPath = handle_path(a_handle);
+    const std::filesystem::path parent = a_path.parent_path();
+    HandleOwner parentHandle(CreateFileW(win32_path(parent).c_str(), FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    auto expected = parentHandle.valid() ? handle_path(parentHandle.get()) : std::nullopt;
+    if (expected && !expected->ends_with(L'\\'))
+    {
+        expected->push_back(L'\\');
+    }
+    if (expected)
+    {
+        expected->append(a_path.filename().native());
+    }
+    return GetFileInformationByHandleEx(a_handle, FileAttributeTagInfo, &attributeInfo, sizeof(attributeInfo)) !=
+               FALSE &&
+           (attributeInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U &&
+           (attributeInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U && finalPath && expected &&
            _wcsicmp(finalPath->c_str(), expected->c_str()) == 0;
 }
 
@@ -1805,50 +1841,74 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
         std::pair(std::move(*executableDigest.try_value()), std::move(*markerDigest.try_value())));
 }
 
-/// @brief Payload Cleanup後もJournalと外部Workerの固定Identityを再検証する
-[[nodiscard]] cue::Result<void> validate_worker_for_journal(const std::filesystem::path &a_installRoot,
-                                                            const cue::distribution::InstallOperationJournal &a_journal,
-                                                            const cue::AssertContext &a_assertContext) noexcept
+/// @brief Lock済みHandle群をJournalの固定Digestと照合する
+[[nodiscard]] cue::Result<ValidatedInstallWorker> validate_locked_worker_for_journal(
+    const cue::distribution::InstallOperationJournal &a_journal, ValidatedInstallWorker a_worker,
+    const cue::AssertContext &a_assertContext) noexcept
 {
-    const std::filesystem::path workerRoot =
-        a_installRoot / L"Operations" / L"Workers" / to_wide(a_journal.workerId).value_or(L"");
-    const std::filesystem::path executable = workerRoot / L"CueEngineInstallWorker.exe";
-    const std::filesystem::path markerPath = workerRoot / k_workerMarkerName;
-    if (!is_plain_directory(workerRoot) || !is_plain_file(executable) || !is_plain_file(markerPath))
+    if (!a_worker.rootHandle.valid() || !a_worker.executableHandle.valid() || !a_worker.markerHandle.valid() ||
+        !handle_matches_plain_directory(a_worker.rootHandle.get(), a_worker.root) ||
+        !handle_matches_plain_file(a_worker.executableHandle.get(), a_worker.executable) ||
+        !handle_matches_plain_file(a_worker.markerHandle.get(), a_worker.marker))
     {
-        return cue::Result<void>::failure(install_error(a_assertContext,
-                                                        cue::distribution::DistributionError::BundleValidationFailed,
-                                                        "Uninstall Worker evidence is not plain"));
+        return cue::Result<ValidatedInstallWorker>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
+                          "Uninstall Worker evidence Handle does not match its path"));
     }
-    auto markerText = read_text(markerPath, a_assertContext);
+    auto markerText = read_text(a_worker.marker, a_assertContext);
     if (!markerText)
     {
-        return cue::Result<void>::failure(std::move(*markerText.try_error()));
+        return cue::Result<ValidatedInstallWorker>::failure(std::move(*markerText.try_error()));
     }
     auto marker = cue::distribution::read_install_worker_marker(*markerText.try_value(), a_assertContext);
+    const auto *markerBegin = reinterpret_cast<const std::byte *>(markerText.try_value()->data());
+    auto markerDigest = hash_bytes(std::span(markerBegin, markerText.try_value()->size()), a_assertContext);
     if (!marker || marker.try_value()->workerId != a_journal.workerId ||
-        marker.try_value()->bundleId != a_journal.target->bundleId)
+        marker.try_value()->bundleId != a_journal.target->bundleId || !markerDigest ||
+        *markerDigest.try_value() != a_journal.workerMarkerDigest)
     {
-        return cue::Result<void>::failure(install_error(a_assertContext,
-                                                        cue::distribution::DistributionError::BundleValidationFailed,
-                                                        "Uninstall Worker marker does not match its Journal"));
+        return cue::Result<ValidatedInstallWorker>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
+                          "Uninstall Worker marker does not match its Journal"));
     }
-    auto executableBytes = read_file(executable, k_maximumPayloadBytes, a_assertContext);
+    auto executableBytes = read_file(a_worker.executable, k_maximumPayloadBytes, a_assertContext);
     if (!executableBytes || executableBytes.try_value()->size() != marker.try_value()->executable.byteSize ||
         !is_x64_pe(*executableBytes.try_value()))
     {
-        return cue::Result<void>::failure(install_error(a_assertContext,
-                                                        cue::distribution::DistributionError::BundleValidationFailed,
-                                                        "Uninstall Worker executable is invalid"));
+        return cue::Result<ValidatedInstallWorker>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
+                          "Uninstall Worker executable is invalid"));
     }
     auto executableDigest = hash_bytes(*executableBytes.try_value(), a_assertContext);
-    if (!executableDigest || *executableDigest.try_value() != marker.try_value()->executable.sha256)
+    if (!executableDigest || *executableDigest.try_value() != marker.try_value()->executable.sha256 ||
+        *executableDigest.try_value() != a_journal.workerExecutableDigest)
     {
-        return cue::Result<void>::failure(
+        return cue::Result<ValidatedInstallWorker>::failure(
             install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                           "Uninstall Worker executable digest does not match its marker"));
     }
-    return cue::Result<void>::success();
+    return cue::Result<ValidatedInstallWorker>::success(std::move(a_worker));
+}
+
+/// @brief Payload Cleanup後もJournalと外部Workerを置換不能なHandleで固定して再検証する
+[[nodiscard]] cue::Result<ValidatedInstallWorker> lock_worker_for_journal(
+    const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    ValidatedInstallWorker worker;
+    worker.root = a_installRoot / L"Operations" / L"Workers" / to_wide(a_journal.workerId).value_or(L"");
+    worker.executable = worker.root / L"CueEngineInstallWorker.exe";
+    worker.marker = worker.root / k_workerMarkerName;
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    worker.rootHandle = HandleOwner(CreateFileW(win32_path(worker.root).c_str(), FILE_READ_ATTRIBUTES,
+                                                FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING,
+                                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    worker.executableHandle =
+        HandleOwner(CreateFileW(win32_path(worker.executable).c_str(), GENERIC_READ, FILE_SHARE_READ, &security,
+                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    worker.markerHandle = HandleOwner(CreateFileW(win32_path(worker.marker).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                                  &security, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    return validate_locked_worker_for_journal(a_journal, std::move(worker), a_assertContext);
 }
 
 /// @brief ManifestのInstall WorkerをOperation Stagingで検証してVersion外へAtomic Publishする
@@ -3343,8 +3403,8 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     return cue::Result<void>::success();
 }
 
-/// @brief 現在Process Imageが検証済み外部Worker Pathから起動されたか確認する
-[[nodiscard]] bool is_current_worker_executable(const std::filesystem::path &a_expected) noexcept
+/// @brief 現在Process Imageが継承済みWorker executableと同じFileを指すか確認する
+[[nodiscard]] bool is_current_worker_executable(HANDLE a_expectedHandle) noexcept
 {
     std::array<wchar_t, 32768U> currentPath{};
     const DWORD length = GetModuleFileNameW(nullptr, currentPath.data(), static_cast<DWORD>(currentPath.size()));
@@ -3353,24 +3413,49 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
         return false;
     }
     const std::filesystem::path current(std::wstring_view(currentPath.data(), length));
-    HandleOwner expectedHandle(CreateFileW(win32_path(a_expected).c_str(), FILE_READ_ATTRIBUTES,
-                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     HandleOwner currentHandle(CreateFileW(win32_path(current).c_str(), FILE_READ_ATTRIBUTES,
                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    const auto expectedFinal = expectedHandle.valid() ? handle_path(expectedHandle.get()) : std::nullopt;
+    const auto expectedFinal = handle_path(a_expectedHandle);
     const auto currentFinal = currentHandle.valid() ? handle_path(currentHandle.get()) : std::nullopt;
     return expectedFinal && currentFinal && _wcsicmp(expectedFinal->c_str(), currentFinal->c_str()) == 0;
 }
 
-/// @brief Version外WorkerへGate Handleだけを継承してUninstall再開を委譲する
+/// @brief 現在Process Imageが削除対象Version Directory内にあるか確認する
+[[nodiscard]] bool is_current_process_within(const std::filesystem::path &a_directory) noexcept
+{
+    std::array<wchar_t, 32768U> currentPath{};
+    const DWORD length = GetModuleFileNameW(nullptr, currentPath.data(), static_cast<DWORD>(currentPath.size()));
+    if (length == 0U || length >= currentPath.size())
+    {
+        return false;
+    }
+    HandleOwner directoryHandle(CreateFileW(
+        win32_path(a_directory).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    HandleOwner currentHandle(
+        CreateFileW(win32_path(std::filesystem::path(std::wstring_view(currentPath.data(), length))).c_str(),
+                    FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    auto directoryFinal = directoryHandle.valid() ? handle_path(directoryHandle.get()) : std::nullopt;
+    const auto currentFinal = currentHandle.valid() ? handle_path(currentHandle.get()) : std::nullopt;
+    if (!directoryFinal || !currentFinal)
+    {
+        return false;
+    }
+    if (!directoryFinal->ends_with(L'\\'))
+    {
+        directoryFinal->push_back(L'\\');
+    }
+    return currentFinal->size() > directoryFinal->size() &&
+           _wcsnicmp(currentFinal->c_str(), directoryFinal->c_str(), directoryFinal->size()) == 0;
+}
+
+/// @brief Version外Workerへ固定Evidence Handleと必要な起動元待機Handleを継承する
 [[nodiscard]] cue::Result<std::uint32_t> launch_uninstall_worker(
     const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
-    ControlLease &a_controlLease, const cue::AssertContext &a_assertContext) noexcept
+    ValidatedInstallWorker &a_worker, ControlLease &a_controlLease, const cue::AssertContext &a_assertContext) noexcept
 {
-    const std::filesystem::path executable = a_installRoot / L"Operations" / L"Workers" /
-                                             to_wide(a_journal.workerId).value_or(L"") / L"CueEngineInstallWorker.exe";
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HandleOwner gate(CreateEventW(&security, TRUE, FALSE, nullptr));
     if (!gate.valid())
@@ -3386,12 +3471,42 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
             install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                           "Install Root could not be encoded for Uninstall Worker"));
     }
-    std::wstring command = quote_argument(win32_path(executable));
-    const std::array<std::string, 9U> arguments = {
-        "--uninstall-worker",  "--gate-handle", std::to_string(reinterpret_cast<std::uintptr_t>(gate.get())),
-        "--install-root",      *installUtf8,    "--operation-id",
-        a_journal.operationId, "--worker-id",   a_journal.workerId,
+    const std::filesystem::path versionRoot =
+        a_installRoot / L"Versions" / to_wide(a_journal.target->directoryName).value_or(L"");
+    HandleOwner sourceProcess;
+    if (is_current_process_within(versionRoot))
+    {
+        sourceProcess = HandleOwner(OpenProcess(SYNCHRONIZE, TRUE, GetCurrentProcessId()));
+        if (!sourceProcess.valid())
+        {
+            return cue::Result<std::uint32_t>::failure(
+                install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                              "Uninstall source Process could not be retained"));
+        }
+    }
+    std::wstring command = quote_argument(win32_path(a_worker.executable));
+    std::vector<std::string> arguments = {
+        "--uninstall-worker",
+        "--gate-handle",
+        std::to_string(reinterpret_cast<std::uintptr_t>(gate.get())),
+        "--worker-directory-handle",
+        std::to_string(reinterpret_cast<std::uintptr_t>(a_worker.rootHandle.get())),
+        "--worker-executable-handle",
+        std::to_string(reinterpret_cast<std::uintptr_t>(a_worker.executableHandle.get())),
+        "--worker-marker-handle",
+        std::to_string(reinterpret_cast<std::uintptr_t>(a_worker.markerHandle.get())),
+        "--install-root",
+        *installUtf8,
+        "--operation-id",
+        a_journal.operationId,
+        "--worker-id",
+        a_journal.workerId,
     };
+    if (sourceProcess.valid())
+    {
+        arguments.push_back("--source-process-handle");
+        arguments.push_back(std::to_string(reinterpret_cast<std::uintptr_t>(sourceProcess.get())));
+    }
     for (const std::string &argument : arguments)
     {
         command.push_back(L' ');
@@ -3413,9 +3528,14 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
             install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                           "Uninstall Worker inheritance allowlist could not be configured"));
     }
-    HANDLE inheritedHandle = gate.get();
-    if (UpdateProcThreadAttribute(attributes, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inheritedHandle,
-                                  sizeof(inheritedHandle), nullptr, nullptr) == FALSE)
+    std::vector<HANDLE> inheritedHandles = {gate.get(), a_worker.rootHandle.get(), a_worker.executableHandle.get(),
+                                            a_worker.markerHandle.get()};
+    if (sourceProcess.valid())
+    {
+        inheritedHandles.push_back(sourceProcess.get());
+    }
+    if (UpdateProcThreadAttribute(attributes, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritedHandles.data(),
+                                  inheritedHandles.size() * sizeof(HANDLE), nullptr, nullptr) == FALSE)
     {
         DeleteProcThreadAttributeList(attributes);
         return cue::Result<std::uint32_t>::failure(
@@ -3434,15 +3554,27 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
             install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                           "Uninstall Worker environment could not be constructed"));
     }
-    const BOOL created = CreateProcessW(win32_path(executable).c_str(), command.data(), nullptr, nullptr, TRUE,
+    std::array<wchar_t, MAX_PATH + 1U> workingDirectory{};
+    const UINT workingDirectoryLength =
+        GetSystemDirectoryW(workingDirectory.data(), static_cast<UINT>(workingDirectory.size()));
+    if (workingDirectoryLength == 0U || workingDirectoryLength >= workingDirectory.size() ||
+        !is_plain_directory(std::filesystem::path(workingDirectory.data())))
+    {
+        DeleteProcThreadAttributeList(attributes);
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker working directory is unavailable"));
+    }
+    const BOOL created = CreateProcessW(win32_path(a_worker.executable).c_str(), command.data(), nullptr, nullptr, TRUE,
                                         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-                                        environment->data(), nullptr, &startup.StartupInfo, &process);
+                                        environment->data(), workingDirectory.data(), &startup.StartupInfo, &process);
     DeleteProcThreadAttributeList(attributes);
     if (created == FALSE)
     {
+        const DWORD processError = GetLastError();
         return cue::Result<std::uint32_t>::failure(
             install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
-                          "Uninstall Worker process could not be created"));
+                          "Uninstall Worker process could not be created: " + std::to_string(processError)));
     }
     HandleOwner processHandle(process.hProcess);
     HandleOwner threadHandle(process.hThread);
@@ -4235,6 +4367,8 @@ Result<WindowsUninstallOutcome> uninstall_windows_installed_version(const Window
             journal.kind = InstallOperationKind::Uninstall;
             journal.stage = InstallOperationStage::Prepared;
             journal.workerId = entry.workerId;
+            journal.workerExecutableDigest = entry.workerExecutableDigest;
+            journal.workerMarkerDigest = entry.workerMarkerDigest;
             journal.expectedRegistry =
                 ExpectedRegistry{snapshot.try_value()->registry.generationId, snapshot.try_value()->registry.revision};
             journal.target = InstallOperationTarget{entry.directoryName, entry.bundleId, entry.manifestDigest};
@@ -4244,7 +4378,7 @@ Result<WindowsUninstallOutcome> uninstall_windows_installed_version(const Window
                 return Result<WindowsUninstallOutcome>::failure(std::move(*written.try_error()));
             }
         }
-        auto worker = validate_worker_for_journal(*installRoot, journal, a_assertContext);
+        auto worker = lock_worker_for_journal(*installRoot, journal, a_assertContext);
         if (!worker)
         {
             return Result<WindowsUninstallOutcome>::failure(std::move(*worker.try_error()));
@@ -4254,7 +4388,8 @@ Result<WindowsUninstallOutcome> uninstall_windows_installed_version(const Window
         {
             return Result<WindowsUninstallOutcome>::failure(std::move(*leaseFile.try_error()));
         }
-        auto processId = launch_uninstall_worker(*installRoot, journal, *controlLease.try_value(), a_assertContext);
+        auto processId = launch_uninstall_worker(*installRoot, journal, *worker.try_value(), *controlLease.try_value(),
+                                                 a_assertContext);
         if (!processId)
         {
             return Result<WindowsUninstallOutcome>::failure(std::move(*processId.try_error()));
@@ -4279,16 +4414,28 @@ Result<void> run_windows_uninstall_worker(const WindowsUninstallWorkerRequest &a
     try
     {
         if (a_request.gateHandle == 0U || !is_canonical_bundle_id(a_request.operationId) ||
-            !is_canonical_sha256(a_request.workerId))
+            a_request.workerDirectoryHandle == 0U || a_request.workerExecutableHandle == 0U ||
+            a_request.workerMarkerHandle == 0U || !is_canonical_sha256(a_request.workerId))
         {
             return Result<void>::failure(make_distribution_error(
                 a_assertContext, DistributionError::InvalidInstallState, "Uninstall Worker request is invalid"));
         }
         HandleOwner gate(reinterpret_cast<HANDLE>(a_request.gateHandle));
-        DWORD gateFlags = 0U;
-        if (GetHandleInformation(gate.get(), &gateFlags) == FALSE || (gateFlags & HANDLE_FLAG_INHERIT) == 0U ||
+        HandleOwner workerDirectory(reinterpret_cast<HANDLE>(a_request.workerDirectoryHandle));
+        HandleOwner workerExecutable(reinterpret_cast<HANDLE>(a_request.workerExecutableHandle));
+        HandleOwner workerMarker(reinterpret_cast<HANDLE>(a_request.workerMarkerHandle));
+        HandleOwner sourceProcess(reinterpret_cast<HANDLE>(a_request.sourceProcessHandle));
+        const auto clearInheritance = [](const HandleOwner &a_handle) noexcept
+        {
+            DWORD flags = 0U;
+            return a_handle.valid() && GetHandleInformation(a_handle.get(), &flags) != FALSE &&
+                   (flags & HANDLE_FLAG_INHERIT) != 0U &&
+                   SetHandleInformation(a_handle.get(), HANDLE_FLAG_INHERIT, 0U) != FALSE;
+        };
+        if (!clearInheritance(gate) || !clearInheritance(workerDirectory) || !clearInheritance(workerExecutable) ||
+            !clearInheritance(workerMarker) || (sourceProcess.valid() && !clearInheritance(sourceProcess)) ||
             WaitForSingleObject(gate.get(), k_workerGateTimeoutMilliseconds) != WAIT_OBJECT_0 ||
-            SetHandleInformation(gate.get(), HANDLE_FLAG_INHERIT, 0U) == FALSE)
+            (sourceProcess.valid() && WaitForSingleObject(sourceProcess.get(), INFINITE) != WAIT_OBJECT_0))
         {
             return Result<void>::failure(
                 make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
@@ -4355,15 +4502,20 @@ Result<void> run_windows_uninstall_worker(const WindowsUninstallWorkerRequest &a
                 make_distribution_error(a_assertContext, DistributionError::InstallConflict,
                                         "Uninstall Worker Payload is missing before its final cleanup Stage"));
         }
-        auto worker = validate_worker_for_journal(*installRoot, *journal.try_value(), a_assertContext);
+        ValidatedInstallWorker inheritedWorker;
+        inheritedWorker.root = *installRoot / L"Operations" / L"Workers" / to_wide(a_request.workerId).value_or(L"");
+        inheritedWorker.executable = inheritedWorker.root / L"CueEngineInstallWorker.exe";
+        inheritedWorker.marker = inheritedWorker.root / k_workerMarkerName;
+        inheritedWorker.rootHandle = std::move(workerDirectory);
+        inheritedWorker.executableHandle = std::move(workerExecutable);
+        inheritedWorker.markerHandle = std::move(workerMarker);
+        auto worker =
+            validate_locked_worker_for_journal(*journal.try_value(), std::move(inheritedWorker), a_assertContext);
         if (!worker)
         {
             return Result<void>::failure(std::move(*worker.try_error()));
         }
-        const std::filesystem::path expectedWorker = *installRoot / L"Operations" / L"Workers" /
-                                                     to_wide(a_request.workerId).value_or(L"") /
-                                                     L"CueEngineInstallWorker.exe";
-        if (!is_current_worker_executable(expectedWorker))
+        if (!is_current_worker_executable(worker.try_value()->executableHandle.get()))
         {
             return Result<void>::failure(
                 make_distribution_error(a_assertContext, DistributionError::InstallConflict,

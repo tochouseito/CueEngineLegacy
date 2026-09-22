@@ -198,8 +198,12 @@ void append_identity_number(std::string &a_output, std::uint64_t a_value)
         return false;
     }
     const bool isRecovery = a_journal.kind == InstallOperationKind::RegistryRecovery;
+    const bool hasWorkerEvidence =
+        is_canonical_sha256(a_journal.workerExecutableDigest) && is_canonical_sha256(a_journal.workerMarkerDigest);
+    const bool hasNoWorkerEvidence = a_journal.workerExecutableDigest.empty() && a_journal.workerMarkerDigest.empty();
     if (isRecovery != a_journal.sourceRegistryEvidence.has_value() ||
-        isRecovery == a_journal.expectedRegistry.has_value() || isRecovery == a_journal.target.has_value())
+        isRecovery == a_journal.expectedRegistry.has_value() || isRecovery == a_journal.target.has_value() ||
+        (a_journal.kind == InstallOperationKind::Uninstall ? !hasWorkerEvidence : !hasNoWorkerEvidence))
     {
         return false;
     }
@@ -718,6 +722,10 @@ void append_source_evidence(std::string &a_output,
     append_string(output, install_operation_stage_name(a_journal.stage));
     output.append(",\"workerId\":");
     append_string(output, a_journal.workerId);
+    output.append(",\"workerExecutableDigest\":");
+    append_string(output, a_journal.workerExecutableDigest);
+    output.append(",\"workerMarkerDigest\":");
+    append_string(output, a_journal.workerMarkerDigest);
     output.append(",\"expectedRegistry\":");
     append_expected_registry(output, a_journal.expectedRegistry);
     output.append(",\"target\":");
@@ -774,9 +782,12 @@ void append_source_evidence(std::string &a_output,
     auto kindName = read_string_member(cursor, "kind", ",");
     auto stageName = read_string_member(cursor, "stage", ",");
     auto worker = read_string_member(cursor, "workerId", ",");
+    auto workerExecutableDigest = read_string_member(cursor, "workerExecutableDigest", ",");
+    auto workerMarkerDigest = read_string_member(cursor, "workerMarkerDigest", ",");
     auto kind = kindName ? parse_kind(*kindName) : std::nullopt;
     auto stage = stageName ? parse_stage(*stageName) : std::nullopt;
-    if (!operation || !worker || !kind || !stage || !cursor.consume(",\"expectedRegistry\":"))
+    if (!operation || !worker || !workerExecutableDigest || !workerMarkerDigest || !kind || !stage ||
+        !cursor.consume(",\"expectedRegistry\":"))
     {
         return std::nullopt;
     }
@@ -785,6 +796,8 @@ void append_source_evidence(std::string &a_output,
     journal.kind = *kind;
     journal.stage = *stage;
     journal.workerId = std::move(*worker);
+    journal.workerExecutableDigest = std::move(*workerExecutableDigest);
+    journal.workerMarkerDigest = std::move(*workerMarkerDigest);
     if (!read_expected_registry(cursor, journal.expectedRegistry) || !cursor.consume(",\"target\":") ||
         !read_target(cursor, journal.target) || !cursor.consume(",\"sourceRegistryEvidence\":") ||
         !read_source_evidence(cursor, journal.sourceRegistryEvidence) || !cursor.consume(",\"blockedOperations\":["))
