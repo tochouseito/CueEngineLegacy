@@ -338,7 +338,8 @@ Journal削除だけを再実行する。
   Child Processへ継承してProcess終了まで保持する。不一致Versionは起動せずSelectableとして表示しない
 - Install Worker起動はVolume Root直下からWorker Directoryまでの全Directoryを非Reparse Handleで順に開き、
   `FILE_SHARE_DELETE`なしで検証開始から`CreateProcessW`完了まで祖先Renameを拒否する。Processは
-  `CREATE_SUSPENDED`でImage Mappingを完了させ、起動成功後にPrimary Threadを再開してから祖先Handleを解放する。
+  検証済みWorker Handleから物理Volume側へ解決した正規DOS Pathを使用してSUBST割当て変更を回避し、
+  `CREATE_SUSPENDED`でImage Mappingを完了させる。起動成功後にPrimary Threadを再開してから祖先Handleを解放する。
   Child側の補助照合はPath文字列ではなくVolume Serial NumberとFile IDを使用する
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない

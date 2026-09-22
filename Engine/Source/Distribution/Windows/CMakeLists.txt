@@ -7,6 +7,8 @@ target_sources(
         Private/SourceSdkPublisher.cpp
         Private/WindowsDirectoryAncestryLock.cpp
         Private/WindowsDirectoryAncestryLock.h
+        Private/WindowsStablePath.cpp
+        Private/WindowsStablePath.h
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public

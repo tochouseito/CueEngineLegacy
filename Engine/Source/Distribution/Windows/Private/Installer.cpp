@@ -1,6 +1,7 @@
 #include <Cue/Distribution/Windows/Installer.h>
 
 #include "WindowsDirectoryAncestryLock.h"
+#include "WindowsStablePath.h"
 
 #include <Cue/Distribution/Error.h>
 #include <Cue/Distribution/InstallState.h>
@@ -3474,6 +3475,12 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
     ValidatedInstallWorker &a_worker, ControlLease &a_controlLease, const cue::AssertContext &a_assertContext) noexcept
 {
+    auto stableExecutable = cue::distribution::windows_detail::resolve_stable_dos_path(
+        reinterpret_cast<std::uintptr_t>(a_worker.executableHandle.get()), a_assertContext);
+    if (!stableExecutable)
+    {
+        return cue::Result<std::uint32_t>::failure(std::move(*stableExecutable.try_error()));
+    }
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HandleOwner gate(CreateEventW(&security, TRUE, FALSE, nullptr));
     if (!gate.valid())
@@ -3502,7 +3509,8 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
                               "Uninstall source Process could not be retained"));
         }
     }
-    std::wstring command = quote_argument(win32_path(a_worker.executable));
+    const std::wstring stableExecutableNative = stableExecutable.try_value()->native();
+    std::wstring command = quote_argument(stableExecutableNative);
     std::vector<std::string> arguments = {
         "--uninstall-worker",
         "--gate-handle",
@@ -3584,7 +3592,7 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
                           "Uninstall Worker working directory is unavailable"));
     }
     const BOOL created = CreateProcessW(
-        win32_path(a_worker.executable).c_str(), command.data(), nullptr, nullptr, TRUE,
+        stableExecutableNative.c_str(), command.data(), nullptr, nullptr, TRUE,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED,
         environment->data(), workingDirectory.data(), &startup.StartupInfo, &process);
     DeleteProcThreadAttributeList(attributes);

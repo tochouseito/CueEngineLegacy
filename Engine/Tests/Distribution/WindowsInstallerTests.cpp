@@ -8,6 +8,7 @@
 #include <Cue/Foundation/Log.h>
 
 #include "WindowsDirectoryAncestryLock.h"
+#include "WindowsStablePath.h"
 
 #include <Windows.h>
 
@@ -128,6 +129,119 @@ class TemporaryRoot final
     std::filesystem::path m_path;
 };
 
+/// @brief Test用File Handleの一意所有権を保持する
+class FileHandleOwner final
+{
+  public:
+    /// @brief Native File Handleの所有権を取得する
+    explicit FileHandleOwner(HANDLE a_handle) noexcept : m_handle(a_handle)
+    {
+    }
+    FileHandleOwner(const FileHandleOwner &) = delete;
+    FileHandleOwner &operator=(const FileHandleOwner &) = delete;
+    FileHandleOwner(FileHandleOwner &&) = delete;
+    FileHandleOwner &operator=(FileHandleOwner &&) = delete;
+    /// @brief 所有するNative File Handleを閉じる
+    ~FileHandleOwner() noexcept
+    {
+        if (valid())
+        {
+            static_cast<void>(CloseHandle(m_handle));
+        }
+    }
+    /// @brief 有効なNative File Handleか返す
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE;
+    }
+    /// @brief 所有するNative File Handleを返す
+    [[nodiscard]] HANDLE get() const noexcept
+    {
+        return m_handle;
+    }
+
+  private:
+    HANDLE m_handle;
+};
+
+/// @brief Test Process用の一時DOS Device割当てを所有する
+class DosDeviceMapping final
+{
+  public:
+    /// @brief 未使用Drive文字を確保する
+    DosDeviceMapping()
+    {
+        std::array<wchar_t, 512U> target{};
+        for (wchar_t letter = L'Z'; letter >= L'D'; --letter)
+        {
+            const std::wstring device{letter, L':'};
+            if (QueryDosDeviceW(device.c_str(), target.data(), static_cast<DWORD>(target.size())) == 0U &&
+                GetLastError() == ERROR_FILE_NOT_FOUND)
+            {
+                m_device = device;
+                break;
+            }
+        }
+    }
+    DosDeviceMapping(const DosDeviceMapping &) = delete;
+    DosDeviceMapping &operator=(const DosDeviceMapping &) = delete;
+    DosDeviceMapping(DosDeviceMapping &&) = delete;
+    DosDeviceMapping &operator=(DosDeviceMapping &&) = delete;
+    /// @brief 現在のDOS Device割当てを解除する
+    ~DosDeviceMapping() noexcept
+    {
+        remove();
+    }
+    /// @brief DOS Deviceを指定Directoryへ再割当てする
+    [[nodiscard]] bool assign(const std::filesystem::path &a_directory) noexcept
+    {
+        remove();
+        if (m_device.empty())
+        {
+            return false;
+        }
+        m_target = L"\\??\\" + a_directory.lexically_normal().native();
+        if (DefineDosDeviceW(DDD_RAW_TARGET_PATH | DDD_NO_BROADCAST_SYSTEM, m_device.c_str(), m_target.c_str()) ==
+            FALSE)
+        {
+            m_target.clear();
+            return false;
+        }
+        return true;
+    }
+    /// @brief 割当て済みDrive Rootを返す
+    [[nodiscard]] std::filesystem::path root() const
+    {
+        return std::filesystem::path(m_device + L"\\");
+    }
+
+  private:
+    /// @brief 現在のDOS Device割当てを存在する場合だけ解除する
+    void remove() noexcept
+    {
+        if (!m_target.empty())
+        {
+            static_cast<void>(DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE |
+                                                   DDD_RAW_TARGET_PATH | DDD_NO_BROADCAST_SYSTEM,
+                                               m_device.c_str(), m_target.c_str()));
+            m_target.clear();
+        }
+    }
+
+    std::wstring m_device;
+    std::wstring m_target;
+};
+
+/// @brief 二つのTest File Handleが同じFile IDを指すか返す
+[[nodiscard]] bool has_same_file_identity(HANDLE a_left, HANDLE a_right) noexcept
+{
+    BY_HANDLE_FILE_INFORMATION left{};
+    BY_HANDLE_FILE_INFORMATION right{};
+    return GetFileInformationByHandle(a_left, &left) != FALSE && GetFileInformationByHandle(a_right, &right) != FALSE &&
+           left.dwVolumeSerialNumber == right.dwVolumeSerialNumber && left.nFileIndexHigh == right.nFileIndexHigh &&
+           left.nFileIndexLow == right.nFileIndexLow;
+}
+
 /// @brief Worker起動中の祖先Directory LockがPath差し替えを拒否することを検証する
 void test_worker_launch_ancestry_lock(const cue::AssertContext &a_assertContext)
 {
@@ -152,6 +266,54 @@ void test_worker_launch_ancestry_lock(const cue::AssertContext &a_assertContext)
             FALSE);
     require(MoveFileExW(extended_path(movedRoot).c_str(), extended_path(lockedRoot).c_str(), MOVEFILE_WRITE_THROUGH) !=
             FALSE);
+}
+
+/// @brief 正規DOS PathがSUBST再割当て後も検証済みFileを指すことを検証する
+void test_worker_stable_dos_path(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path originalRoot = temporary.path() / L"Original";
+    const std::filesystem::path replacementRoot = temporary.path() / L"Replacement";
+    std::error_code error;
+    std::filesystem::create_directories(originalRoot, error);
+    require(!error);
+    std::filesystem::create_directories(replacementRoot, error);
+    require(!error);
+    {
+        std::ofstream file(originalRoot / L"Worker.exe", std::ios::binary);
+        file << "original";
+        require(file.good());
+    }
+    {
+        std::ofstream file(replacementRoot / L"Worker.exe", std::ios::binary);
+        file << "replacement";
+        require(file.good());
+    }
+
+    DosDeviceMapping mapping;
+    require(mapping.assign(originalRoot));
+    const std::filesystem::path alias = mapping.root() / L"Worker.exe";
+    FileHandleOwner original(CreateFileW(alias.c_str(), FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    require(original.valid());
+    auto stable = cue::distribution::windows_detail::resolve_stable_dos_path(
+        reinterpret_cast<std::uintptr_t>(original.get()), a_assertContext);
+    require(stable.has_value());
+    require(stable.try_value()->native().starts_with(L"\\\\?\\"));
+    require(!stable.try_value()->native().starts_with(L"\\\\?\\" + mapping.root().native()));
+
+    require(mapping.assign(replacementRoot));
+    FileHandleOwner stableHandle(CreateFileW(stable.try_value()->c_str(), FILE_READ_ATTRIBUTES,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                             OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    FileHandleOwner remappedHandle(CreateFileW(alias.c_str(), FILE_READ_ATTRIBUTES,
+                                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                               OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    require(stableHandle.valid());
+    require(remappedHandle.valid());
+    require(has_same_file_identity(original.get(), stableHandle.get()));
+    require(!has_same_file_identity(original.get(), remappedHandle.get()));
 }
 
 /// @brief 起動ProcessとPrimary Thread Handleを一意所有する
@@ -1605,6 +1767,7 @@ int main(int a_argumentCount, char **a_arguments)
         return 2;
     }
     test_worker_launch_ancestry_lock(assertContext);
+    test_worker_stable_dos_path(assertContext);
     test_worker_system_imports();
     test_install_transaction(assertContext);
     test_read_only_payload_install(assertContext);
