@@ -291,6 +291,20 @@ struct RegistrySnapshot final
     return result;
 }
 
+/// @brief Journal Atomic ReplaceがPublish前に残したCanonical一時File名か返す
+[[nodiscard]] bool is_journal_atomic_temporary(const std::filesystem::path &a_path)
+{
+    const auto name = to_utf8(a_path.filename().native());
+    constexpr std::string_view separator = ".json.tmp-";
+    if (!name || name->size() != 36U + separator.size() + 36U ||
+        std::string_view(*name).substr(36U, separator.size()) != separator)
+    {
+        return false;
+    }
+    return cue::distribution::is_canonical_bundle_id(std::string_view(*name).substr(0U, 36U)) &&
+           cue::distribution::is_canonical_bundle_id(std::string_view(*name).substr(36U + separator.size()));
+}
+
 /// @brief Path EntryがReparse Pointでない既存Directoryか返す
 [[nodiscard]] bool is_plain_directory(const std::filesystem::path &a_path) noexcept
 {
@@ -1164,7 +1178,41 @@ struct RegistrySnapshot final
     return output;
 }
 
-/// @brief Probeへ渡すSystemRootだけのUnicode Environment Blockを構築する
+/// @brief 現在Processが読込済みのModule Directoryを返す
+[[nodiscard]] std::optional<std::wstring> loaded_module_directory(std::wstring_view a_moduleName)
+{
+    const std::wstring moduleName(a_moduleName);
+    const HMODULE module = GetModuleHandleW(moduleName.c_str());
+    if (module == nullptr)
+    {
+        return std::nullopt;
+    }
+    std::array<wchar_t, 32768U> path{};
+    const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0U || length >= path.size())
+    {
+        return std::nullopt;
+    }
+    return std::filesystem::path(std::wstring_view(path.data(), length)).parent_path().native();
+}
+
+/// @brief 大文字小文字を区別せず未登録のDirectoryだけを追加する
+void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstring a_directory)
+{
+    const auto duplicate = std::ranges::find_if(
+        a_directories,
+        [&a_directory](const std::wstring &a_existing) noexcept
+        {
+            return CompareStringOrdinal(a_existing.data(), static_cast<int>(a_existing.size()), a_directory.data(),
+                                        static_cast<int>(a_directory.size()), TRUE) == CSTR_EQUAL;
+        });
+    if (duplicate == a_directories.end())
+    {
+        a_directories.push_back(std::move(a_directory));
+    }
+}
+
+/// @brief Probeへ渡すSystemRootと読込済みRuntimeだけのUnicode Environment Blockを構築する
 [[nodiscard]] std::optional<std::vector<wchar_t>> make_probe_environment()
 {
     const DWORD required = GetEnvironmentVariableW(L"SystemRoot", nullptr, 0U);
@@ -1179,10 +1227,47 @@ struct RegistrySnapshot final
         return std::nullopt;
     }
     systemRoot.resize(written);
+
+    std::vector<std::wstring> runtimeDirectories;
+    constexpr std::array<std::wstring_view, 10U> runtimeModules = {
+        L"msvcp140.dll",        L"msvcp140d.dll", L"vcruntime140.dll", L"vcruntime140d.dll", L"vcruntime140_1.dll",
+        L"vcruntime140_1d.dll", L"ucrtbase.dll",  L"ucrtbased.dll",    L"concrt140.dll",     L"concrt140d.dll",
+    };
+    for (std::wstring_view module : runtimeModules)
+    {
+        auto directory = loaded_module_directory(module);
+        if (directory)
+        {
+            append_unique_directory(runtimeDirectories, std::move(*directory));
+        }
+    }
+    std::array<wchar_t, 32768U> systemDirectory{};
+    const UINT systemDirectoryLength =
+        GetSystemDirectoryW(systemDirectory.data(), static_cast<UINT>(systemDirectory.size()));
+    if (systemDirectoryLength == 0U || systemDirectoryLength >= systemDirectory.size())
+    {
+        return std::nullopt;
+    }
+    append_unique_directory(runtimeDirectories,
+                            std::wstring(systemDirectory.data(), static_cast<std::size_t>(systemDirectoryLength)));
+
+    std::wstring runtimePath;
+    for (const std::wstring &directory : runtimeDirectories)
+    {
+        if (!runtimePath.empty())
+        {
+            runtimePath.push_back(L';');
+        }
+        runtimePath.append(directory);
+    }
     std::vector<wchar_t> environment;
-    environment.reserve(11U + systemRoot.size() + 2U);
-    constexpr std::wstring_view prefix = L"SystemRoot=";
-    environment.insert(environment.end(), prefix.begin(), prefix.end());
+    environment.reserve(17U + runtimePath.size() + systemRoot.size() + 3U);
+    constexpr std::wstring_view pathPrefix = L"Path=";
+    environment.insert(environment.end(), pathPrefix.begin(), pathPrefix.end());
+    environment.insert(environment.end(), runtimePath.begin(), runtimePath.end());
+    environment.push_back(L'\0');
+    constexpr std::wstring_view systemRootPrefix = L"SystemRoot=";
+    environment.insert(environment.end(), systemRootPrefix.begin(), systemRootPrefix.end());
     environment.insert(environment.end(), systemRoot.begin(), systemRoot.end());
     environment.push_back(L'\0');
     environment.push_back(L'\0');
@@ -1598,6 +1683,16 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
         }
         for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(root))
         {
+            if (is_plain_file(entry.path()) && is_journal_atomic_temporary(entry.path()))
+            {
+                if (DeleteFileW(win32_path(entry.path()).c_str()) == FALSE && GetLastError() != ERROR_FILE_NOT_FOUND)
+                {
+                    return cue::Result<decltype(result)>::failure(
+                        install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                                      "Abandoned Install Journal temporary file could not be removed"));
+                }
+                continue;
+            }
             if (result.size() >= k_maximumInstallEntries)
             {
                 return cue::Result<decltype(result)>::failure(

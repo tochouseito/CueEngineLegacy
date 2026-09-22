@@ -476,6 +476,15 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
     require(repeated.try_value()->registryRevision == 3U);
     require_sentinels(installRoot);
 
+    const std::filesystem::path abandonedJournalTemporary =
+        installRoot / L"Operations" / L"Journals" /
+        L"88888888-8888-4888-8888-888888888888.json.tmp-99999999-9999-4999-8999-999999999999";
+    write_text(abandonedJournalTemporary, "partial\n");
+    auto temporaryRecovered = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(temporaryRecovered.has_value() && temporaryRecovered.try_value()->wasAlreadyInstalled);
+    require(!std::filesystem::exists(abandonedJournalTemporary));
+    require_sentinels(installRoot);
+
     auto registryBytes = cue::distribution::write_installed_versions_registry(registry, a_assertContext);
     require(registryBytes.has_value());
     std::string unknownRegistry = *registryBytes.try_value();
