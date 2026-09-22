@@ -3,11 +3,13 @@ add_library(Cue.Distribution.Windows STATIC)
 target_sources(
     Cue.Distribution.Windows
     PRIVATE
+        Private/Installer.cpp
         Private/SourceSdkPublisher.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public
         FILES
+            Public/Cue/Distribution/Windows/Installer.h
             Public/Cue/Distribution/Windows/SourceSdkPublisher.h
 )
 
@@ -19,6 +21,7 @@ target_link_libraries(
     PRIVATE
         Cue.IO.Windows
         Cue.Platform.Windows
+        ole32
 )
 target_compile_features(Cue.Distribution.Windows PUBLIC cxx_std_20)
 target_include_directories(Cue.Distribution.Windows PUBLIC Public)

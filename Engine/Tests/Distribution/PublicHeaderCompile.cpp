@@ -1,5 +1,6 @@
 #include <Cue/Distribution/Error.h>
 #include <Cue/Distribution/Identity.h>
+#include <Cue/Distribution/InstallState.h>
 #include <Cue/Distribution/Manifest.h>
 #include <Cue/Distribution/Publisher.h>
 
