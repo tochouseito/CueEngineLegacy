@@ -307,6 +307,39 @@ struct RegistrySnapshot final
            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U;
 }
 
+/// @brief Install Rootまでの既存DirectoryをHandleで辿りReparse Point経由の書込を拒否する
+[[nodiscard]] bool has_plain_existing_ancestry(const std::filesystem::path &a_path) noexcept
+{
+    std::filesystem::path current = a_path.root_path();
+    if (current.empty())
+    {
+        return false;
+    }
+    for (const std::filesystem::path &component : a_path.relative_path())
+    {
+        current /= component;
+        const DWORD attributes = GetFileAttributesW(win32_path(current).c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            const DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+        }
+        HandleOwner handle(CreateFileW(win32_path(current).c_str(), FILE_READ_ATTRIBUTES,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        FILE_ATTRIBUTE_TAG_INFO information{};
+        if (!handle.valid() ||
+            GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo, &information, sizeof(information)) ==
+                FALSE ||
+            (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+            (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// @brief PathがLocal Fixed Volume上にあるか返す
 [[nodiscard]] bool is_local_fixed_path(const std::filesystem::path &a_path) noexcept
 {
@@ -794,6 +827,21 @@ struct RegistrySnapshot final
     return cue::Result<BundleSnapshot>::success(std::move(result));
 }
 
+/// @brief Copy完了Fileの内容を耐久化して後続Markerより先に永続化する
+[[nodiscard]] cue::Result<void> flush_copied_file(const std::filesystem::path &a_path,
+                                                  const cue::AssertContext &a_assertContext) noexcept
+{
+    HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!handle.valid() || FlushFileBuffers(handle.get()) == FALSE)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Copied Install file could not be flushed"));
+    }
+    return cue::Result<void>::success();
+}
+
 /// @brief Manifest InventoryだけをOperation固有Version Stagingへ複製する
 [[nodiscard]] cue::Result<void> copy_bundle(const std::filesystem::path &a_source,
                                             const std::filesystem::path &a_destination, const BundleSnapshot &a_bundle,
@@ -824,6 +872,11 @@ struct RegistrySnapshot final
             return cue::Result<void>::failure(
                 install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                               "Bundle Payload could not be copied to Version Staging"));
+        }
+        auto flushed = flush_copied_file(destination, a_assertContext);
+        if (!flushed)
+        {
+            return flushed;
         }
     }
     auto inventory = validate_inventory(a_destination, a_bundle.manifest, false, a_assertContext);
@@ -1307,12 +1360,18 @@ struct RegistrySnapshot final
     std::filesystem::remove_all(stagingParent, error);
     error.clear();
     std::filesystem::create_directories(stagingRoot, error);
+    const std::filesystem::path stagedExecutable = stagingRoot / L"CueEngineInstallWorker.exe";
     if (error || CopyFileW(win32_path(a_versionRoot / to_wide(a_bundle.worker.relativePath).value_or(L"")).c_str(),
-                           win32_path(stagingRoot / L"CueEngineInstallWorker.exe").c_str(), TRUE) == FALSE)
+                           win32_path(stagedExecutable).c_str(), TRUE) == FALSE)
     {
         return cue::Result<std::pair<std::string, std::string>>::failure(
             install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                           "Install Worker Staging could not be created"));
+    }
+    auto executableFlushed = flush_copied_file(stagedExecutable, a_assertContext);
+    if (!executableFlushed)
+    {
+        return cue::Result<std::pair<std::string, std::string>>::failure(std::move(*executableFlushed.try_error()));
     }
     auto publisherDigest = cue::distribution::make_publisher_build_identity_digest(
         a_bundle.manifest.publisherBuildIdentity, a_assertContext);
@@ -2214,20 +2273,23 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                                        a_bundle.manifestDigest, a_lease.handle(), a_assertContext);
         if (!probe)
         {
-            bool quarantined = false;
-            auto quarantineId = make_uuid();
-            if (quarantineId)
+            const std::filesystem::path quarantine =
+                a_installRoot / L"Operations" / L"Quarantine" /
+                (to_wide(directoryName).value_or(L"") + L"-" + to_wide(a_journal.operationId).value_or(L""));
+            const DWORD quarantineAttributes = GetFileAttributesW(win32_path(quarantine).c_str());
+            bool quarantined = is_plain_directory(quarantine);
+            if (is_plain_directory(versionRoot))
             {
                 std::error_code error;
-                const std::filesystem::path quarantine =
-                    a_installRoot / L"Operations" / L"Quarantine" /
-                    (to_wide(directoryName).value_or(L"") + L"-" + to_wide(*quarantineId).value_or(L""));
-                std::filesystem::create_directories(quarantine.parent_path(), error);
-                if (!error)
+                if (quarantineAttributes != INVALID_FILE_ATTRIBUTES)
                 {
-                    quarantined = MoveFileExW(win32_path(versionRoot).c_str(), win32_path(quarantine).c_str(),
-                                              MOVEFILE_WRITE_THROUGH) != FALSE;
+                    return Result<WindowsInstallOutcome>::failure(
+                        install_error(a_assertContext, DistributionError::InstallConflict,
+                                      "Install Probe quarantine destination already exists"));
                 }
+                std::filesystem::create_directories(quarantine.parent_path(), error);
+                quarantined = !error && MoveFileExW(win32_path(versionRoot).c_str(), win32_path(quarantine).c_str(),
+                                                    MOVEFILE_WRITE_THROUGH) != FALSE;
             }
             if (quarantined)
             {
@@ -2317,11 +2379,12 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
         }
         auto bundleRoot = normalize_absolute(a_request.bundleRoot);
         auto installRoot = normalize_absolute(a_request.installRoot);
-        if (!bundleRoot || !installRoot || !is_local_fixed_path(*installRoot))
+        if (!bundleRoot || !installRoot || !is_local_fixed_path(*installRoot) ||
+            !has_plain_existing_ancestry(*installRoot))
         {
-            return Result<WindowsInstallOutcome>::failure(
-                make_distribution_error(a_assertContext, DistributionError::BundleValidationFailed,
-                                        "Bundle Root and Install Root must be absolute paths on a local fixed drive"));
+            return Result<WindowsInstallOutcome>::failure(make_distribution_error(
+                a_assertContext, DistributionError::BundleValidationFailed,
+                "Bundle Root and Install Root must be absolute local paths without reparse ancestors"));
         }
         auto bundle = validate_bundle(*bundleRoot, false, a_assertContext);
         if (!bundle)
@@ -2330,7 +2393,7 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
         }
         std::error_code error;
         std::filesystem::create_directories(*installRoot, error);
-        if (error || !is_plain_directory(*installRoot))
+        if (error || !is_plain_directory(*installRoot) || !has_plain_existing_ancestry(*installRoot))
         {
             return Result<WindowsInstallOutcome>::failure(
                 make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
@@ -2357,6 +2420,12 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
         {
             return Result<WindowsInstallOutcome>::failure(std::move(*directory.try_error()));
         }
+        auto resumable =
+            find_resumable_journal(*installRoot, *directory.try_value(), *bundle.try_value(), a_assertContext);
+        if (!resumable)
+        {
+            return Result<WindowsInstallOutcome>::failure(std::move(*resumable.try_error()));
+        }
         /// @brief 同じVersion Identityが既に導入済みか検索する
         const auto existing = std::ranges::find_if(registry.try_value()->versions,
                                                    [&directory](const InstalledVersionEntry &a_entry) noexcept
@@ -2372,15 +2441,20 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
                     make_distribution_error(a_assertContext, DistributionError::InstallConflict,
                                             "Existing Installed Version does not match the requested Bundle"));
             }
+            if (*resumable.try_value())
+            {
+                auto resumed = execute_install(*bundleRoot, *installRoot, *bundle.try_value(), *lease.try_value(),
+                                               std::move(**resumable.try_value()), a_assertContext);
+                if (!resumed)
+                {
+                    return resumed;
+                }
+                resumed.try_value()->wasAlreadyInstalled = true;
+                return resumed;
+            }
             WindowsInstallOutcome outcome{"", *directory.try_value(), bundle.try_value()->workerId,
                                           registry.try_value()->revision, true};
             return Result<WindowsInstallOutcome>::success(std::move(outcome));
-        }
-        auto resumable =
-            find_resumable_journal(*installRoot, *directory.try_value(), *bundle.try_value(), a_assertContext);
-        if (!resumable)
-        {
-            return Result<WindowsInstallOutcome>::failure(std::move(*resumable.try_error()));
         }
         InstallOperationJournal journal;
         if (*resumable.try_value())
@@ -2445,7 +2519,7 @@ Result<void> run_windows_install_probe(const WindowsInstallProbeRequest &a_reque
         FILE_STANDARD_INFO information{};
         auto inheritedPath = handle_path(leaseHandle);
         const std::wstring expectedPath = win32_path(*installRoot / L"Operations" / L"CueEngine.control.lock");
-        if (GetHandleInformation(leaseHandle, &handleFlags) == FALSE ||
+        if (GetHandleInformation(leaseHandle, &handleFlags) == FALSE || (handleFlags & HANDLE_FLAG_INHERIT) == 0U ||
             GetFileInformationByHandleEx(leaseHandle, FileStandardInfo, &information, sizeof(information)) == FALSE ||
             !inheritedPath ||
             CompareStringOrdinal(inheritedPath->data(), static_cast<int>(inheritedPath->size()), expectedPath.data(),
@@ -2454,6 +2528,12 @@ Result<void> run_windows_install_probe(const WindowsInstallProbeRequest &a_reque
             return Result<void>::failure(
                 make_distribution_error(a_assertContext, DistributionError::InstallConflict,
                                         "Install Probe did not inherit the Install Root Control Lease handle"));
+        }
+        if (SetHandleInformation(leaseHandle, HANDLE_FLAG_INHERIT, 0U) == FALSE)
+        {
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                        "Install Probe could not limit Control Lease inheritance"));
         }
         const std::filesystem::path journalPath =
             *installRoot / L"Operations" / L"Journals" / (to_wide(a_request.operationId).value_or(L"") + L".json");

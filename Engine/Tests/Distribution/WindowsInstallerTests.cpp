@@ -12,6 +12,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -433,6 +434,27 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
     require(registry.revision == 2U && registry.versions.size() == 1U);
     require_sentinels(installRoot);
 
+    constexpr std::string_view completedOperationId = "55555555-5555-4555-8555-555555555555";
+    cue::distribution::InstallOperationJournal completedJournal;
+    completedJournal.operationId = completedOperationId;
+    completedJournal.kind = cue::distribution::InstallOperationKind::Install;
+    completedJournal.stage = cue::distribution::InstallOperationStage::RegistryPublished;
+    completedJournal.workerId = installed.try_value()->workerId;
+    completedJournal.expectedRegistry =
+        cue::distribution::ExpectedRegistry{registry.generationId, registry.revision - 1U};
+    completedJournal.target = cue::distribution::InstallOperationTarget{registry.versions.front().directoryName,
+                                                                        registry.versions.front().bundleId,
+                                                                        registry.versions.front().manifestDigest};
+    auto completedJournalBytes = cue::distribution::write_install_operation_journal(completedJournal, a_assertContext);
+    require(completedJournalBytes.has_value());
+    const std::filesystem::path completedJournalPath =
+        installRoot / L"Operations" / L"Journals" / L"55555555-5555-4555-8555-555555555555.json";
+    write_text(completedJournalPath, *completedJournalBytes.try_value());
+    auto completedResume = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(completedResume.has_value() && completedResume.try_value()->wasAlreadyInstalled);
+    require(!std::filesystem::exists(completedJournalPath));
+    require(completedResume.try_value()->registryRevision == 2U);
+
     cue::distribution::WindowsInstallRequest collisionRequest{utf8_path(collisionBundleRoot), utf8_path(installRoot),
                                                               false, true};
     auto collision = cue::distribution::install_windows_source_sdk(collisionRequest, a_assertContext);
@@ -520,6 +542,105 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
     require(!cue::distribution::install_windows_source_sdk(pathCollisionRequest, a_assertContext));
     require(!std::filesystem::exists(collisionRoot / L"State" / L"InstalledVersions.json"));
     require(!std::filesystem::exists(collisionRoot / L"Versions" / L"v1.0.0--12345678-1234-4abc-8def-1234567890ab"));
+}
+
+/// @brief Probe入口が検証済みControl Leaseの子Process再継承を無効化することを検証する
+void test_probe_clears_lease_inheritance(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    const std::filesystem::path operations = installRoot / L"Operations";
+    std::error_code error;
+    std::filesystem::create_directories(operations, error);
+    require(!error);
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE lease = CreateFileW((operations / L"CueEngine.control.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0U,
+                               &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    require(lease != INVALID_HANDLE_VALUE);
+    DWORD flags = 0U;
+    require(GetHandleInformation(lease, &flags) != FALSE && (flags & HANDLE_FLAG_INHERIT) != 0U);
+    cue::distribution::WindowsInstallProbeRequest request{
+        reinterpret_cast<std::uintptr_t>(lease), utf8_path(installRoot), "v1.0.0--12345678-1234-4abc-8def-1234567890ab",
+        "66666666-6666-4666-8666-666666666666",  std::string(64U, 'a'),
+    };
+    require(!cue::distribution::run_windows_install_probe(request, a_assertContext));
+    require(GetHandleInformation(lease, &flags) != FALSE && (flags & HANDLE_FLAG_INHERIT) == 0U);
+    static_cast<void>(CloseHandle(lease));
+}
+
+/// @brief Install Rootの既存祖先にReparse Pointがある場合は書込前に拒否することを検証する
+void test_reparse_ancestor_rejected(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path targetRoot = temporary.path() / L"Target";
+    const std::filesystem::path linkRoot = temporary.path() / L"Link";
+    create_bundle(bundleRoot, a_assertContext);
+    std::error_code error;
+    std::filesystem::create_directories(targetRoot, error);
+    require(!error);
+    if (CreateSymbolicLinkW(linkRoot.c_str(), targetRoot.c_str(),
+                            SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) == FALSE)
+    {
+        const DWORD linkError = GetLastError();
+        require(linkError == ERROR_PRIVILEGE_NOT_HELD || linkError == ERROR_INVALID_PARAMETER);
+        return;
+    }
+    const std::filesystem::path installRoot = linkRoot / L"Install";
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
+    require(!std::filesystem::exists(targetRoot / L"Install"));
+}
+
+/// @brief Probe失敗VersionのQuarantine直後に停止しても決定的PathからJournalを解消できることを検証する
+void test_probe_quarantine_crash_resume(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    create_bundle(bundleRoot, a_assertContext);
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    auto installed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(installed.has_value());
+    cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
+    require(registry.versions.size() == 1U);
+    const cue::distribution::InstalledVersionEntry entry = registry.versions.front();
+
+    constexpr std::string_view operationId = "77777777-7777-4777-8777-777777777777";
+    cue::distribution::InstallOperationJournal journal;
+    journal.operationId = operationId;
+    journal.kind = cue::distribution::InstallOperationKind::Install;
+    journal.stage = cue::distribution::InstallOperationStage::VersionPublished;
+    journal.workerId = installed.try_value()->workerId;
+    journal.expectedRegistry = cue::distribution::ExpectedRegistry{registry.generationId, 1U};
+    journal.target =
+        cue::distribution::InstallOperationTarget{entry.directoryName, entry.bundleId, entry.manifestDigest};
+    auto journalBytes = cue::distribution::write_install_operation_journal(journal, a_assertContext);
+    require(journalBytes.has_value());
+    const std::filesystem::path journalPath =
+        installRoot / L"Operations" / L"Journals" / L"77777777-7777-4777-8777-777777777777.json";
+    write_text(journalPath, *journalBytes.try_value());
+
+    registry.versions.clear();
+    registry.selectedVersion.clear();
+    registry.revision = 1U;
+    auto registryBytes = cue::distribution::write_installed_versions_registry(registry, a_assertContext);
+    require(registryBytes.has_value());
+    write_text(installRoot / L"State" / L"InstalledVersions.json", *registryBytes.try_value());
+
+    const std::filesystem::path versionRoot = installRoot / L"Versions" / std::filesystem::path(entry.directoryName);
+    const std::filesystem::path quarantine =
+        installRoot / L"Operations" / L"Quarantine" /
+        (std::filesystem::path(entry.directoryName).native() + L"-77777777-7777-4777-8777-777777777777");
+    require(MoveFileExW(versionRoot.c_str(), quarantine.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE);
+    require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
+    require(!std::filesystem::exists(journalPath));
+    require(std::filesystem::is_directory(quarantine));
+
+    auto retried = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(retried.has_value());
+    registry = read_registry(installRoot, a_assertContext);
+    require(registry.versions.size() == 1U && registry.revision == 2U);
 }
 
 /// @brief 破損Journalを隔離し明示修復までRegistry Recoveryを継続しないことを検証する
@@ -649,10 +770,14 @@ void test_worker_publish_crash_resume(const cue::AssertContext &a_assertContext)
     require(journal.try_value()->stage == cue::distribution::InstallOperationStage::ProbeSucceeded ||
             journal.try_value()->stage == cue::distribution::InstallOperationStage::WorkerPublished);
 
-    auto resumed = start_installer_process(bundleRoot, installRoot);
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    auto resumed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    if (!resumed)
+    {
+        std::fprintf(stderr, "Worker crash resume failed: %.*s\n",
+                     static_cast<int>(resumed.try_error()->summary().size()), resumed.try_error()->summary().data());
+    }
     require(resumed.has_value());
-    auto resumedExit = wait_process(*resumed, 90000U);
-    require(resumedExit.has_value() && *resumedExit == 0U);
     const cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
     require(registry.versions.size() == 1U && registry.revision == 2U);
     require(std::filesystem::directory_iterator(journals) == std::filesystem::directory_iterator{});
@@ -666,6 +791,9 @@ int main()
     cue::Logger logger(fatalHandler, std::move(sinks));
     cue::AssertContext assertContext(logger, fatalHandler);
     test_install_transaction(assertContext);
+    test_probe_clears_lease_inheritance(assertContext);
+    test_reparse_ancestor_rejected(assertContext);
+    test_probe_quarantine_crash_resume(assertContext);
     test_corrupt_journal_quarantine(assertContext);
     test_probe_inherited_lease(assertContext);
     test_worker_publish_crash_resume(assertContext);
