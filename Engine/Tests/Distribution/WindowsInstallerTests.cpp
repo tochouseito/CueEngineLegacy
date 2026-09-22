@@ -11,11 +11,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -232,6 +234,86 @@ void write_text(const std::filesystem::path &a_path, std::string_view a_text)
 [[nodiscard]] std::filesystem::path worker_executable()
 {
     return installer_executable().parent_path() / L"CueEngineInstallWorker.exe";
+}
+
+template <typename Type> [[nodiscard]] Type read_pe_structure(std::span<const std::byte> a_bytes, std::size_t a_offset)
+{
+    require(a_offset <= a_bytes.size() && sizeof(Type) <= a_bytes.size() - a_offset);
+    Type value{};
+    std::memcpy(&value, a_bytes.data() + a_offset, sizeof(Type));
+    return value;
+}
+
+/// @brief PE RVAを対応するFile Offsetへ変換する
+[[nodiscard]] std::size_t pe_file_offset(std::span<const std::byte> a_bytes, std::uint32_t a_rva,
+                                         const IMAGE_NT_HEADERS64 &a_headers, std::size_t a_sectionOffset)
+{
+    if (a_rva < a_headers.OptionalHeader.SizeOfHeaders)
+    {
+        require(a_rva < a_bytes.size());
+        return a_rva;
+    }
+    for (std::uint16_t index = 0U; index < a_headers.FileHeader.NumberOfSections; ++index)
+    {
+        const IMAGE_SECTION_HEADER section =
+            read_pe_structure<IMAGE_SECTION_HEADER>(a_bytes, a_sectionOffset + sizeof(IMAGE_SECTION_HEADER) * index);
+        const std::uint32_t sectionSize = (std::max)(section.Misc.VirtualSize, section.SizeOfRawData);
+        if (a_rva >= section.VirtualAddress && a_rva - section.VirtualAddress < sectionSize)
+        {
+            const std::size_t offset =
+                static_cast<std::size_t>(section.PointerToRawData) + (a_rva - section.VirtualAddress);
+            require(offset < a_bytes.size());
+            return offset;
+        }
+    }
+    require(false);
+    return 0U;
+}
+
+/// @brief 外部Install WorkerがApplication-local DLLへ依存しないことを検証する
+void test_worker_system_imports()
+{
+    const std::vector<std::byte> storage = read_bytes(worker_executable());
+    const std::span<const std::byte> bytes(storage);
+    const IMAGE_DOS_HEADER dos = read_pe_structure<IMAGE_DOS_HEADER>(bytes, 0U);
+    require(dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0);
+    const std::size_t headerOffset = static_cast<std::size_t>(dos.e_lfanew);
+    const IMAGE_NT_HEADERS64 headers = read_pe_structure<IMAGE_NT_HEADERS64>(bytes, headerOffset);
+    require(headers.Signature == IMAGE_NT_SIGNATURE);
+    require(headers.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+    require(headers.OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT);
+    require(headers.OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT);
+    require(headers.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].VirtualAddress == 0U);
+    const std::size_t sectionOffset =
+        headerOffset + sizeof(std::uint32_t) + sizeof(IMAGE_FILE_HEADER) + headers.FileHeader.SizeOfOptionalHeader;
+    const IMAGE_DATA_DIRECTORY imports = headers.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    require(imports.VirtualAddress != 0U && imports.Size >= sizeof(IMAGE_IMPORT_DESCRIPTOR));
+    std::size_t descriptorOffset = pe_file_offset(bytes, imports.VirtualAddress, headers, sectionOffset);
+    const std::size_t descriptorEnd = descriptorOffset + imports.Size;
+    require(descriptorEnd <= bytes.size());
+    const std::array allowedImports = {std::string_view("kernel32.dll"), std::string_view("ole32.dll")};
+    bool terminated = false;
+    while (descriptorOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= descriptorEnd)
+    {
+        const IMAGE_IMPORT_DESCRIPTOR descriptor = read_pe_structure<IMAGE_IMPORT_DESCRIPTOR>(bytes, descriptorOffset);
+        descriptorOffset += sizeof(IMAGE_IMPORT_DESCRIPTOR);
+        if (descriptor.OriginalFirstThunk == 0U && descriptor.FirstThunk == 0U && descriptor.Name == 0U)
+        {
+            terminated = true;
+            break;
+        }
+        require(descriptor.Name != 0U);
+        const std::size_t nameOffset = pe_file_offset(bytes, descriptor.Name, headers, sectionOffset);
+        const auto nameEnd =
+            std::find(bytes.begin() + static_cast<std::ptrdiff_t>(nameOffset), bytes.end(), std::byte{0U});
+        require(nameEnd != bytes.end());
+        std::string name(reinterpret_cast<const char *>(bytes.data() + nameOffset),
+                         static_cast<std::size_t>(nameEnd - bytes.begin()) - nameOffset);
+        std::ranges::transform(name, name.begin(),
+                               [](unsigned char a_character) { return static_cast<char>(std::tolower(a_character)); });
+        require(std::ranges::find(allowedImports, name) != allowedImports.end());
+    }
+    require(terminated);
 }
 
 /// @brief Windows Command Line ArgumentをCreateProcess規則でQuoteする
@@ -1482,6 +1564,7 @@ int main(int a_argumentCount, char **a_arguments)
     {
         return 2;
     }
+    test_worker_system_imports();
     test_install_transaction(assertContext);
     test_read_only_payload_install(assertContext);
     test_worker_reparse_rejected(assertContext);
