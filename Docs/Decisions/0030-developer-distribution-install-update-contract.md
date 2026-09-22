@@ -336,6 +336,10 @@ Journal削除だけを再実行する。
   Worker executable、Worker完了MarkerのIdentity／Inventory／Digestを検証した後、対象Versionの共有Execution Leaseを
   取得する。取得後にRegistryと同じWorker証拠を再確認してからControl Leaseを解放し、Execution Lease Handleを
   Child Processへ継承してProcess終了まで保持する。不一致Versionは起動せずSelectableとして表示しない
+- Install Worker起動はVolume Root直下からWorker Directoryまでの全Directoryを非Reparse Handleで順に開き、
+  `FILE_SHARE_DELETE`なしで検証開始から`CreateProcessW`完了まで祖先Renameを拒否する。Processは
+  `CREATE_SUSPENDED`でImage Mappingを完了させ、起動成功後にPrimary Threadを再開してから祖先Handleを解放する。
+  Child側の補助照合はPath文字列ではなくVolume Serial NumberとFile IDを使用する
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
 - 自分自身を含むVersionのUninstallは対象Version内のProcessから直接削除しない。Install時にInventory検証して

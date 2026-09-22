@@ -7,6 +7,8 @@
 #include <Cue/Foundation/Fatal.h>
 #include <Cue/Foundation/Log.h>
 
+#include "WindowsDirectoryAncestryLock.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -125,6 +127,32 @@ class TemporaryRoot final
   private:
     std::filesystem::path m_path;
 };
+
+/// @brief Worker起動中の祖先Directory LockがPath差し替えを拒否することを検証する
+void test_worker_launch_ancestry_lock(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path lockedRoot = temporary.path() / L"LaunchLockRoot";
+    const std::filesystem::path workerRoot = lockedRoot / L"Operations" / L"Workers" / L"worker-id";
+    const std::filesystem::path movedRoot = temporary.path() / L"LaunchLockMoved";
+    std::error_code error;
+    std::filesystem::create_directories(extended_path(workerRoot), error);
+    require(!error);
+
+    auto ancestryLock = cue::distribution::windows_detail::WindowsDirectoryAncestryLock::acquire(
+        workerRoot, a_assertContext);
+    require(ancestryLock.has_value());
+    require(MoveFileExW(extended_path(lockedRoot).c_str(), extended_path(movedRoot).c_str(), MOVEFILE_WRITE_THROUGH) ==
+            FALSE);
+    const DWORD renameError = GetLastError();
+    require(renameError == ERROR_SHARING_VIOLATION || renameError == ERROR_ACCESS_DENIED);
+
+    ancestryLock.try_value()->release();
+    require(MoveFileExW(extended_path(lockedRoot).c_str(), extended_path(movedRoot).c_str(), MOVEFILE_WRITE_THROUGH) !=
+            FALSE);
+    require(MoveFileExW(extended_path(movedRoot).c_str(), extended_path(lockedRoot).c_str(), MOVEFILE_WRITE_THROUGH) !=
+            FALSE);
+}
 
 /// @brief 起動ProcessとPrimary Thread Handleを一意所有する
 class ProcessOwner final
@@ -1576,6 +1604,7 @@ int main(int a_argumentCount, char **a_arguments)
     {
         return 2;
     }
+    test_worker_launch_ancestry_lock(assertContext);
     test_worker_system_imports();
     test_install_transaction(assertContext);
     test_read_only_payload_install(assertContext);

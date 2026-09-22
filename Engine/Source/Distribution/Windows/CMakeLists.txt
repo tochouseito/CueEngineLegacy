@@ -5,6 +5,8 @@ target_sources(
     PRIVATE
         Private/Installer.cpp
         Private/SourceSdkPublisher.cpp
+        Private/WindowsDirectoryAncestryLock.cpp
+        Private/WindowsDirectoryAncestryLock.h
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public

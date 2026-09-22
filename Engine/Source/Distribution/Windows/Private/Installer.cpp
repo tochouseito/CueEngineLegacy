@@ -1,5 +1,7 @@
 #include <Cue/Distribution/Windows/Installer.h>
 
+#include "WindowsDirectoryAncestryLock.h"
+
 #include <Cue/Distribution/Error.h>
 #include <Cue/Distribution/InstallState.h>
 #include <Cue/Distribution/Manifest.h>
@@ -177,6 +179,7 @@ struct ValidatedInstallWorker final
     HandleOwner rootHandle;
     HandleOwner executableHandle;
     HandleOwner markerHandle;
+    std::optional<cue::distribution::windows_detail::WindowsDirectoryAncestryLock> ancestryLock;
 };
 
 /// @brief Allocation失敗をDistribution Fatalへ変換する
@@ -1899,6 +1902,13 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     worker.root = a_installRoot / L"Operations" / L"Workers" / to_wide(a_journal.workerId).value_or(L"");
     worker.executable = worker.root / L"CueEngineInstallWorker.exe";
     worker.marker = worker.root / k_workerMarkerName;
+    auto ancestryLock =
+        cue::distribution::windows_detail::WindowsDirectoryAncestryLock::acquire(worker.root, a_assertContext);
+    if (!ancestryLock)
+    {
+        return cue::Result<ValidatedInstallWorker>::failure(std::move(*ancestryLock.try_error()));
+    }
+    worker.ancestryLock.emplace(std::move(*ancestryLock.try_value()));
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     worker.rootHandle = HandleOwner(CreateFileW(win32_path(worker.root).c_str(), FILE_READ_ATTRIBUTES,
                                                 FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING,
@@ -3403,7 +3413,17 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     return cue::Result<void>::success();
 }
 
-/// @brief 現在Process Imageが継承済みWorker executableと同じFileを指すか確認する
+/// @brief 二つのFile Handleが同じVolume上の同一File IDを指すか確認する
+[[nodiscard]] bool has_same_file_identity(HANDLE a_left, HANDLE a_right) noexcept
+{
+    BY_HANDLE_FILE_INFORMATION left{};
+    BY_HANDLE_FILE_INFORMATION right{};
+    return GetFileInformationByHandle(a_left, &left) != FALSE && GetFileInformationByHandle(a_right, &right) != FALSE &&
+           left.dwVolumeSerialNumber == right.dwVolumeSerialNumber && left.nFileIndexHigh == right.nFileIndexHigh &&
+           left.nFileIndexLow == right.nFileIndexLow;
+}
+
+/// @brief 現在Process Image Pathが継承済みWorker executableと同じFile IDを指すか確認する
 [[nodiscard]] bool is_current_worker_executable(HANDLE a_expectedHandle) noexcept
 {
     std::array<wchar_t, 32768U> currentPath{};
@@ -3416,9 +3436,7 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     HandleOwner currentHandle(CreateFileW(win32_path(current).c_str(), FILE_READ_ATTRIBUTES,
                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    const auto expectedFinal = handle_path(a_expectedHandle);
-    const auto currentFinal = currentHandle.valid() ? handle_path(currentHandle.get()) : std::nullopt;
-    return expectedFinal && currentFinal && _wcsicmp(expectedFinal->c_str(), currentFinal->c_str()) == 0;
+    return currentHandle.valid() && has_same_file_identity(a_expectedHandle, currentHandle.get());
 }
 
 /// @brief 現在Process Imageが削除対象Version Directory内にあるか確認する
@@ -3565,9 +3583,10 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
             install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
                           "Uninstall Worker working directory is unavailable"));
     }
-    const BOOL created = CreateProcessW(win32_path(a_worker.executable).c_str(), command.data(), nullptr, nullptr, TRUE,
-                                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-                                        environment->data(), workingDirectory.data(), &startup.StartupInfo, &process);
+    const BOOL created = CreateProcessW(
+        win32_path(a_worker.executable).c_str(), command.data(), nullptr, nullptr, TRUE,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED,
+        environment->data(), workingDirectory.data(), &startup.StartupInfo, &process);
     DeleteProcThreadAttributeList(attributes);
     if (created == FALSE)
     {
@@ -3578,6 +3597,16 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     }
     HandleOwner processHandle(process.hProcess);
     HandleOwner threadHandle(process.hThread);
+    if (ResumeThread(threadHandle.get()) == static_cast<DWORD>(-1))
+    {
+        const DWORD resumeError = GetLastError();
+        static_cast<void>(TerminateProcess(processHandle.get(), 90U));
+        static_cast<void>(WaitForSingleObject(processHandle.get(), INFINITE));
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker primary thread could not be resumed: " + std::to_string(resumeError)));
+    }
+    a_worker.ancestryLock.reset();
     const std::uint32_t processId = process.dwProcessId;
     a_controlLease.release();
     if (SetEvent(gate.get()) == FALSE)

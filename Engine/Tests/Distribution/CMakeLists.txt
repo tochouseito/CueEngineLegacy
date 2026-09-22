@@ -79,6 +79,11 @@ if(WIN32)
     )
     target_link_libraries(CueDistributionWindowsPublisherTests PRIVATE Cue.Distribution.Windows)
     target_link_libraries(CueDistributionWindowsInstallerTests PRIVATE Cue.Distribution.Windows)
+    target_include_directories(
+        CueDistributionWindowsInstallerTests
+        PRIVATE
+            "${CMAKE_SOURCE_DIR}/Engine/Source/Distribution/Windows/Private"
+    )
     target_compile_features(CueDistributionWindowsPublisherTests PRIVATE cxx_std_20)
     target_compile_features(CueDistributionWindowsInstallerTests PRIVATE cxx_std_20)
     target_compile_features(CueDistributionInstallerProbeHelper PRIVATE cxx_std_20)
