@@ -3166,6 +3166,15 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
             return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
                                                             "Recovered Registry does not match the Uninstall Journal"));
         }
+        const bool hasReplacement =
+            std::ranges::any_of(registry.versions, [](const InstalledVersionEntry &a_entry) noexcept
+                                { return a_entry.state == InstalledVersionState::Selectable; });
+        if (!hasReplacement)
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext,
+                                                            DistributionError::InstalledVersionProtected,
+                                                            "The last valid Installed Version cannot be removed"));
+        }
         return cue::Result<void>::success();
     }
     if (target->bundleId != a_journal.target->bundleId || target->manifestDigest != a_journal.target->manifestDigest ||
@@ -3605,6 +3614,15 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     }
     HandleOwner processHandle(process.hProcess);
     HandleOwner threadHandle(process.hThread);
+    auto verifiedImage = cue::distribution::windows_detail::verify_suspended_process_image(
+        reinterpret_cast<std::uintptr_t>(a_worker.executableHandle.get()),
+        reinterpret_cast<std::uintptr_t>(processHandle.get()), a_assertContext);
+    if (!verifiedImage)
+    {
+        static_cast<void>(TerminateProcess(processHandle.get(), 90U));
+        static_cast<void>(WaitForSingleObject(processHandle.get(), INFINITE));
+        return cue::Result<std::uint32_t>::failure(std::move(*verifiedImage.try_error()));
+    }
     if (ResumeThread(threadHandle.get()) == static_cast<DWORD>(-1))
     {
         const DWORD resumeError = GetLastError();

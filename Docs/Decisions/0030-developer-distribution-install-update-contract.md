@@ -338,9 +338,11 @@ Journal削除だけを再実行する。
   Child Processへ継承してProcess終了まで保持する。不一致Versionは起動せずSelectableとして表示しない
 - Install Worker起動はVolume Root直下からWorker Directoryまでの全Directoryを非Reparse Handleで順に開き、
   `FILE_SHARE_DELETE`なしで検証開始から`CreateProcessW`完了まで祖先Renameを拒否する。Processは
-  検証済みWorker Handleから物理Volume側へ解決した正規DOS Pathを使用してSUBST割当て変更を回避し、
-  `CREATE_SUSPENDED`でImage Mappingを完了させる。起動成功後にPrimary Threadを再開してから祖先Handleを解放する。
-  Child側の補助照合はPath文字列ではなくVolume Serial NumberとFile IDを使用する
+  検証済みWorker Handleから物理Volume側へ解決した正規DOS Pathを使用してSUBST Aliasへの依存を減らし、
+  `CREATE_SUSPENDED`でImage Mappingを完了させる。停止中ProcessのNative Image Device Pathを
+  `\\?\GLOBALROOT`経由で開き、検証済みWorker HandleとVolume Serial NumberおよびFile IDが一致した場合だけ
+  Primary Threadを再開して祖先Handleを解放する。DOS Drive文字を最終的な信頼根拠にしない。
+  Child側の補助照合もPath文字列ではなくVolume Serial NumberとFile IDを使用する
 - Uninstallは排他Control Leaseのもとで対象Versionを新規起動不可にし、同じVersionの排他Execution
   Leaseを取得できた場合だけDirectoryを回収する。既存の共有LeaseがあればBusyとして回収しない
 - 自分自身を含むVersionのUninstallは対象Version内のProcessから直接削除しない。Install時にInventory検証して
@@ -350,6 +352,8 @@ Journal削除だけを再実行する。
   `pendingRemoval`へAtomic Publishして新規起動を止め、Versionを同一VolumeのQuarantineへRenameし、Registryから
   Entryを削除する。各段階をJournalからRollbackまたは再開できる場合だけQuarantineを最終削除する
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
+- Registry Recoveryが未完了Uninstall対象を除外した結果、別のSelectable Versionを再構築できない場合は、
+  Journalの対象がRegistryから消えていても最後の有効Payloadを削除しない
 - `workerPublished` StageとWorker完了MarkerがJournalのWorker Identity／Digestに一致しないVersionはSelectableにせず、
   そのWorkerへRollback／Uninstallを委譲しない
 - Worker IDはManifestの検証済みIdentity／Inventoryから導出する64文字lowercase SHA-256 hexだけを許可し、
@@ -427,6 +431,8 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
 - Worker IDのCanonical Path境界、Worker executable Digest、Worker完了Marker DigestをRecovery候補と
   `candidatesValidated` Stageで検証し、欠落Workerを持つVersionをSelectableへ復活させない
 - Operation Journalの未知Schema／Member、Kind別v1列挙外Stage／遷移、旧Worker互換性違反、破損をFail-closedで拒否する
+- DOS Device割当てをWorker Image Mapping後に復元しても、停止中Processの実Image File ID不一致を検出して実行しない
+- 破損Registryの復旧中に代替Versionが消失しても、未完了Uninstallが最後の有効Payloadを削除しない
 - 各Journal Stage間へCrashを注入し、完全一致する直後の副作用だけを冪等再開して想定外状態を隔離する
 - 同一Dependency Root IDの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
