@@ -2759,7 +2759,8 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
         }
         auto bundleRoot = normalize_absolute(a_request.bundleRoot);
         auto installRoot = normalize_absolute(a_request.installRoot);
-        if (!bundleRoot || !installRoot || !is_local_fixed_path(*installRoot) ||
+        if (!bundleRoot || !installRoot || !is_local_fixed_path(*bundleRoot) ||
+            !has_plain_existing_ancestry(*bundleRoot) || !is_local_fixed_path(*installRoot) ||
             !has_plain_existing_ancestry(*installRoot))
         {
             return Result<WindowsInstallOutcome>::failure(make_distribution_error(

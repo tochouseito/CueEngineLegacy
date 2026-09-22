@@ -833,14 +833,14 @@ void test_probe_clears_lease_inheritance(const cue::AssertContext &a_assertConte
     static_cast<void>(CloseHandle(lease));
 }
 
-/// @brief Install Rootの既存祖先にReparse Pointがある場合は書込前に拒否することを検証する
+/// @brief Bundle／Install Rootの既存祖先にReparse Pointがある場合は変更前に拒否することを検証する
 void test_reparse_ancestor_rejected(const cue::AssertContext &a_assertContext)
 {
     TemporaryRoot temporary;
-    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path directBundleRoot = temporary.path() / L"Bundle";
     const std::filesystem::path targetRoot = temporary.path() / L"Target";
     const std::filesystem::path linkRoot = temporary.path() / L"Link";
-    create_bundle(bundleRoot, a_assertContext);
+    create_bundle(directBundleRoot, a_assertContext);
     std::error_code error;
     std::filesystem::create_directories(targetRoot, error);
     require(!error);
@@ -852,9 +852,19 @@ void test_reparse_ancestor_rejected(const cue::AssertContext &a_assertContext)
         return;
     }
     const std::filesystem::path installRoot = linkRoot / L"Install";
-    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
-    require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
+    cue::distribution::WindowsInstallRequest installRequest{utf8_path(directBundleRoot), utf8_path(installRoot), false,
+                                                            true};
+    require(!cue::distribution::install_windows_source_sdk(installRequest, a_assertContext));
     require(!std::filesystem::exists(targetRoot / L"Install"));
+
+    const std::filesystem::path targetBundleRoot = targetRoot / L"Bundle";
+    const std::filesystem::path linkedBundleRoot = linkRoot / L"Bundle";
+    const std::filesystem::path directInstallRoot = temporary.path() / L"BundleAncestorInstall";
+    create_bundle(targetBundleRoot, a_assertContext);
+    cue::distribution::WindowsInstallRequest bundleRequest{utf8_path(linkedBundleRoot), utf8_path(directInstallRoot),
+                                                           false, true};
+    require(!cue::distribution::install_windows_source_sdk(bundleRequest, a_assertContext));
+    require(!std::filesystem::exists(directInstallRoot));
 }
 
 /// @brief Probe MarkerのAtomic一時Fileが残ったVersionPublished Journalを再開できることを検証する
