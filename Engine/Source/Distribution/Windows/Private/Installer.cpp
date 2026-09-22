@@ -1371,9 +1371,10 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     DWORD exitCode = 0U;
     if (GetExitCodeProcess(processHandle.get(), &exitCode) == FALSE || exitCode != 0U)
     {
-        return cue::Result<void>::failure(install_error(a_assertContext,
-                                                        cue::distribution::DistributionError::BundleValidationFailed,
-                                                        "Install Probe process rejected the Version"));
+        cue::Error error = install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
+                                         "Install Probe process rejected the Version");
+        error.add_context(a_assertContext.fatal_handler(), "Exit code: " + std::to_string(exitCode));
+        return cue::Result<void>::failure(std::move(error));
     }
     return cue::Result<void>::success();
 }
