@@ -3299,6 +3299,36 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     return cue::Result<void>::success();
 }
 
+/// @brief Uninstallの全再開Stageで代替Selectable Versionが残ることを確認する
+[[nodiscard]] cue::Result<void> require_uninstall_replacement(
+    const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    auto snapshot = read_registry(a_installRoot, a_assertContext);
+    if (!snapshot || !snapshot.try_value()->registry)
+    {
+        return cue::Result<void>::failure(
+            snapshot ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                     "Installed Versions Registry is unavailable during Uninstall resume")
+                     : std::move(*snapshot.try_error()));
+    }
+    const bool hasReplacement =
+        std::ranges::any_of(snapshot.try_value()->registry->versions,
+                            [&a_journal](const InstalledVersionEntry &a_entry) noexcept
+                            {
+                                return a_entry.directoryName != a_journal.target->directoryName &&
+                                       a_entry.state == InstalledVersionState::Selectable;
+                            });
+    if (!hasReplacement)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        DistributionError::InstalledVersionProtected,
+                                                        "The last valid Installed Version cannot be removed"));
+    }
+    return cue::Result<void>::success();
+}
+
 /// @brief Uninstall JournalをPendingRemoval、Quarantine、Registry削除の順で冪等再開する
 [[nodiscard]] cue::Result<void> execute_uninstall(const std::filesystem::path &a_installRoot,
                                                   cue::distribution::InstallOperationJournal a_journal,
@@ -3308,6 +3338,11 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
     const std::filesystem::path versionRoot =
         a_installRoot / L"Versions" / to_wide(a_journal.target->directoryName).value_or(L"");
     const std::filesystem::path quarantine = uninstall_quarantine_path(a_installRoot, a_journal);
+    auto protectedPayload = require_uninstall_replacement(a_installRoot, a_journal, a_assertContext);
+    if (!protectedPayload)
+    {
+        return cue::Result<void>::failure(std::move(*protectedPayload.try_error()));
+    }
     if (a_journal.stage == InstallOperationStage::Prepared)
     {
         auto evidence = validate_uninstall_payload(a_installRoot, versionRoot, a_journal, a_assertContext);

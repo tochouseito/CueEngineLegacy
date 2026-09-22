@@ -1173,8 +1173,9 @@ void test_registry_recovery_rejects_multiple_pending_operations(const cue::Asser
             evidenceCountBefore);
 }
 
-/// @brief Registry Recoveryで代替Versionが消失しても最後の有効PayloadをUninstallしないことを検証する
-void test_registry_recovery_protects_last_payload_during_uninstall(const cue::AssertContext &a_assertContext)
+/// @brief 指定Uninstall StageのRegistry Recoveryで最後の有効Payloadを保護することを検証する
+void test_registry_recovery_protects_last_payload_during_uninstall_stage(
+    cue::distribution::InstallOperationStage a_stage, const cue::AssertContext &a_assertContext)
 {
     TemporaryRoot temporary;
     const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
@@ -1200,7 +1201,7 @@ void test_registry_recovery_protects_last_payload_during_uninstall(const cue::As
     cue::distribution::InstallOperationJournal journal;
     journal.operationId = operationId;
     journal.kind = cue::distribution::InstallOperationKind::Uninstall;
-    journal.stage = cue::distribution::InstallOperationStage::Prepared;
+    journal.stage = a_stage;
     journal.workerId = target->workerId;
     journal.workerExecutableDigest = target->workerExecutableDigest;
     journal.workerMarkerDigest = target->workerMarkerDigest;
@@ -1215,9 +1216,22 @@ void test_registry_recovery_protects_last_payload_during_uninstall(const cue::As
 
     const std::filesystem::path missingReplacement =
         installRoot / L"Versions" / std::filesystem::path(updated.try_value()->versionDirectory);
+    const std::filesystem::path targetRoot =
+        installRoot / L"Versions" / std::filesystem::path(target->directoryName);
+    std::filesystem::path retainedPayload = targetRoot;
     std::error_code error;
     std::filesystem::remove_all(extended_path(missingReplacement), error);
     require(!error && !path_exists(missingReplacement));
+    if (a_stage == cue::distribution::InstallOperationStage::VersionQuarantined)
+    {
+        retainedPayload = installRoot / L"Operations" / L"Quarantine" / L"Versions" /
+                          (std::filesystem::path(target->directoryName).native() + L"--" +
+                           std::filesystem::path(operationId).native());
+        std::filesystem::create_directories(extended_path(retainedPayload.parent_path()), error);
+        require(!error);
+        require(MoveFileExW(extended_path(targetRoot).c_str(), extended_path(retainedPayload).c_str(),
+                            MOVEFILE_WRITE_THROUGH) != FALSE);
+    }
     write_text(installRoot / L"State" / L"InstalledVersions.json", "");
 
     cue::distribution::WindowsInstalledVersionRequest uninstallRequest{utf8_path(installRoot),
@@ -1228,8 +1242,19 @@ void test_registry_recovery_protects_last_payload_during_uninstall(const cue::As
     require(workerExit.has_value() && *workerExit != 0U);
     const cue::distribution::InstalledVersionsRegistry recovered = read_registry(installRoot, a_assertContext);
     require(recovered.versions.empty());
-    require(path_exists(installRoot / L"Versions" / std::filesystem::path(target->directoryName)));
+    require(path_exists(retainedPayload));
     require(path_exists(journalPath));
+}
+
+/// @brief Registry Recoveryの各Uninstall再開Stageで最後の有効Payloadを保護することを検証する
+void test_registry_recovery_protects_last_payload_during_uninstall(const cue::AssertContext &a_assertContext)
+{
+    test_registry_recovery_protects_last_payload_during_uninstall_stage(
+        cue::distribution::InstallOperationStage::Prepared, a_assertContext);
+    test_registry_recovery_protects_last_payload_during_uninstall_stage(
+        cue::distribution::InstallOperationStage::RemovalBlocked, a_assertContext);
+    test_registry_recovery_protects_last_payload_during_uninstall_stage(
+        cue::distribution::InstallOperationStage::VersionQuarantined, a_assertContext);
 }
 
 /// @brief Read-only属性を持つPayloadとWorkerを属性保持したままInstallできることを検証する

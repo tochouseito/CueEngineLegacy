@@ -353,7 +353,7 @@ Journal削除だけを再実行する。
   Entryを削除する。各段階をJournalからRollbackまたは再開できる場合だけQuarantineを最終削除する
 - 最後の互換Version、使用中Version、未完了Operationを無確認で削除しない
 - Registry Recoveryが未完了Uninstall対象を除外した結果、別のSelectable Versionを再構築できない場合は、
-  Journalの対象がRegistryから消えていても最後の有効Payloadを削除しない
+  Journal Stageや対象Entryの有無にかかわらず最後の有効Payloadを削除しない
 - `workerPublished` StageとWorker完了MarkerがJournalのWorker Identity／Digestに一致しないVersionはSelectableにせず、
   そのWorkerへRollback／Uninstallを委譲しない
 - Worker IDはManifestの検証済みIdentity／Inventoryから導出する64文字lowercase SHA-256 hexだけを許可し、
@@ -432,7 +432,8 @@ Network Channel、Delta Patch、Background Updater、強制更新、Telemetryは
   `candidatesValidated` Stageで検証し、欠落Workerを持つVersionをSelectableへ復活させない
 - Operation Journalの未知Schema／Member、Kind別v1列挙外Stage／遷移、旧Worker互換性違反、破損をFail-closedで拒否する
 - DOS Device割当てをWorker Image Mapping後に復元しても、停止中Processの実Image File ID不一致を検出して実行しない
-- 破損Registryの復旧中に代替Versionが消失しても、未完了Uninstallが最後の有効Payloadを削除しない
+- 破損Registryの復旧中に代替Versionが消失しても、`prepared`、`removalBlocked`、`versionQuarantined`の
+  各再開Stageで未完了Uninstallが最後の有効Payloadを削除しない
 - 各Journal Stage間へCrashを注入し、完全一致する直後の副作用だけを冪等再開して想定外状態を隔離する
 - 同一Dependency Root IDの並行Restoreを直列化し、失敗Stagingと公開済みImmutable Rootを混在させない
 - Project／User Data／Recent RegistryがUpdateとUninstallで不変であることを確認する
