@@ -206,13 +206,19 @@ void write_text(const std::filesystem::path &a_path, std::string_view a_text)
     return bytes;
 }
 
+/// @brief Byte列全体のSHA-256を計算する
+[[nodiscard]] std::string bytes_digest(std::span<const std::byte> a_bytes, const cue::AssertContext &a_assertContext)
+{
+    auto digest = cue::distribution::compute_distribution_sha256(a_bytes, a_assertContext);
+    require(digest.has_value());
+    return std::move(*digest.try_value());
+}
+
 /// @brief File全体のSHA-256を計算する
 [[nodiscard]] std::string file_digest(const std::filesystem::path &a_path, const cue::AssertContext &a_assertContext)
 {
     const std::vector<std::byte> bytes = read_bytes(a_path);
-    auto digest = cue::distribution::compute_distribution_sha256(bytes, a_assertContext);
-    require(digest.has_value());
-    return std::move(*digest.try_value());
+    return bytes_digest(bytes, a_assertContext);
 }
 
 /// @brief 現在のBuild出力にあるInstaller Tool Pathを返す
@@ -479,7 +485,7 @@ void test_worker_system_imports()
 {
     const std::filesystem::path path = a_bundleRoot / std::filesystem::path(a_relativePath);
     write_bytes(path, a_bytes);
-    return {a_role, std::move(a_relativePath), a_bytes.size(), file_digest(path, a_assertContext)};
+    return {a_role, std::move(a_relativePath), a_bytes.size(), bytes_digest(a_bytes, a_assertContext)};
 }
 
 /// @brief Install Transaction用の完全なCanonical Test Bundleを作成する
@@ -489,9 +495,15 @@ void create_bundle(const std::filesystem::path &a_bundleRoot, const cue::AssertC
                    std::string a_engineVersion = "1.0.0", std::byte a_sourceByte = std::byte{'c'})
 {
     using cue::distribution::DistributionFileRole;
-    const std::vector<std::byte> executable = read_bytes(installer_executable());
-    const std::vector<std::byte> probeExecutable = read_bytes(a_probeExecutable);
-    const std::vector<std::byte> workerExecutable = read_bytes(worker_executable());
+    static const std::vector<std::byte> executable = read_bytes(installer_executable());
+    static const std::vector<std::byte> workerExecutable = read_bytes(worker_executable());
+    std::vector<std::byte> probeExecutableStorage;
+    std::span<const std::byte> probeExecutable = executable;
+    if (a_probeExecutable != installer_executable())
+    {
+        probeExecutableStorage = read_bytes(a_probeExecutable);
+        probeExecutable = probeExecutableStorage;
+    }
     const std::array<std::byte, 4U> sourceBytes = {a_sourceByte, a_sourceByte, a_sourceByte, std::byte{'\n'}};
     cue::distribution::DistributionManifest manifest;
     manifest.bundleId = std::move(a_bundleId);

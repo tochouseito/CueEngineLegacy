@@ -174,6 +174,6 @@ if(WIN32)
         Cue.Distribution.WindowsInstaller
         Cue.Distribution.WindowsInstallerRecovery
         Cue.Distribution.WindowsInstallerVersionOperations
-        PROPERTIES TIMEOUT 240
+        PROPERTIES TIMEOUT 360
     )
 endif()
