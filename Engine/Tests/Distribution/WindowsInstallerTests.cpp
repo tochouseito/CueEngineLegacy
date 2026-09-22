@@ -1782,6 +1782,19 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
                 FALSE);
         const DWORD renameError = GetLastError();
         require(renameError == ERROR_SHARING_VIOLATION || renameError == ERROR_ACCESS_DENIED);
+        auto selectedUpdateWhileRunning =
+            cue::distribution::rollback_windows_installed_version(updatedVersion, a_assertContext);
+        require(selectedUpdateWhileRunning.has_value() && !selectedUpdateWhileRunning.try_value()->wasAlreadySelected);
+        {
+            cue::ChildProcessCancellation buildCancellation;
+            auto buildLease = cue::distribution::acquire_windows_installed_source_build_lease(
+                *executionLease.try_value(), buildCancellation, a_assertContext);
+            require(buildLease.has_value() && buildLease.try_value()->has_value());
+        }
+        auto selectedOriginalWhileRunning =
+            cue::distribution::rollback_windows_installed_version(installedVersion, a_assertContext);
+        require(selectedOriginalWhileRunning.has_value() &&
+                !selectedOriginalWhileRunning.try_value()->wasAlreadySelected);
         {
             cue::ChildProcessCancellation buildCancellation;
             auto buildLease = cue::distribution::acquire_windows_installed_source_build_lease(

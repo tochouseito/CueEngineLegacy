@@ -1471,16 +1471,24 @@ struct ValidatedInstallWorker final
 
 /// @brief Payload MarkerとVersion Payloadを再検証してMarker Digestを返す
 [[nodiscard]] cue::Result<std::string> validate_published_payload(const std::filesystem::path &a_versionRoot,
-                                                                  const BundleSnapshot &a_bundle,
-                                                                  std::string_view a_directoryName,
-                                                                  const cue::AssertContext &a_assertContext) noexcept
+                                                                   const BundleSnapshot &a_bundle,
+                                                                   std::string_view a_directoryName,
+                                                                   const cue::AssertContext &a_assertContext,
+                                                                   const cue::ChildProcessCancellation *a_cancellation =
+                                                                       nullptr) noexcept
 {
+    if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+    {
+        return cue::Result<std::string>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
     auto manifest = validate_manifest_digest(a_versionRoot, a_bundle, a_assertContext);
     if (!manifest)
     {
         return cue::Result<std::string>::failure(std::move(*manifest.try_error()));
     }
-    auto validated = validate_inventory(a_versionRoot, a_bundle.manifest, true, a_assertContext);
+    auto validated = validate_inventory(a_versionRoot, a_bundle.manifest, true, a_assertContext, a_cancellation);
     if (!validated)
     {
         return cue::Result<std::string>::failure(std::move(*validated.try_error()));
@@ -1500,7 +1508,18 @@ struct ValidatedInstallWorker final
                           "Published Version Payload marker does not match"));
     }
     const auto *begin = reinterpret_cast<const std::byte *>(text.try_value()->data());
-    return hash_bytes(std::span(begin, text.try_value()->size()), a_assertContext);
+    auto digest = hash_bytes_cancellable(std::span(begin, text.try_value()->size()), a_cancellation, a_assertContext);
+    if (!digest)
+    {
+        return cue::Result<std::string>::failure(std::move(*digest.try_error()));
+    }
+    if (!digest.try_value()->has_value())
+    {
+        return cue::Result<std::string>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
+    return cue::Result<std::string>::success(std::move(**digest.try_value()));
 }
 
 /// @brief Probe Markerを耐久書込みしてDigestを返す
@@ -2097,9 +2116,11 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
 [[nodiscard]] cue::Result<cue::distribution::InstalledVersionEntry> build_version_entry(
     const std::filesystem::path &a_installRoot, const std::filesystem::path &a_versionRoot,
     const BundleSnapshot &a_bundle, std::string_view a_directoryName,
-    const cue::AssertContext &a_assertContext) noexcept
+    const cue::AssertContext &a_assertContext,
+    const cue::ChildProcessCancellation *a_cancellation = nullptr) noexcept
 {
-    auto payloadDigest = validate_published_payload(a_versionRoot, a_bundle, a_directoryName, a_assertContext);
+    auto payloadDigest =
+        validate_published_payload(a_versionRoot, a_bundle, a_directoryName, a_assertContext, a_cancellation);
     auto probeDigest = validate_probe_marker(a_versionRoot, a_bundle, a_directoryName, a_assertContext);
     auto worker = validate_worker(a_installRoot / L"Operations" / L"Workers" / to_wide(a_bundle.workerId).value_or(L""),
                                   a_bundle, a_assertContext);
@@ -2178,7 +2199,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                           "Installed Source validation was cancelled"));
     }
     auto rebuilt = build_version_entry(a_installRoot, versionRoot, *bundle.try_value(), a_directoryName,
-                                       a_assertContext);
+                                       a_assertContext, a_cancellation);
     if (!rebuilt)
     {
         return cue::Result<InstalledVersionSnapshot>::failure(std::move(*rebuilt.try_error()));
@@ -4970,8 +4991,7 @@ Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installe
         {
             return cancelled();
         }
-        if (!expected || expected.try_value()->registry.selectedVersion != a_executionLease.version_directory() ||
-            expected.try_value()->entry.engineVersion != a_executionLease.engine_version() ||
+        if (!expected || expected.try_value()->entry.engineVersion != a_executionLease.engine_version() ||
             expected.try_value()->entry.bundleId != a_executionLease.bundle_id() ||
             expected.try_value()->entry.manifestDigest != a_executionLease.manifest_digest() ||
             expected.try_value()->bundle.manifest.engineSourceRevision !=
@@ -5083,8 +5103,7 @@ Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installe
         {
             return cancelled();
         }
-        if (!revalidated || revalidated.try_value()->registry != expected.try_value()->registry ||
-            revalidated.try_value()->entry != expected.try_value()->entry)
+        if (!revalidated || revalidated.try_value()->entry != expected.try_value()->entry)
         {
             return BuildLeaseResult::failure(
                 revalidated ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
