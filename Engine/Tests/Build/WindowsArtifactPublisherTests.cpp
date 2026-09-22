@@ -12,6 +12,7 @@
 #include <Windows.h>
 #include <winioctl.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -750,6 +751,55 @@ void test_windows_artifact_publisher(const std::filesystem::path &a_probe, const
     require(!error);
 }
 
+/// @brief Installed Engine BuildがRuntimeHostを同じ不変Artifactへ公開することを検証する
+void test_installed_game_module_runtime_host(const std::filesystem::path &a_probe,
+                                             const std::filesystem::path &a_runtimeHost,
+                                             const cue::AssertContext &a_assertContext)
+{
+    const std::filesystem::path projectRoot =
+        std::filesystem::temp_directory_path() /
+        ("CueInstalledArtifactTests-" + std::to_string(GetCurrentProcessId()) + "-" +
+         std::string(k_configurationName));
+    const std::filesystem::path installedEngineRoot = projectRoot / "InstalledEngine";
+    std::error_code error;
+    std::filesystem::remove_all(projectRoot, error);
+    require(!error && std::filesystem::create_directories(installedEngineRoot));
+
+    cue::ProjectDescriptor descriptor = make_descriptor(a_assertContext);
+    cue::WindowsInstalledEngineSourceProvenance provenance{
+        generic_path(installedEngineRoot), std::string(40U, 'c'), std::string(64U, 'a'), std::string(64U, 'b')};
+    std::unique_ptr<cue::BuildArtifactPublisher> publisher = take_value(
+        cue::create_windows_build_artifact_publisher(generic_path(projectRoot), descriptor, std::move(provenance),
+                                                     a_assertContext));
+    cue::BuildPlan plan = make_plan(projectRoot, "91234567-89ab-4cde-8f01-23456789abcd", a_assertContext);
+    const std::filesystem::path output =
+        std::filesystem::path(plan.binary_directory()) / "bin" / k_configurationName;
+    require(std::filesystem::create_directories(output));
+    require(std::filesystem::copy_file(a_probe, output / "CueGameModule.dll"));
+    require(std::filesystem::copy_file(a_runtimeHost, output / "CueRuntimeHost.exe"));
+    {
+        std::ofstream pdb(output / "CueGameModule.pdb", std::ios::binary | std::ios::trunc);
+        pdb << "installed-test-symbols-" << k_configurationName;
+        require(static_cast<bool>(pdb));
+    }
+
+    cue::ChildProcessCancellation cancellation;
+    auto lease = take_value(publisher->acquire_build_lease(plan, cancellation, std::nullopt));
+    require(lease.has_value());
+    auto published = take_value(publisher->publish(plan, cancellation, std::move(*lease), std::nullopt));
+    require(published.has_value() && published->files().size() == 4U);
+    const std::filesystem::path version = std::filesystem::path(published->version_directory());
+    require(std::filesystem::is_regular_file(version / "CueRuntimeHost.exe"));
+    const auto runtimeHostFile = std::find_if(
+        published->files().begin(), published->files().end(),
+        [](const cue::BuildArtifactFile &a_file) noexcept { return a_file.relativePath == "CueRuntimeHost.exe"; });
+    require(runtimeHostFile != published->files().end() &&
+            runtimeHostFile->purpose == cue::BuildArtifactFilePurpose::DistributionPayload);
+
+    std::filesystem::remove_all(projectRoot, error);
+    require(!error);
+}
+
 /// @brief Shipping Productの公開、Identity拒否、Current保全、Tamper検出を検証する
 void test_shipping_product_publisher(const std::filesystem::path &a_product,
                                      const std::filesystem::path &a_wrongProjectProduct,
@@ -1076,6 +1126,8 @@ int main(int a_argumentCount, char **a_arguments)
     test_windows_artifact_publisher(std::filesystem::path(a_arguments[1]), std::filesystem::path(a_arguments[2]),
                                     std::filesystem::path(a_arguments[3]), std::filesystem::path(a_arguments[4]),
                                     std::filesystem::path(a_arguments[5]), assertContext);
+    test_installed_game_module_runtime_host(std::filesystem::path(a_arguments[1]),
+                                            std::filesystem::path(a_arguments[5]), assertContext);
     test_shipping_product_publisher(std::filesystem::path(a_arguments[6]), std::filesystem::path(a_arguments[7]),
                                     std::filesystem::path(a_arguments[8]), std::filesystem::path(a_arguments[9]),
                                     assertContext);

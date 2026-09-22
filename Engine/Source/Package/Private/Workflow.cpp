@@ -578,7 +578,6 @@ struct GamePackageWorkflowService::Impl final
         EngineVersion engineVersion;
         std::string projectId;
         MinimalRuntimeDataPublication runtimeData;
-        std::optional<std::string> runtimeHostProjectPath;
     };
 
     /// @brief 検証済み依存とRoot Locatorの所有権をWorkflow実装へ移す
@@ -800,19 +799,6 @@ struct GamePackageWorkflowService::Impl final
 
             std::vector<PackageFilePayload> payloads;
             payloads.reserve(a_artifact.files().size() + 3U);
-            Result<PackageFilePayload> runtimeHost =
-                a_inputs.runtimeHostProjectPath
-                    ? read_payload(*projectFilesystem, *a_inputs.runtimeHostProjectPath, PackageFileRole::RuntimeHost,
-                                   "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes)
-                    : read_payload(*engineBinaryFilesystem,
-                                   join_relative("bin", join_relative(configuration, "CueRuntimeHost.exe")),
-                                   PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
-            if (!runtimeHost)
-            {
-                return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
-            }
-            payloads.push_back(std::move(*runtimeHost.try_value()));
-
             const std::optional<std::string> artifactDirectory =
                 make_project_relative(projectRoot, a_artifact.version_directory());
             if (!artifactDirectory)
@@ -836,6 +822,47 @@ struct GamePackageWorkflowService::Impl final
             }
             std::unique_ptr<BuildArtifactReadLease> artifactReadLease = std::move(**acquired.try_value());
 
+            if (runtimeHostBuildSource == RuntimeHostBuildSource::PublishedBuildArtifact)
+            {
+                const auto runtimeHostFile =
+                    std::find_if(a_artifact.files().begin(), a_artifact.files().end(),
+                                 [](const BuildArtifactFile &a_file) noexcept
+                                 { return a_file.relativePath == "CueRuntimeHost.exe"; });
+                if (runtimeHostFile == a_artifact.files().end())
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(make_workflow_error(
+                        *assertContext, WorkflowError::ArtifactMismatch,
+                        "Published Build Artifact does not contain RuntimeHost"));
+                }
+                Result<PackageFilePayload> runtimeHost = read_payload(
+                    *projectFilesystem, join_relative(*artifactDirectory, runtimeHostFile->relativePath),
+                    PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
+                if (!runtimeHost)
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
+                }
+                if (runtimeHost.try_value()->entry().byte_size() != runtimeHostFile->byteSize ||
+                    runtimeHost.try_value()->entry().sha256() != runtimeHostFile->contentHash)
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(make_workflow_error(
+                        *assertContext, WorkflowError::ArtifactMismatch,
+                        "RuntimeHost bytes differ from the published inventory"));
+                }
+                payloads.push_back(std::move(*runtimeHost.try_value()));
+            }
+            else
+            {
+                Result<PackageFilePayload> runtimeHost = read_payload(
+                    *engineBinaryFilesystem,
+                    join_relative("bin", join_relative(configuration, "CueRuntimeHost.exe")),
+                    PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
+                if (!runtimeHost)
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
+                }
+                payloads.push_back(std::move(*runtimeHost.try_value()));
+            }
+
             for (const BuildArtifactFile &file : a_artifact.files())
             {
                 if (a_cancellation.is_cancel_requested())
@@ -843,7 +870,7 @@ struct GamePackageWorkflowService::Impl final
                     return Result<PublishedRuntimePackageSnapshot>::failure(make_workflow_error(
                         *assertContext, WorkflowError::PackagePublicationFailed, "Package publication was cancelled"));
                 }
-                if (file.relativePath == "CueGameModule.pdb")
+                if (file.relativePath == "CueGameModule.pdb" || file.relativePath == "CueRuntimeHost.exe")
                 {
                     continue;
                 }
@@ -1046,7 +1073,7 @@ Result<std::unique_ptr<GamePackageWorkflowService>> GamePackageWorkflowService::
         if (!a_buildService || !a_artifactReader || !a_projectFilesystem || !a_engineBinaryFilesystem ||
             !a_runProcessRunner || a_projectRoot.empty() ||
             (a_runtimeHostBuildSource != RuntimeHostBuildSource::EngineBinaryRoot &&
-             a_runtimeHostBuildSource != RuntimeHostBuildSource::ProjectBuildTree))
+             a_runtimeHostBuildSource != RuntimeHostBuildSource::PublishedBuildArtifact))
         {
             return Result<std::unique_ptr<GamePackageWorkflowService>>::failure(make_workflow_error(
                 a_assertContext, WorkflowError::MissingDependency, "Package workflow dependency is missing"));
@@ -1094,29 +1121,7 @@ Result<void> GamePackageWorkflowService::start(BuildRequest a_buildRequest, CMak
         {
             return recovered;
         }
-        std::optional<std::string> runtimeHostProjectPath;
-        if (!monolithicShipping &&
-            m_impl->runtimeHostBuildSource == RuntimeHostBuildSource::ProjectBuildTree)
-        {
-            Result<BuildPlan> plan = create_build_plan(a_buildRequest, *m_impl->assertContext);
-            if (!plan)
-            {
-                return Result<void>::failure(std::move(*plan.try_error()));
-            }
-            const std::optional<std::string> binary =
-                make_project_relative(m_impl->projectRoot, plan.try_value()->binary_directory());
-            if (!binary)
-            {
-                return Result<void>::failure(make_workflow_error(
-                    *m_impl->assertContext, WorkflowError::InvalidInput,
-                    "RuntimeHost Build Tree is outside the Project root"));
-            }
-            runtimeHostProjectPath = join_relative(
-                *binary, join_relative("bin", join_relative(configuration_name(a_buildRequest.profile.configuration()),
-                                                              "CueRuntimeHost.exe")));
-        }
-        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData),
-                                   std::move(runtimeHostProjectPath)};
+        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData)};
         {
             std::scoped_lock lock(m_impl->mutex);
             Result<void> started = m_impl->buildService->start(std::move(a_buildRequest), a_configureMode);
@@ -1158,7 +1163,6 @@ Result<void> GamePackageWorkflowService::retry(std::string a_operationId, Engine
                                                              "Package workflow retry requires owner thread"));
         }
         advance();
-        std::optional<std::string> runtimeHostProjectPath;
         {
             std::scoped_lock lock(m_impl->mutex);
             if (!m_impl->retryInputs)
@@ -1175,15 +1179,13 @@ Result<void> GamePackageWorkflowService::retry(std::string a_operationId, Engine
                                                                  WorkflowError::OperationAlreadyRunning,
                                                                  "Package workflow operation is already running"));
             }
-            runtimeHostProjectPath = m_impl->retryInputs->runtimeHostProjectPath;
         }
         Result<void> recovered = m_impl->retry_staging_recovery();
         if (!recovered)
         {
             return recovered;
         }
-        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData),
-                                   std::move(runtimeHostProjectPath)};
+        Impl::PackageInputs inputs{a_engineVersion, std::move(a_projectId), std::move(a_runtimeData)};
         {
             std::scoped_lock lock(m_impl->mutex);
             Result<void> restarted = m_impl->buildService->retry(std::move(a_operationId));

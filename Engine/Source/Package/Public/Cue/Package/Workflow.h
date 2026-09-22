@@ -87,7 +87,7 @@ struct PackageWorkflowSnapshot final
 enum class RuntimeHostBuildSource : std::uint8_t
 {
     EngineBinaryRoot,
-    ProjectBuildTree
+    PublishedBuildArtifact
 };
 
 /// @brief Game Build成功ArtifactからStandalone Package公開と起動を直列化するApplication Service

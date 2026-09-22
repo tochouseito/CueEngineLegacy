@@ -44,6 +44,7 @@ constexpr std::uint64_t k_maximumCurrentManifestBytes = 32U * 1024U * 1024U;
 constexpr DWORD k_lockRetryMilliseconds = 10U;
 constexpr std::string_view k_moduleProbeCompletionMarker = "CueGameModuleProbe:v1\n";
 constexpr std::string_view k_productProbeCompletionMarker = "CueGameProductProbe:v1\n";
+constexpr std::string_view k_runtimeHostFileName = "CueRuntimeHost.exe";
 
 [[nodiscard]] std::string_view configuration_name(cue::BuildConfiguration a_configuration) noexcept;
 
@@ -489,6 +490,7 @@ class WindowsBuildWorkspaceLease final : public cue::BuildWorkspaceLease, public
 /// @brief Artifact DirectoryがTarget別許可File集合と完全一致するか検証する
 [[nodiscard]] cue::Result<void> validate_artifact_directory_contents(const std::filesystem::path &a_directory,
                                                                      const ArtifactLayout &a_layout, bool a_hasSymbol,
+                                                                     bool a_hasRuntimeHost,
                                                                      const cue::AssertContext &a_assertContext) noexcept
 {
     std::error_code iteratorError;
@@ -500,8 +502,9 @@ class WindowsBuildWorkspaceLease final : public cue::BuildWorkspaceLease, public
         std::error_code statusError;
         const std::filesystem::file_status status = entry.symlink_status(statusError);
         const std::string name = path_to_utf8(entry.path().filename());
-        const bool allowedName =
-            name == a_layout.payload || name == a_layout.metadata || (a_hasSymbol && name == a_layout.symbol);
+        const bool allowedName = name == a_layout.payload || name == a_layout.metadata ||
+                                 (a_hasSymbol && name == a_layout.symbol) ||
+                                 (a_hasRuntimeHost && name == k_runtimeHostFileName);
         if (statusError || !std::filesystem::is_regular_file(status) || !allowedName)
         {
             return cue::Result<void>::failure(
@@ -510,7 +513,7 @@ class WindowsBuildWorkspaceLease final : public cue::BuildWorkspaceLease, public
         }
         ++fileCount;
     }
-    const std::size_t expectedCount = a_hasSymbol ? 3U : 2U;
+    const std::size_t expectedCount = 2U + (a_hasSymbol ? 1U : 0U) + (a_hasRuntimeHost ? 1U : 0U);
     if (iteratorError || fileCount != expectedCount)
     {
         return cue::Result<void>::failure(
@@ -3088,6 +3091,9 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
             }
             const std::filesystem::path source = *binary / "bin" / configuration / std::string(layout.payload);
             const std::filesystem::path sourcePdb = *binary / "bin" / configuration / std::string(layout.symbol);
+            const bool hasRuntimeHost = !isShippingProduct && m_installedEngineSource.has_value();
+            const std::filesystem::path sourceRuntimeHost =
+                *binary / "bin" / configuration / std::string(k_runtimeHostFileName);
             const std::filesystem::path candidate = *candidatePath;
             cue::Result<void> sourceChain =
                 validate_directory_chain(m_projectRoot, source.parent_path(),
@@ -3185,6 +3191,18 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                         "Build artifact PDB is not a regular file"));
                 }
             }
+            if (hasRuntimeHost)
+            {
+                const std::filesystem::file_status runtimeHostStatus =
+                    std::filesystem::symlink_status(sourceRuntimeHost, filesystemError);
+                if (filesystemError || !std::filesystem::is_regular_file(runtimeHostStatus))
+                {
+                    return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(make_windows_error(
+                        *m_assertContext, cue::WindowsBuildArtifactError::CandidateInvalid,
+                        filesystemError ? static_cast<DWORD>(filesystemError.value()) : ERROR_FILE_INVALID,
+                        "Installed Engine RuntimeHost output is not a regular file"));
+                }
+            }
             if (std::filesystem::exists(candidate, filesystemError) || filesystemError)
             {
                 return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(make_windows_error(
@@ -3266,6 +3284,15 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                     return failCandidate(std::move(*pdbCopied.try_error()));
                 }
             }
+            if (hasRuntimeHost)
+            {
+                cue::Result<void> runtimeHostCopied = copy_new_file_durable(
+                    sourceRuntimeHost, candidate / std::string(k_runtimeHostFileName), *m_assertContext);
+                if (!runtimeHostCopied)
+                {
+                    return failCandidate(std::move(*runtimeHostCopied.try_error()));
+                }
+            }
             std::optional<cue::WindowsProductSecurityValidation> productSecurity;
             if (isShippingProduct)
             {
@@ -3321,6 +3348,18 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                 }
                 candidatePdbHash.emplace(std::move(*hashed.try_value()));
             }
+            std::optional<cue::BuildArtifactFile> candidateRuntimeHostHash;
+            if (hasRuntimeHost)
+            {
+                auto hashed = hash_file(candidate / std::string(k_runtimeHostFileName),
+                                        std::string(k_runtimeHostFileName),
+                                        cue::BuildArtifactFilePurpose::DistributionPayload, *m_assertContext);
+                if (!hashed)
+                {
+                    return failCandidate(std::move(*hashed.try_error()));
+                }
+                candidateRuntimeHostHash.emplace(std::move(*hashed.try_value()));
+            }
             const std::string metadata =
                 isShippingProduct
                     ? serialize_product_metadata(a_plan.operation_id(), m_projectId, m_compatibility, a_plan,
@@ -3337,7 +3376,7 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                 return failCandidate(std::move(*metadataWritten.try_error()));
             }
             cue::Result<void> candidateContents =
-                validate_artifact_directory_contents(candidate, layout, hasPdb, *m_assertContext);
+                validate_artifact_directory_contents(candidate, layout, hasPdb, hasRuntimeHost, *m_assertContext);
             if (!candidateContents)
             {
                 return failCandidate(std::move(*candidateContents.try_error()));
@@ -3441,7 +3480,7 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                 }
             }
             cue::Result<void> versionContents =
-                validate_artifact_directory_contents(version, layout, hasPdb, *m_assertContext);
+                validate_artifact_directory_contents(version, layout, hasPdb, hasRuntimeHost, *m_assertContext);
             if (!versionContents)
             {
                 return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
@@ -3461,6 +3500,19 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                 }
                 versionPdbHash.emplace(std::move(*hashed.try_value()));
             }
+            std::optional<cue::BuildArtifactFile> versionRuntimeHostHash;
+            if (hasRuntimeHost)
+            {
+                auto hashed = hash_file(version / std::string(k_runtimeHostFileName),
+                                        std::string(k_runtimeHostFileName),
+                                        cue::BuildArtifactFilePurpose::DistributionPayload, *m_assertContext);
+                if (!hashed)
+                {
+                    return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
+                        std::move(*hashed.try_error()));
+                }
+                versionRuntimeHostHash.emplace(std::move(*hashed.try_value()));
+            }
             auto versionMetadataHash = hash_file(version / std::string(layout.metadata), std::string(layout.metadata),
                                                  cue::BuildArtifactFilePurpose::RuntimeMetadata, *m_assertContext);
             if (!versionPayloadHash)
@@ -3479,6 +3531,9 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
                 versionPayloadHash.try_value()->contentHash != candidatePayloadHash.try_value()->contentHash ||
                 (candidatePdbHash.has_value() &&
                  (!versionPdbHash.has_value() || versionPdbHash->contentHash != candidatePdbHash->contentHash)) ||
+                (candidateRuntimeHostHash.has_value() &&
+                 (!versionRuntimeHostHash.has_value() ||
+                  versionRuntimeHostHash->contentHash != candidateRuntimeHostHash->contentHash)) ||
                 versionMetadataHash.try_value()->contentHash != candidateMetadataHash.try_value()->contentHash)
             {
                 return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
@@ -3490,6 +3545,10 @@ class WindowsBuildArtifactPublisher final : public cue::BuildArtifactPublisher
             if (versionPdbHash.has_value())
             {
                 files.push_back(std::move(*versionPdbHash));
+            }
+            if (versionRuntimeHostHash.has_value())
+            {
+                files.push_back(std::move(*versionRuntimeHostHash));
             }
             files.push_back(std::move(*versionMetadataHash.try_value()));
             auto inventory = cue::BuildArtifactInventory::create(a_plan, std::string(a_plan.operation_id()),

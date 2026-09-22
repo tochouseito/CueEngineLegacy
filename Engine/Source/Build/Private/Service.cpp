@@ -1123,11 +1123,33 @@ struct GameBuildService::Impl final
 
     /// @brief ConfigureとBuildを順に実行し、成功時だけArtifactを公開する
     void execute(BuildPlan a_plan, std::string a_operationId, CMakeConfigureMode a_configureMode,
-                 std::unique_ptr<BuildInputLease> a_inputLease,
                  ChildProcessCancellation &a_cancellation) noexcept
     {
-        static_cast<void>(a_inputLease);
         Observer observer(*this, a_operationId);
+        std::unique_ptr<BuildInputLease> inputLease;
+        if (inputLeaseProvider)
+        {
+            auto acquiredInput = inputLeaseProvider->acquire(a_plan, a_cancellation);
+            if (!acquiredInput)
+            {
+                finish_error(a_operationId, *acquiredInput.try_error());
+                return;
+            }
+            if (a_cancellation.is_cancel_requested())
+            {
+                finish_cancelled(a_operationId);
+                return;
+            }
+            if (!*acquiredInput.try_value())
+            {
+                finish_error(a_operationId,
+                             make_service_error(*assertContext, GameBuildServiceError::MissingDependency,
+                                                "Build input lease provider returned no lease"));
+                return;
+            }
+            inputLease = std::move(*acquiredInput.try_value());
+        }
+        static_cast<void>(inputLease);
         auto acquired = artifactPublisher->acquire_build_lease(a_plan, a_cancellation,
                                                                make_lock_deadline(settings.configureTimeout));
         if (!acquired)
@@ -1141,7 +1163,9 @@ struct GameBuildService::Impl final
             return;
         }
         std::unique_ptr<BuildWorkspaceLease> buildLease = std::move(**acquired.try_value());
-        auto built = run_cmake_build(a_plan, settings, a_configureMode, *processRunner, a_cancellation, observer,
+        const CMakeConfigureMode configureMode =
+            inputLeaseProvider ? CMakeConfigureMode::Required : a_configureMode;
+        auto built = run_cmake_build(a_plan, settings, configureMode, *processRunner, a_cancellation, observer,
                                      *assertContext);
         if (!built)
         {
@@ -1284,22 +1308,6 @@ Result<void> GameBuildService::start(BuildRequest a_request, CMakeConfigureMode 
         {
             return Result<void>::failure(std::move(*plan.try_error()));
         }
-        std::unique_ptr<BuildInputLease> inputLease;
-        if (m_impl->inputLeaseProvider)
-        {
-            auto acquired = m_impl->inputLeaseProvider->acquire(*plan.try_value());
-            if (!acquired)
-            {
-                return Result<void>::failure(std::move(*acquired.try_error()));
-            }
-            if (!*acquired.try_value())
-            {
-                return Result<void>::failure(make_service_error(*m_impl->assertContext,
-                                                                GameBuildServiceError::MissingDependency,
-                                                                "Build input lease provider returned no lease"));
-            }
-            inputLease = std::move(*acquired.try_value());
-        }
         auto cancellation = std::make_unique<ChildProcessCancellation>();
         ChildProcessCancellation *cancellationPointer = cancellation.get();
         const std::string operationId(a_request.operationId);
@@ -1314,7 +1322,7 @@ Result<void> GameBuildService::start(BuildRequest a_request, CMakeConfigureMode 
             m_impl->current.latestSuccessfulArtifact = m_impl->latestSuccessful;
         }
         m_impl->worker = std::thread(&Impl::execute, m_impl.get(), std::move(*plan.try_value()), operationId,
-                                     a_configureMode, std::move(inputLease), std::ref(*cancellationPointer));
+                                     a_configureMode, std::ref(*cancellationPointer));
         return Result<void>::success();
     }
     catch (...)

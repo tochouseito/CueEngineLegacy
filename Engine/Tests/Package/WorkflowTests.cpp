@@ -549,6 +549,7 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         const std::vector<std::byte> moduleBytes = m_state->invalidPortableExecutable.load(std::memory_order_acquire)
                                                        ? text_bytes("test-game-module")
                                                        : make_test_pe();
+        const std::vector<std::byte> runtimeHostBytes = make_test_pe();
         const std::vector<std::byte> pdbBytes = text_bytes("test-debug-symbols");
         const std::vector<std::byte> metadataBytes = text_bytes("{\"schemaVersion\":1}\n");
         const bool hasOversizedInventory = m_state->oversizedRuntimePeInventory.load(std::memory_order_acquire);
@@ -557,10 +558,14 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         auto metadataPayload =
             cue::package::PackageFilePayload::create(cue::package::PackageFileRole::GameModuleMetadata,
                                                      "CueGameModule.metadata.json", metadataBytes, *m_assertContext);
-        if (!modulePayload || !metadataPayload)
+        auto runtimeHostPayload = cue::package::PackageFilePayload::create(
+            cue::package::PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", runtimeHostBytes, *m_assertContext);
+        if (!modulePayload || !metadataPayload || !runtimeHostPayload)
         {
             return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
-                modulePayload ? std::move(*metadataPayload.try_error()) : std::move(*modulePayload.try_error()));
+                !modulePayload ? std::move(*modulePayload.try_error())
+                               : (!metadataPayload ? std::move(*metadataPayload.try_error())
+                                                   : std::move(*runtimeHostPayload.try_error())));
         }
         const std::string artifactId(a_plan.operation_id());
         const std::filesystem::path versionDirectory = std::filesystem::path(a_plan.project_root()) /
@@ -570,6 +575,7 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         std::filesystem::create_directories(versionDirectory, error);
         if (error || !write_file(versionDirectory / L"CueGameModule.dll", moduleBytes) ||
             !write_file(versionDirectory / L"CueGameModule.pdb", pdbBytes) ||
+            !write_file(versionDirectory / L"CueRuntimeHost.exe", runtimeHostBytes) ||
             !write_file(versionDirectory / L"CueGameModule.metadata.json", metadataBytes) ||
             (hasOversizedInventory && (!write_file(versionDirectory / L"RuntimeDependencyA.dll", moduleBytes) ||
                                        !write_file(versionDirectory / L"RuntimeDependencyB.dll", moduleBytes))))
@@ -589,7 +595,9 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         std::vector<cue::BuildArtifactFile> files = {{"CueGameModule.dll", moduleSize, std::move(moduleHash)},
                                                      {"CueGameModule.pdb", pdbBytes.size(), std::string(64U, 'a')},
                                                      {"CueGameModule.metadata.json", metadataBytes.size(),
-                                                      std::string(metadataPayload.try_value()->entry().sha256())}};
+                                                      std::string(metadataPayload.try_value()->entry().sha256())},
+                                                     {"CueRuntimeHost.exe", runtimeHostBytes.size(),
+                                                      std::string(runtimeHostPayload.try_value()->entry().sha256())}};
         if (hasOversizedInventory)
         {
             const std::string dependencyHash(modulePayload.try_value()->entry().sha256());
@@ -831,20 +839,6 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     constexpr std::string_view firstOperation = "01234567-89ab-4cde-8f01-23456789abcd";
     cue::BuildRequest firstRequest =
         make_request(projectRoot.generic_string(), std::string(firstOperation), a_assertContext);
-    auto firstPlan = cue::create_build_plan(firstRequest, a_assertContext);
-    if (!require(firstPlan.has_value()))
-    {
-        return false;
-    }
-    const std::filesystem::path hostPath = std::filesystem::path(firstPlan.try_value()->binary_directory()) / L"bin" /
-                                           L"Debug" / L"CueRuntimeHost.exe";
-    std::filesystem::create_directories(hostPath.parent_path());
-    {
-        const std::vector<std::byte> hostBytes = make_test_pe();
-        std::ofstream host(hostPath, std::ios::binary);
-        host.write(reinterpret_cast<const char *>(hostBytes.data()), static_cast<std::streamsize>(hostBytes.size()));
-    }
-
     RunnerState buildRunner;
     RunnerState runRunner;
     PublisherState publisher;
@@ -865,7 +859,7 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
         std::move(buildService), std::make_unique<MaterializingArtifactReader>(publisher),
         std::move(guardedProjectFilesystem), std::move(*engineFilesystem.try_value()),
         std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {},
-        cue::package::RuntimeHostBuildSource::ProjectBuildTree, a_assertContext);
+        cue::package::RuntimeHostBuildSource::PublishedBuildArtifact, a_assertContext);
     auto runtimeData = make_runtime_data(a_assertContext);
     if (!require(workflow && runtimeData))
     {

@@ -227,16 +227,24 @@ class InstalledSourceBuildInputLeaseProvider final : public cue::BuildInputLease
     ~InstalledSourceBuildInputLeaseProvider() override = default;
 
     /// @brief Distribution Inventoryを再検証しBuild完了まで固定するLeaseを返す
-    [[nodiscard]] cue::Result<std::unique_ptr<cue::BuildInputLease>> acquire(
-        const cue::BuildPlan &a_plan) noexcept override
+    [[nodiscard]] cue::Result<std::unique_ptr<cue::BuildInputLease>>
+    acquire(const cue::BuildPlan &a_plan, const cue::ChildProcessCancellation &a_cancellation) noexcept override
     {
         static_cast<void>(a_plan);
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(nullptr);
+        }
         auto acquired = cue::distribution::acquire_windows_installed_source_build_lease(
             *m_executionLease, *m_assertContext);
         if (!acquired)
         {
             return cue::Result<std::unique_ptr<cue::BuildInputLease>>::failure(
                 std::move(*acquired.try_error()));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(nullptr);
         }
         try
         {
@@ -2025,7 +2033,7 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
                 std::move(*packageBuildService.try_value()), std::move(*packageArtifactReader.try_value()),
                 std::move(*projectFilesystem.try_value()), std::move(*engineBinaryFilesystem.try_value()),
                 std::move(*runProcessRunner.try_value()), std::string(m_session->project_locator()), runEnvironment,
-                a_installedEngineLease != nullptr ? cue::package::RuntimeHostBuildSource::ProjectBuildTree
+                a_installedEngineLease != nullptr ? cue::package::RuntimeHostBuildSource::PublishedBuildArtifact
                                                   : cue::package::RuntimeHostBuildSource::EngineBinaryRoot,
                 *m_assertContext);
         if (!packageService)

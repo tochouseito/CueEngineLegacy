@@ -125,8 +125,9 @@ class BuildInputLeaseProvider
     BuildInputLeaseProvider &operator=(const BuildInputLeaseProvider &) = delete;
     /// @brief 派生Providerを正しく破棄する
     virtual ~BuildInputLeaseProvider() = default;
-    /// @brief 検証済みPlanに対応する入力を再検証し、完了まで保持するLeaseを返す
-    [[nodiscard]] virtual Result<std::unique_ptr<BuildInputLease>> acquire(const BuildPlan &a_plan) noexcept = 0;
+    /// @brief Worker上でPlan入力を再検証し、完了まで保持する取消可能Leaseを返す
+    [[nodiscard]] virtual Result<std::unique_ptr<BuildInputLease>>
+    acquire(const BuildPlan &a_plan, const ChildProcessCancellation &a_cancellation) noexcept = 0;
 
   protected:
     /// @brief 派生Providerだけに構築を許可する
@@ -340,6 +341,8 @@ class GameBuildService final
         CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
         std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher, const AssertContext &a_assertContext) noexcept;
     /// @brief Buildごとの外部入力再検証Providerも所有してIdle Serviceを構築する
+    ///
+    /// ProviderはBuild Worker上で呼び出され、外部入力の変更をCMake Treeへ反映するためConfigureを必ず実行する。
     [[nodiscard]] static Result<std::unique_ptr<GameBuildService>> create(
         CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
         std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher,
