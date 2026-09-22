@@ -2145,10 +2145,38 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                     install_error(a_assertContext, DistributionError::InstallRecoveryBlocked,
                                   "Multiple incomplete Journals target the same Version"));
             }
-            journal.blockedOperations.push_back({current.first.operationId, current.first.kind,
-                                                 current.first.target->directoryName, current.first.stage,
-                                                 current.second});
+            InstallOperationJournal reconciled = current.first;
+            reconciled.expectedRegistry = ExpectedRegistry{journal.operationId, 1U};
+            if (reconciled != current.first)
+            {
+                auto written = write_journal(a_installRoot, reconciled, a_assertContext);
+                if (!written)
+                {
+                    return cue::Result<InstalledVersionsRegistry>::failure(std::move(*written.try_error()));
+                }
+            }
+            const std::filesystem::path reconciledPath =
+                a_installRoot / L"Operations" / L"Journals" /
+                (to_wide(reconciled.operationId).value_or(L"") + L".json");
+            auto durable = read_journal(reconciledPath, a_assertContext);
+            if (!durable || durable.try_value()->first != reconciled)
+            {
+                return cue::Result<InstalledVersionsRegistry>::failure(
+                    durable ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                            "Reconciled Install Journal could not be revalidated")
+                            : std::move(*durable.try_error()));
+            }
+            journal.blockedOperations.push_back(
+                {reconciled.operationId, reconciled.kind, reconciled.target->directoryName, reconciled.stage,
+                 std::move(durable.try_value()->second)});
             blockedDirectories.insert(current.first.target->directoryName);
+        }
+        for (const BlockedInstallOperation &blocked : journal.blockedOperations)
+        {
+            if (blocked.stage == InstallOperationStage::RegistryPublished)
+            {
+                blockedDirectories.erase(blocked.directoryName);
+            }
         }
         const std::filesystem::path versions = a_installRoot / L"Versions";
         std::error_code error;
@@ -2193,6 +2221,22 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
         std::ranges::sort(journal.candidates, {},
                           [](const RegistryRecoveryCandidate &a_candidate) -> const std::string &
                           { return a_candidate.version.directoryName; });
+        for (const BlockedInstallOperation &blocked : journal.blockedOperations)
+        {
+            if (blocked.stage != InstallOperationStage::RegistryPublished)
+            {
+                continue;
+            }
+            const auto candidate = std::ranges::find_if(
+                journal.candidates, [&blocked](const RegistryRecoveryCandidate &a_candidate) noexcept
+                { return a_candidate.version.directoryName == blocked.directoryName; });
+            if (candidate == journal.candidates.end())
+            {
+                return cue::Result<InstalledVersionsRegistry>::failure(
+                    install_error(a_assertContext, DistributionError::InstallRecoveryBlocked,
+                                  "Registry-published Version evidence could not be recovered"));
+            }
+        }
         auto advanced =
             advance_journal(a_installRoot, journal, InstallOperationStage::CandidatesValidated, a_assertContext);
         if (!advanced)

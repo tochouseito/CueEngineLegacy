@@ -588,6 +588,99 @@ void test_install_transaction(const cue::AssertContext &a_assertContext)
     require(!std::filesystem::exists(collisionRoot / L"Versions" / L"v1.0.0--12345678-1234-4abc-8def-1234567890ab"));
 }
 
+/// @brief Registry公開後に残ったInstall JournalをRegistry Recovery後も完了できることを検証する
+void test_registry_recovery_resumes_published_install(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    create_bundle(bundleRoot, a_assertContext);
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    auto installed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(installed.has_value());
+    cue::distribution::InstalledVersionsRegistry registry = read_registry(installRoot, a_assertContext);
+    require(registry.versions.size() == 1U);
+
+    cue::distribution::InstallOperationJournal journal;
+    journal.operationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    journal.kind = cue::distribution::InstallOperationKind::Install;
+    journal.stage = cue::distribution::InstallOperationStage::RegistryPublished;
+    journal.workerId = installed.try_value()->workerId;
+    journal.expectedRegistry =
+        cue::distribution::ExpectedRegistry{registry.generationId, registry.revision - 1U};
+    journal.target = cue::distribution::InstallOperationTarget{registry.versions.front().directoryName,
+                                                               registry.versions.front().bundleId,
+                                                               registry.versions.front().manifestDigest};
+    auto journalBytes = cue::distribution::write_install_operation_journal(journal, a_assertContext);
+    require(journalBytes.has_value());
+    const std::filesystem::path journalPath =
+        installRoot / L"Operations" / L"Journals" / L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json";
+    write_text(journalPath, *journalBytes.try_value());
+    write_text(installRoot / L"State" / L"InstalledVersions.json", "");
+
+    auto resumed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(resumed.has_value() && resumed.try_value()->wasAlreadyInstalled);
+    require(!std::filesystem::exists(journalPath));
+    registry = read_registry(installRoot, a_assertContext);
+    require(registry.revision == 1U && registry.versions.size() == 1U);
+}
+
+/// @brief Registry公開前のUpdate Journalを回復Generationへ調停して再開できることを検証する
+void test_registry_recovery_reconciles_pending_update(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"Bundle";
+    const std::filesystem::path updateBundleRoot = temporary.path() / L"UpdateBundle";
+    const std::filesystem::path installRoot = temporary.path() / L"Install";
+    create_bundle(bundleRoot, a_assertContext);
+    create_bundle(updateBundleRoot, a_assertContext, installer_executable(), 0U,
+                  "22345678-1234-4abc-8def-1234567890ab", "1.1.0", std::byte{'u'});
+    cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    cue::distribution::WindowsInstallRequest updateRequest{utf8_path(updateBundleRoot), utf8_path(installRoot), true,
+                                                           true};
+    require(cue::distribution::install_windows_source_sdk(request, a_assertContext).has_value());
+    auto updated = cue::distribution::install_windows_source_sdk(updateRequest, a_assertContext);
+    require(updated.has_value());
+    cue::distribution::InstalledVersionsRegistry complete = read_registry(installRoot, a_assertContext);
+    require(complete.versions.size() == 2U);
+    const auto updateEntry = std::ranges::find_if(
+        complete.versions, [](const cue::distribution::InstalledVersionEntry &a_entry) noexcept
+        { return a_entry.engineVersion == "1.1.0"; });
+    require(updateEntry != complete.versions.end());
+
+    cue::distribution::InstalledVersionsRegistry beforeUpdate = complete;
+    std::erase_if(beforeUpdate.versions, [](const cue::distribution::InstalledVersionEntry &a_entry) noexcept
+                  { return a_entry.engineVersion == "1.1.0"; });
+    beforeUpdate.selectedVersion = beforeUpdate.versions.front().directoryName;
+    beforeUpdate.revision = 2U;
+    auto beforeUpdateBytes =
+        cue::distribution::write_installed_versions_registry(beforeUpdate, a_assertContext);
+    require(beforeUpdateBytes.has_value());
+    write_text(installRoot / L"State" / L"InstalledVersions.json", *beforeUpdateBytes.try_value());
+
+    cue::distribution::InstallOperationJournal journal;
+    journal.operationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    journal.kind = cue::distribution::InstallOperationKind::Update;
+    journal.stage = cue::distribution::InstallOperationStage::WorkerPublished;
+    journal.workerId = updated.try_value()->workerId;
+    journal.expectedRegistry =
+        cue::distribution::ExpectedRegistry{beforeUpdate.generationId, beforeUpdate.revision};
+    journal.target = cue::distribution::InstallOperationTarget{updateEntry->directoryName, updateEntry->bundleId,
+                                                               updateEntry->manifestDigest};
+    auto journalBytes = cue::distribution::write_install_operation_journal(journal, a_assertContext);
+    require(journalBytes.has_value());
+    const std::filesystem::path journalPath =
+        installRoot / L"Operations" / L"Journals" / L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.json";
+    write_text(journalPath, *journalBytes.try_value());
+    write_text(installRoot / L"State" / L"InstalledVersions.json", "");
+
+    auto resumed = cue::distribution::install_windows_source_sdk(updateRequest, a_assertContext);
+    require(resumed.has_value() && !resumed.try_value()->wasAlreadyInstalled);
+    require(!std::filesystem::exists(journalPath));
+    const cue::distribution::InstalledVersionsRegistry recovered = read_registry(installRoot, a_assertContext);
+    require(recovered.revision == 2U && recovered.versions.size() == 2U);
+}
+
 /// @brief Read-only属性を持つPayloadとWorkerを属性保持したままInstallできることを検証する
 void test_read_only_payload_install(const cue::AssertContext &a_assertContext)
 {
@@ -939,6 +1032,8 @@ int main()
     cue::Logger logger(fatalHandler, std::move(sinks));
     cue::AssertContext assertContext(logger, fatalHandler);
     test_install_transaction(assertContext);
+    test_registry_recovery_resumes_published_install(assertContext);
+    test_registry_recovery_reconciles_pending_update(assertContext);
     test_read_only_payload_install(assertContext);
     test_worker_reparse_rejected(assertContext);
     test_probe_clears_lease_inheritance(assertContext);
