@@ -136,6 +136,8 @@ class WindowsInstalledVersionExecutionLease final
     ~WindowsInstalledVersionExecutionLease() noexcept;
     /// @brief 対象Childへ継承するNative Handle値を返す
     [[nodiscard]] std::uintptr_t native_handle() const noexcept;
+    /// @brief 検証からProcess作成完了までEditor Entry Pointを置換不能にするNative Handle値を返す
+    [[nodiscard]] std::uintptr_t native_editor_handle() const noexcept;
     /// @brief Leaseが保護するInstall Rootを返す
     [[nodiscard]] const std::string &install_root() const noexcept;
     /// @brief Leaseが保護するVersion Directoryを返す
@@ -164,7 +166,9 @@ class WindowsInstalledVersionExecutionLease final
         const WindowsInheritedVersionExecutionLeaseRequest &a_request,
         const AssertContext &a_assertContext) noexcept;
     /// @brief 検証済み共有Handle、Identity、Entry PointからLeaseを構築する
-    WindowsInstalledVersionExecutionLease(std::uintptr_t a_handle, std::string a_installRoot,
+    WindowsInstalledVersionExecutionLease(std::uintptr_t a_handle, std::uintptr_t a_editorHandle,
+                                          std::vector<std::uintptr_t> a_editorAncestryHandles,
+                                          std::string a_installRoot,
                                           std::string a_versionDirectory, std::string a_engineVersion,
                                           std::string a_bundleId, std::string a_manifestDigest,
                                           std::string a_editorExecutable, std::string a_engineSourceRoot,
@@ -172,6 +176,8 @@ class WindowsInstalledVersionExecutionLease final
                                           std::string a_publisherBuildIdentityDigest) noexcept;
 
     std::uintptr_t m_handle = 0U;
+    std::uintptr_t m_editorHandle = 0U;
+    std::vector<std::uintptr_t> m_editorAncestryHandles;
     std::string m_installRoot;
     std::string m_versionDirectory;
     std::string m_engineVersion;
@@ -182,6 +188,30 @@ class WindowsInstalledVersionExecutionLease final
     std::string m_engineSourceRevision;
     std::string m_sourceInventoryHash;
     std::string m_publisherBuildIdentityDigest;
+};
+
+/// @brief 一回のBuildが参照するInstalled Version全Payloadを置換不能に保つRAII Lease
+class WindowsInstalledSourceBuildLease final
+{
+  public:
+    WindowsInstalledSourceBuildLease() = delete;
+    WindowsInstalledSourceBuildLease(const WindowsInstalledSourceBuildLease &) = delete;
+    WindowsInstalledSourceBuildLease &operator=(const WindowsInstalledSourceBuildLease &) = delete;
+    /// @brief Native Handle群の所有権を移動する
+    WindowsInstalledSourceBuildLease(WindowsInstalledSourceBuildLease &&a_other) noexcept;
+    /// @brief 現在のHandle群を解放して所有権を移動する
+    WindowsInstalledSourceBuildLease &operator=(WindowsInstalledSourceBuildLease &&a_other) noexcept;
+    /// @brief Build入力を固定したNative Handle群を閉じる
+    ~WindowsInstalledSourceBuildLease() noexcept;
+
+  private:
+    friend Result<WindowsInstalledSourceBuildLease> acquire_windows_installed_source_build_lease(
+        const WindowsInstalledVersionExecutionLease &a_executionLease,
+        const AssertContext &a_assertContext) noexcept;
+    /// @brief 再検証済みVersion Payloadを固定するHandle群を所有する
+    explicit WindowsInstalledSourceBuildLease(std::vector<std::uintptr_t> a_handles) noexcept;
+
+    std::vector<std::uintptr_t> m_handles;
 };
 
 /// @brief 検証済みLocal Developer Source SDKを排他Install Transactionで導入する
@@ -212,6 +242,11 @@ class WindowsInstalledVersionExecutionLease final
 /// @brief 親から継承したExecution LeaseのFile Identityを検証しChild所有Leaseへ切れ目なく引き継ぐ
 [[nodiscard]] Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_execution_lease(
     const WindowsInheritedVersionExecutionLeaseRequest &a_request, const AssertContext &a_assertContext) noexcept;
+
+/// @brief Installed Version Inventoryを再検証し、一回のBuild完了まで全Payloadを置換不能にする
+[[nodiscard]] Result<WindowsInstalledSourceBuildLease> acquire_windows_installed_source_build_lease(
+    const WindowsInstalledVersionExecutionLease &a_executionLease,
+    const AssertContext &a_assertContext) noexcept;
 
 /// @brief 検証済みVersion外Workerへ回復可能Uninstall Transactionを委譲する
 [[nodiscard]] Result<WindowsUninstallOutcome> uninstall_windows_installed_version(

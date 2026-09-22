@@ -178,6 +178,13 @@ struct InstalledVersionLaunchPaths final
     std::string engineSourceRoot;
 };
 
+/// @brief Editor Entry Pointと全祖先DirectoryをProcess作成完了まで固定する
+struct LockedInstalledEditor final
+{
+    HandleOwner executable;
+    std::vector<std::uintptr_t> ancestryHandles;
+};
+
 /// @brief 検証時からChild終了まで置換を拒否するInstall Worker Evidence Handle群
 struct ValidatedInstallWorker final
 {
@@ -2128,6 +2135,39 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     return cue::Result<InstalledVersionLaunchPaths>::success(std::move(paths));
 }
 
+/// @brief 検証済みEntry PointをPath置換拒否Handleとして固定する
+[[nodiscard]] cue::Result<LockedInstalledEditor> lock_installed_editor_executable(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName,
+    const InstalledVersionSnapshot &a_snapshot, const cue::AssertContext &a_assertContext) noexcept
+{
+    const auto directoryName = to_wide(a_directoryName);
+    const auto editorRelativePath = to_wide(a_snapshot.bundle.manifest.entryPoints.editor);
+    if (!directoryName || !editorRelativePath)
+    {
+        return cue::Result<LockedInstalledEditor>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InvalidInstallState,
+                          "Installed Editor path is not valid UTF-8"));
+    }
+    const std::filesystem::path editorExecutable =
+        a_installRoot / L"Versions" / *directoryName / *editorRelativePath;
+    auto ancestry = cue::distribution::windows_detail::WindowsDirectoryAncestryLock::acquire(
+        editorExecutable.parent_path(), a_assertContext);
+    if (!ancestry)
+    {
+        return cue::Result<LockedInstalledEditor>::failure(std::move(*ancestry.try_error()));
+    }
+    HandleOwner handle(CreateFileW(win32_path(editorExecutable).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!handle.valid() || !handle_matches_plain_file(handle.get(), editorExecutable))
+    {
+        return cue::Result<LockedInstalledEditor>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Installed Editor executable could not be locked to its validated File Identity"));
+    }
+    LockedInstalledEditor locked{std::move(handle), ancestry.try_value()->take_handles()};
+    return cue::Result<LockedInstalledEditor>::success(std::move(locked));
+}
+
 /// @brief Recovery Source EvidenceがPublish直前にも一致するか返す
 [[nodiscard]] bool revalidate_source_evidence(const std::filesystem::path &a_installRoot,
                                               const cue::distribution::RegistrySourceEvidence &a_evidence,
@@ -3929,14 +3969,17 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
 namespace cue::distribution
 {
 WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
-    std::uintptr_t a_handle, std::string a_installRoot, std::string a_versionDirectory,
-    std::string a_engineVersion, std::string a_bundleId, std::string a_manifestDigest,
-    std::string a_editorExecutable, std::string a_engineSourceRoot, std::string a_engineSourceRevision,
-    std::string a_sourceInventoryHash, std::string a_publisherBuildIdentityDigest) noexcept
-    : m_handle(a_handle), m_installRoot(std::move(a_installRoot)), m_versionDirectory(std::move(a_versionDirectory)),
-      m_engineVersion(std::move(a_engineVersion)), m_bundleId(std::move(a_bundleId)),
-      m_manifestDigest(std::move(a_manifestDigest)), m_editorExecutable(std::move(a_editorExecutable)),
-      m_engineSourceRoot(std::move(a_engineSourceRoot)),
+    std::uintptr_t a_handle, std::uintptr_t a_editorHandle,
+    std::vector<std::uintptr_t> a_editorAncestryHandles, std::string a_installRoot,
+    std::string a_versionDirectory, std::string a_engineVersion, std::string a_bundleId,
+    std::string a_manifestDigest, std::string a_editorExecutable, std::string a_engineSourceRoot,
+    std::string a_engineSourceRevision, std::string a_sourceInventoryHash,
+    std::string a_publisherBuildIdentityDigest) noexcept
+    : m_handle(a_handle), m_editorHandle(a_editorHandle),
+      m_editorAncestryHandles(std::move(a_editorAncestryHandles)), m_installRoot(std::move(a_installRoot)),
+      m_versionDirectory(std::move(a_versionDirectory)), m_engineVersion(std::move(a_engineVersion)),
+      m_bundleId(std::move(a_bundleId)), m_manifestDigest(std::move(a_manifestDigest)),
+      m_editorExecutable(std::move(a_editorExecutable)), m_engineSourceRoot(std::move(a_engineSourceRoot)),
       m_engineSourceRevision(std::move(a_engineSourceRevision)),
       m_sourceInventoryHash(std::move(a_sourceInventoryHash)),
       m_publisherBuildIdentityDigest(std::move(a_publisherBuildIdentityDigest))
@@ -3945,7 +3988,10 @@ WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
 
 WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
     WindowsInstalledVersionExecutionLease &&a_other) noexcept
-    : m_handle(std::exchange(a_other.m_handle, 0U)), m_installRoot(std::move(a_other.m_installRoot)),
+    : m_handle(std::exchange(a_other.m_handle, 0U)),
+      m_editorHandle(std::exchange(a_other.m_editorHandle, 0U)),
+      m_editorAncestryHandles(std::move(a_other.m_editorAncestryHandles)),
+      m_installRoot(std::move(a_other.m_installRoot)),
       m_versionDirectory(std::move(a_other.m_versionDirectory)), m_engineVersion(std::move(a_other.m_engineVersion)),
       m_bundleId(std::move(a_other.m_bundleId)), m_manifestDigest(std::move(a_other.m_manifestDigest)),
       m_editorExecutable(std::move(a_other.m_editorExecutable)),
@@ -3954,6 +4000,7 @@ WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
       m_sourceInventoryHash(std::move(a_other.m_sourceInventoryHash)),
       m_publisherBuildIdentityDigest(std::move(a_other.m_publisherBuildIdentityDigest))
 {
+    a_other.m_editorAncestryHandles.clear();
 }
 
 WindowsInstalledVersionExecutionLease &WindowsInstalledVersionExecutionLease::operator=(
@@ -3965,7 +4012,18 @@ WindowsInstalledVersionExecutionLease &WindowsInstalledVersionExecutionLease::op
         {
             static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_handle)));
         }
+        if (m_editorHandle != 0U)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_editorHandle)));
+        }
+        for (const std::uintptr_t handle : m_editorAncestryHandles)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+        }
         m_handle = std::exchange(a_other.m_handle, 0U);
+        m_editorHandle = std::exchange(a_other.m_editorHandle, 0U);
+        m_editorAncestryHandles = std::move(a_other.m_editorAncestryHandles);
+        a_other.m_editorAncestryHandles.clear();
         m_installRoot = std::move(a_other.m_installRoot);
         m_versionDirectory = std::move(a_other.m_versionDirectory);
         m_engineVersion = std::move(a_other.m_engineVersion);
@@ -3986,11 +4044,24 @@ WindowsInstalledVersionExecutionLease::~WindowsInstalledVersionExecutionLease() 
     {
         static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_handle)));
     }
+    if (m_editorHandle != 0U)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_editorHandle)));
+    }
+    for (const std::uintptr_t handle : m_editorAncestryHandles)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+    }
 }
 
 std::uintptr_t WindowsInstalledVersionExecutionLease::native_handle() const noexcept
 {
     return m_handle;
+}
+
+std::uintptr_t WindowsInstalledVersionExecutionLease::native_editor_handle() const noexcept
+{
+    return m_editorHandle;
 }
 
 const std::string &WindowsInstalledVersionExecutionLease::install_root() const noexcept
@@ -4041,6 +4112,42 @@ const std::string &WindowsInstalledVersionExecutionLease::source_inventory_hash(
 const std::string &WindowsInstalledVersionExecutionLease::publisher_build_identity_digest() const noexcept
 {
     return m_publisherBuildIdentityDigest;
+}
+
+WindowsInstalledSourceBuildLease::WindowsInstalledSourceBuildLease(
+    std::vector<std::uintptr_t> a_handles) noexcept
+    : m_handles(std::move(a_handles))
+{
+}
+
+WindowsInstalledSourceBuildLease::WindowsInstalledSourceBuildLease(
+    WindowsInstalledSourceBuildLease &&a_other) noexcept
+    : m_handles(std::move(a_other.m_handles))
+{
+    a_other.m_handles.clear();
+}
+
+WindowsInstalledSourceBuildLease &WindowsInstalledSourceBuildLease::operator=(
+    WindowsInstalledSourceBuildLease &&a_other) noexcept
+{
+    if (this != &a_other)
+    {
+        for (const std::uintptr_t handle : m_handles)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+        }
+        m_handles = std::move(a_other.m_handles);
+        a_other.m_handles.clear();
+    }
+    return *this;
+}
+
+WindowsInstalledSourceBuildLease::~WindowsInstalledSourceBuildLease() noexcept
+{
+    for (const std::uintptr_t handle : m_handles)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+    }
 }
 
 Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallRequest &a_request,
@@ -4530,6 +4637,12 @@ Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_
         {
             return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*executionLease.try_error()));
         }
+        auto editorHandle =
+            lock_installed_editor_executable(*installRoot, a_request.versionDirectory, expected, a_assertContext);
+        if (!editorHandle)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*editorHandle.try_error()));
+        }
         auto revalidated = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
         if (!revalidated || revalidated.try_value()->registry != expected.registry ||
             revalidated.try_value()->entry != expected.entry ||
@@ -4562,7 +4675,9 @@ Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_
                 std::move(*publisherIdentityDigest.try_error()));
         }
         WindowsInstalledVersionExecutionLease lease(
-            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()), std::move(*encodedRoot),
+            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()),
+            reinterpret_cast<std::uintptr_t>(editorHandle.try_value()->executable.release()),
+            std::move(editorHandle.try_value()->ancestryHandles), std::move(*encodedRoot),
             a_request.versionDirectory, revalidated.try_value()->entry.engineVersion,
             revalidated.try_value()->entry.bundleId, revalidated.try_value()->entry.manifestDigest,
             std::move(paths.try_value()->editorExecutable), std::move(paths.try_value()->engineSourceRoot),
@@ -4640,6 +4755,12 @@ Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_ex
         {
             return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*executionLease.try_error()));
         }
+        auto editorHandle =
+            lock_installed_editor_executable(*installRoot, a_request.versionDirectory, expected, a_assertContext);
+        if (!editorHandle)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*editorHandle.try_error()));
+        }
         if (!has_same_file_identity(inheritedLease.get(), executionLease.try_value()->get()))
         {
             return Result<WindowsInstalledVersionExecutionLease>::failure(
@@ -4681,7 +4802,9 @@ Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_ex
                 std::move(*publisherIdentityDigest.try_error()));
         }
         WindowsInstalledVersionExecutionLease lease(
-            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()), std::move(*encodedRoot),
+            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()),
+            reinterpret_cast<std::uintptr_t>(editorHandle.try_value()->executable.release()),
+            std::move(editorHandle.try_value()->ancestryHandles), std::move(*encodedRoot),
             a_request.versionDirectory, revalidated.try_value()->entry.engineVersion,
             revalidated.try_value()->entry.bundleId, revalidated.try_value()->entry.manifestDigest,
             std::move(paths.try_value()->editorExecutable), std::move(paths.try_value()->engineSourceRoot),
@@ -4689,6 +4812,164 @@ Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_ex
             revalidated.try_value()->bundle.manifest.sourceInventoryHash,
             std::move(*publisherIdentityDigest.try_value()));
         return Result<WindowsInstalledVersionExecutionLease>::success(std::move(lease));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<WindowsInstalledSourceBuildLease> acquire_windows_installed_source_build_lease(
+    const WindowsInstalledVersionExecutionLease &a_executionLease,
+    const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        auto installRoot = normalize_absolute(a_executionLease.install_root());
+        auto sourceRoot = normalize_absolute(a_executionLease.engine_source_root());
+        const auto versionDirectory = to_wide(a_executionLease.version_directory());
+        if (!installRoot || !sourceRoot || !versionDirectory ||
+            !is_version_directory(a_executionLease.version_directory()))
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState,
+                "Installed Source Build lease request is invalid"));
+        }
+        const std::filesystem::path versionRoot = *installRoot / L"Versions" / *versionDirectory;
+        if (_wcsicmp(sourceRoot->native().c_str(), versionRoot.native().c_str()) != 0)
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InstallConflict,
+                "Installed Source Root does not match its Execution Lease"));
+        }
+        auto controlLease = acquire_shared_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(std::move(*controlLease.try_error()));
+        }
+        const std::filesystem::path journalsRoot = *installRoot / L"Operations" / L"Journals";
+        std::error_code journalError;
+        const std::filesystem::directory_iterator journal(extended_filesystem_path(journalsRoot), journalError);
+        if (journalError || journal != std::filesystem::directory_iterator{})
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InstallConflict,
+                "An incomplete Install operation blocks Installed Source Build"));
+        }
+        auto expected = read_installed_version(*installRoot, a_executionLease.version_directory(), false,
+                                               a_assertContext);
+        if (!expected || expected.try_value()->registry.selectedVersion != a_executionLease.version_directory() ||
+            expected.try_value()->entry.engineVersion != a_executionLease.engine_version() ||
+            expected.try_value()->entry.bundleId != a_executionLease.bundle_id() ||
+            expected.try_value()->entry.manifestDigest != a_executionLease.manifest_digest() ||
+            expected.try_value()->bundle.manifest.engineSourceRevision !=
+                a_executionLease.engine_source_revision() ||
+            expected.try_value()->bundle.manifest.sourceInventoryHash !=
+                a_executionLease.source_inventory_hash())
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(
+                expected ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                   "Installed Source Evidence changed before Build")
+                         : std::move(*expected.try_error()));
+        }
+        auto publisherDigest = make_publisher_build_identity_digest(
+            expected.try_value()->bundle.manifest.publisherBuildIdentity, a_assertContext);
+        if (!publisherDigest ||
+            *publisherDigest.try_value() != a_executionLease.publisher_build_identity_digest())
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(
+                publisherDigest ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                          "Installed Publisher Identity changed before Build")
+                                : std::move(*publisherDigest.try_error()));
+        }
+
+        auto ancestry = windows_detail::WindowsDirectoryAncestryLock::acquire(versionRoot, a_assertContext);
+        if (!ancestry)
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(std::move(*ancestry.try_error()));
+        }
+        std::vector<HandleOwner> lockedHandles;
+        lockedHandles.reserve(expected.try_value()->bundle.manifest.files.size() + 32U);
+        for (const std::uintptr_t handle : ancestry.try_value()->take_handles())
+        {
+            lockedHandles.emplace_back(reinterpret_cast<HANDLE>(handle));
+        }
+        const auto lock_directory = [&](const std::filesystem::path &a_path) -> bool
+        {
+            HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+            if (!handle.valid() || !handle_matches_plain_directory(handle.get(), a_path))
+            {
+                return false;
+            }
+            lockedHandles.push_back(std::move(handle));
+            return true;
+        };
+        const auto lock_file = [&](const std::filesystem::path &a_path) -> bool
+        {
+            HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                                           nullptr));
+            if (!handle.valid() || !handle_matches_plain_file(handle.get(), a_path))
+            {
+                return false;
+            }
+            lockedHandles.push_back(std::move(handle));
+            return true;
+        };
+        if (!lock_directory(versionRoot))
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InstallConflict,
+                "Installed Source Root could not be locked for Build"));
+        }
+        std::error_code enumerationError;
+        std::filesystem::recursive_directory_iterator entry(
+            extended_filesystem_path(versionRoot), std::filesystem::directory_options::none, enumerationError);
+        const std::filesystem::recursive_directory_iterator end;
+        while (!enumerationError && entry != end)
+        {
+            const bool isDirectory = entry->is_directory(enumerationError);
+            const bool isFile = !enumerationError && entry->is_regular_file(enumerationError);
+            if (lockedHandles.size() > k_maximumInstallEntries + 16U ||
+                (isDirectory && !lock_directory(entry->path())) || (isFile && !lock_file(entry->path())) ||
+                (!enumerationError && !isDirectory && !isFile))
+            {
+                return Result<WindowsInstalledSourceBuildLease>::failure(make_distribution_error(
+                    a_assertContext, DistributionError::InstallConflict,
+                    "Installed Source Inventory could not be locked for Build"));
+            }
+            entry.increment(enumerationError);
+        }
+        if (enumerationError)
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::PlatformOperationFailed,
+                "Installed Source Inventory enumeration failed"));
+        }
+        auto revalidated = read_installed_version(*installRoot, a_executionLease.version_directory(), false,
+                                                  a_assertContext);
+        if (!revalidated || revalidated.try_value()->registry != expected.try_value()->registry ||
+            revalidated.try_value()->entry != expected.try_value()->entry)
+        {
+            return Result<WindowsInstalledSourceBuildLease>::failure(
+                revalidated ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                      "Installed Source changed while acquiring its Build lease")
+                            : std::move(*revalidated.try_error()));
+        }
+        std::vector<std::uintptr_t> handles;
+        handles.reserve(lockedHandles.size());
+        for (HandleOwner &handle : lockedHandles)
+        {
+            handles.push_back(reinterpret_cast<std::uintptr_t>(handle.release()));
+        }
+        return Result<WindowsInstalledSourceBuildLease>::success(
+            WindowsInstalledSourceBuildLease(std::move(handles)));
     }
     catch (const std::bad_alloc &)
     {

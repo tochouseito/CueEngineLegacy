@@ -115,6 +115,37 @@ void append_argument(std::wstring &a_commandLine, std::wstring_view a_argument)
                                                           "Editor process did not complete normally", std::move(cause));
 }
 
+/// @brief Leaseが固定したEditor File Identityと起動Pathの現在対象が一致するか返す
+[[nodiscard]] bool matches_locked_editor_file(std::uintptr_t a_lockedHandle,
+                                              const std::wstring &a_executable) noexcept
+{
+    if (a_lockedHandle == 0U)
+    {
+        return false;
+    }
+    const HANDLE locked = reinterpret_cast<HANDLE>(a_lockedHandle);
+    const HANDLE current = CreateFileW(a_executable.c_str(), FILE_READ_ATTRIBUTES,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (current == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    BY_HANDLE_FILE_INFORMATION lockedIdentity{};
+    BY_HANDLE_FILE_INFORMATION currentIdentity{};
+    const bool matches =
+        GetFileInformationByHandleEx(current, FileAttributeTagInfo, &attributes, sizeof(attributes)) != FALSE &&
+        (attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
+        GetFileInformationByHandle(locked, &lockedIdentity) != FALSE &&
+        GetFileInformationByHandle(current, &currentIdentity) != FALSE &&
+        lockedIdentity.dwVolumeSerialNumber == currentIdentity.dwVolumeSerialNumber &&
+        lockedIdentity.nFileIndexHigh == currentIdentity.nFileIndexHigh &&
+        lockedIdentity.nFileIndexLow == currentIdentity.nFileIndexLow;
+    CloseHandle(current);
+    return matches;
+}
+
 /// @brief ProcessとPrimary Thread Handleを一意所有して非待機終了監視を提供する
 class WindowsEditorProcessImpl final : public cue::project_hub::WindowsEditorProcess
 {
@@ -272,7 +303,7 @@ Result<std::unique_ptr<WindowsEditorProcess>> launch_windows_editor_process(
     if (a_executionLease != nullptr)
     {
         if (a_editorExecutableLocator != a_executionLease->editor_executable() ||
-            a_executionLease->native_handle() == 0U)
+            a_executionLease->native_handle() == 0U || a_executionLease->native_editor_handle() == 0U)
         {
             return Result<std::unique_ptr<WindowsEditorProcess>>::failure(make_project_hub_error(
                 a_assertContext, ProjectHubError::EditorLaunchFailed,
@@ -361,6 +392,12 @@ Result<std::unique_ptr<WindowsEditorProcess>> launch_windows_editor_process(
     }
     else
     {
+        if (!matches_locked_editor_file(a_executionLease->native_editor_handle(), *executable.try_value()))
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(make_project_hub_error(
+                a_assertContext, ProjectHubError::EditorLaunchFailed,
+                "Installed Editor File Identity changed before process creation"));
+        }
         SIZE_T attributeBytes = 0U;
         static_cast<void>(InitializeProcThreadAttributeList(nullptr, 1U, 0U, &attributeBytes));
         if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || attributeBytes == 0U)

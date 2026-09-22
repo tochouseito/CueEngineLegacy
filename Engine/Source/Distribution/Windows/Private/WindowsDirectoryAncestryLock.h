@@ -33,6 +33,8 @@ class WindowsDirectoryAncestryLock final
 
     /// @brief 所有する全祖先Directory Handleを明示的に閉じる
     void release() noexcept;
+    /// @brief 所有する全祖先Directory Handleを閉じずに呼出元へ移動する
+    [[nodiscard]] std::vector<std::uintptr_t> take_handles() noexcept;
 
   private:
     /// @brief 検証済みNative Handle値の一意所有権を取得する

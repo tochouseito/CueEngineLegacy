@@ -1767,10 +1767,32 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
         require(executionLease.try_value()->engine_version() == removedEntry.engineVersion &&
                 executionLease.try_value()->bundle_id() == removedEntry.bundleId &&
                 executionLease.try_value()->manifest_digest() == removedEntry.manifestDigest &&
+                executionLease.try_value()->native_editor_handle() != 0U &&
                 executionLease.try_value()->engine_source_revision() == std::string(40U, 'b') &&
                 executionLease.try_value()->source_inventory_hash() == std::string(64U, '1') &&
                 executionLease.try_value()->publisher_build_identity_digest().size() == 64U &&
                 leasedEditor == expectedEditor);
+        HANDLE editorWriter = CreateFileW(extended_path(inspectedVersionRoot / L"Bin" / L"CueEditorTool.exe").c_str(),
+                                          GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                          FILE_ATTRIBUTE_NORMAL, nullptr);
+        require(editorWriter == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+        const std::filesystem::path renamedVersion = inspectedVersionRoot.native() + std::wstring(L".moved");
+        require(MoveFileExW(extended_path(inspectedVersionRoot).c_str(), extended_path(renamedVersion).c_str(), 0U) ==
+                FALSE);
+        const DWORD renameError = GetLastError();
+        require(renameError == ERROR_SHARING_VIOLATION || renameError == ERROR_ACCESS_DENIED);
+        {
+            auto buildLease = cue::distribution::acquire_windows_installed_source_build_lease(
+                *executionLease.try_value(), a_assertContext);
+            require(buildLease.has_value());
+            HANDLE sourceWriter = CreateFileW(extended_path(installedSource).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            require(sourceWriter == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+        }
+        HANDLE sourceWriter = CreateFileW(extended_path(installedSource).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        require(sourceWriter != INVALID_HANDLE_VALUE);
+        CloseHandle(sourceWriter);
         HANDLE inheritedHandle = nullptr;
         require(DuplicateHandle(GetCurrentProcess(),
                                 reinterpret_cast<HANDLE>(executionLease.try_value()->native_handle()),
@@ -1786,7 +1808,8 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
         auto adoptedLease =
             cue::distribution::adopt_windows_inherited_version_execution_lease(inheritedRequest, a_assertContext);
         require(adoptedLease.has_value());
-        require(adoptedLease.try_value()->engine_source_revision() ==
+        require(adoptedLease.try_value()->native_editor_handle() != 0U &&
+                adoptedLease.try_value()->engine_source_revision() ==
                     executionLease.try_value()->engine_source_revision() &&
                 adoptedLease.try_value()->source_inventory_hash() ==
                     executionLease.try_value()->source_inventory_hash() &&

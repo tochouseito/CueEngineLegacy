@@ -103,6 +103,36 @@ class BuildWorkspaceLease
     BuildWorkspaceLease() noexcept = default;
 };
 
+/// @brief 一回のBuildが参照する外部入力を完了まで置換不能に保つRAII Token
+class BuildInputLease
+{
+  public:
+    BuildInputLease(const BuildInputLease &) = delete;
+    BuildInputLease &operator=(const BuildInputLease &) = delete;
+    /// @brief 派生Leaseを通してPlatform固有Lockを解放する
+    virtual ~BuildInputLease() = default;
+
+  protected:
+    /// @brief 派生Leaseだけに構築を許可する
+    BuildInputLease() noexcept = default;
+};
+
+/// @brief Build開始直前に外部入力を再検証してBuild-scoped Leaseへ変換する境界
+class BuildInputLeaseProvider
+{
+  public:
+    BuildInputLeaseProvider(const BuildInputLeaseProvider &) = delete;
+    BuildInputLeaseProvider &operator=(const BuildInputLeaseProvider &) = delete;
+    /// @brief 派生Providerを正しく破棄する
+    virtual ~BuildInputLeaseProvider() = default;
+    /// @brief 検証済みPlanに対応する入力を再検証し、完了まで保持するLeaseを返す
+    [[nodiscard]] virtual Result<std::unique_ptr<BuildInputLease>> acquire(const BuildPlan &a_plan) noexcept = 0;
+
+  protected:
+    /// @brief 派生Providerだけに構築を許可する
+    BuildInputLeaseProvider() noexcept = default;
+};
+
 /// @brief Publish済み不変Build Target Artifact集合
 class BuildArtifactInventory final
 {
@@ -309,6 +339,12 @@ class GameBuildService final
     [[nodiscard]] static Result<std::unique_ptr<GameBuildService>> create(
         CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
         std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher, const AssertContext &a_assertContext) noexcept;
+    /// @brief Buildごとの外部入力再検証Providerも所有してIdle Serviceを構築する
+    [[nodiscard]] static Result<std::unique_ptr<GameBuildService>> create(
+        CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
+        std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher,
+        std::unique_ptr<BuildInputLeaseProvider> a_inputLeaseProvider,
+        const AssertContext &a_assertContext) noexcept;
 
     /// @brief 検証済みPlanを作り、単一Active OperationとしてWorker上で開始する
     ///

@@ -195,6 +195,67 @@ class WindowsBuildOperationIdSource final : public cue::editor::BuildOperationId
     const cue::AssertContext *m_assertContext;
 };
 
+/// @brief 一回のBuild中だけInstalled SourceのNative Lock群を所有するAdapter
+class InstalledSourceBuildInputLease final : public cue::BuildInputLease
+{
+  public:
+    /// @brief Distribution Leaseの所有権をBuild境界へ移す
+    explicit InstalledSourceBuildInputLease(
+        cue::distribution::WindowsInstalledSourceBuildLease a_lease) noexcept
+        : m_lease(std::move(a_lease))
+    {
+    }
+    /// @brief Distribution Leaseを通してNative Lock群を解放する
+    ~InstalledSourceBuildInputLease() override = default;
+
+  private:
+    cue::distribution::WindowsInstalledSourceBuildLease m_lease;
+};
+
+/// @brief Installed Version Evidenceを各Build開始時に再検証するProvider
+class InstalledSourceBuildInputLeaseProvider final : public cue::BuildInputLeaseProvider
+{
+  public:
+    /// @brief Editor全寿命で安定するExecution LeaseとFatal境界を借用する
+    InstalledSourceBuildInputLeaseProvider(
+        const cue::distribution::WindowsInstalledVersionExecutionLease &a_executionLease,
+        const cue::AssertContext &a_assertContext) noexcept
+        : m_executionLease(&a_executionLease), m_assertContext(&a_assertContext)
+    {
+    }
+    /// @brief 借用参照だけを解放する
+    ~InstalledSourceBuildInputLeaseProvider() override = default;
+
+    /// @brief Distribution Inventoryを再検証しBuild完了まで固定するLeaseを返す
+    [[nodiscard]] cue::Result<std::unique_ptr<cue::BuildInputLease>> acquire(
+        const cue::BuildPlan &a_plan) noexcept override
+    {
+        static_cast<void>(a_plan);
+        auto acquired = cue::distribution::acquire_windows_installed_source_build_lease(
+            *m_executionLease, *m_assertContext);
+        if (!acquired)
+        {
+            return cue::Result<std::unique_ptr<cue::BuildInputLease>>::failure(
+                std::move(*acquired.try_error()));
+        }
+        try
+        {
+            std::unique_ptr<cue::BuildInputLease> lease =
+                std::make_unique<InstalledSourceBuildInputLease>(std::move(*acquired.try_value()));
+            return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(std::move(lease));
+        }
+        catch (...)
+        {
+            m_assertContext->fatal_handler().terminate("Installed Source Build lease allocation failed");
+            std::abort();
+        }
+    }
+
+  private:
+    const cue::distribution::WindowsInstalledVersionExecutionLease *m_executionLease;
+    const cue::AssertContext *m_assertContext;
+};
+
 /// @brief 検証済みToolchain Reportから指定Kindの選択Toolを返す
 [[nodiscard]] const cue::BuildToolCandidate *find_tool(const cue::BuildEnvironmentReport &a_report,
                                                        cue::BuildToolKind a_kind) noexcept
@@ -1911,12 +1972,23 @@ class EditorToolClient final : public cue::tool_host::ToolHostClient
             cmake->nativePath,       environment.engineSourceRoot, std::move(environmentAllowlist),
             std::chrono::minutes(5), std::chrono::minutes(30),     *toolsetVersion};
         runnerSettings.buildsRuntimeHost = a_installedEngineLease != nullptr;
+        std::unique_ptr<cue::BuildInputLeaseProvider> buildInputLeaseProvider;
+        std::unique_ptr<cue::BuildInputLeaseProvider> packageInputLeaseProvider;
+        if (a_installedEngineLease != nullptr)
+        {
+            buildInputLeaseProvider = std::make_unique<InstalledSourceBuildInputLeaseProvider>(
+                *a_installedEngineLease, *m_assertContext);
+            packageInputLeaseProvider = std::make_unique<InstalledSourceBuildInputLeaseProvider>(
+                *a_installedEngineLease, *m_assertContext);
+        }
         cue::Result<std::unique_ptr<cue::GameBuildService>> service =
             cue::GameBuildService::create(runnerSettings, std::move(*processRunner.try_value()),
-                                          std::move(*artifactPublisher.try_value()), *m_assertContext);
+                                          std::move(*artifactPublisher.try_value()),
+                                          std::move(buildInputLeaseProvider), *m_assertContext);
         cue::Result<std::unique_ptr<cue::GameBuildService>> packageBuildService =
             cue::GameBuildService::create(std::move(runnerSettings), std::move(*packageBuildProcessRunner.try_value()),
-                                          std::move(*packageArtifactPublisher.try_value()), *m_assertContext);
+                                          std::move(*packageArtifactPublisher.try_value()),
+                                          std::move(packageInputLeaseProvider), *m_assertContext);
         if (!service || !packageBuildService)
         {
             cue::report_fatal(a_logger, m_assertContext->fatal_handler(), "Game Build Service initialization failed",
