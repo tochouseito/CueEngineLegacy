@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <new>
 #include <optional>
 #include <set>
@@ -36,6 +37,7 @@ constexpr std::wstring_view k_probeMarkerName = L"CueEngineProbe.complete.json";
 constexpr std::wstring_view k_workerMarkerName = L"CueEngineInstallWorker.complete.json";
 constexpr DWORD k_probeTimeoutMilliseconds = 120000U;
 constexpr DWORD k_probePollMilliseconds = 25U;
+constexpr DWORD k_workerGateTimeoutMilliseconds = 120000U;
 constexpr std::size_t k_maximumProbeDiagnosticBytes = 4096U;
 constexpr std::size_t k_maximumProbeDrainBytesPerPoll = 64U * 1024U;
 
@@ -79,6 +81,11 @@ class HandleOwner final
     [[nodiscard]] bool valid() const noexcept
     {
         return m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE;
+    }
+    /// @brief CloseせずNative Handle所有権を解放する
+    [[nodiscard]] HANDLE release() noexcept
+    {
+        return std::exchange(m_handle, INVALID_HANDLE_VALUE);
     }
     /// @brief 所有Handleを閉じて無効化する
     void reset() noexcept
@@ -125,6 +132,11 @@ class ControlLease final
     {
         return m_handle.get();
     }
+    /// @brief 排他Control Leaseを明示的に解放する
+    void release() noexcept
+    {
+        m_handle.reset();
+    }
 
   private:
     HandleOwner m_handle;
@@ -146,6 +158,14 @@ struct RegistrySnapshot final
     std::optional<cue::distribution::InstalledVersionsRegistry> registry;
     std::vector<std::byte> bytes;
     bool wasMissing = false;
+};
+
+/// @brief Registry EntryとVersion／Worker Evidenceを同じ検証Snapshotとして保持する
+struct InstalledVersionSnapshot final
+{
+    cue::distribution::InstalledVersionsRegistry registry;
+    cue::distribution::InstalledVersionEntry entry;
+    BundleSnapshot bundle;
 };
 
 /// @brief Allocation失敗をDistribution Fatalへ変換する
@@ -248,6 +268,12 @@ struct RegistrySnapshot final
     return L"\\\\?\\" + path;
 }
 
+/// @brief Standard LibraryのFilesystem操作へ渡すExtended-length Pathを返す
+[[nodiscard]] std::filesystem::path extended_filesystem_path(const std::filesystem::path &a_path)
+{
+    return std::filesystem::path(win32_path(a_path));
+}
+
 /// @brief Native File Handleが参照する正規DOS Pathを取得する
 [[nodiscard]] std::optional<std::wstring> handle_path(HANDLE a_handle)
 {
@@ -341,7 +367,8 @@ struct RegistrySnapshot final
     {
         std::vector<std::filesystem::path> temporaries;
         std::size_t entryCount = 0U;
-        for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(a_versionRoot))
+        for (const std::filesystem::directory_entry &entry :
+             std::filesystem::directory_iterator(extended_filesystem_path(a_versionRoot)))
         {
             ++entryCount;
             if (entryCount > k_maximumInstallEntries)
@@ -428,7 +455,7 @@ struct RegistrySnapshot final
 [[nodiscard]] cue::Result<void> ensure_managed_directories(const std::filesystem::path &a_installRoot,
                                                            const cue::AssertContext &a_assertContext) noexcept
 {
-    constexpr std::array<std::wstring_view, 10U> directories = {
+    constexpr std::array<std::wstring_view, 12U> directories = {
         L"State",
         L"Versions",
         L"Operations",
@@ -436,9 +463,11 @@ struct RegistrySnapshot final
         L"Operations/Staging",
         L"Operations/WorkerStaging",
         L"Operations/Workers",
+        L"Operations/ExecutionLeases",
         L"Operations/Evidence",
         L"Operations/Quarantine",
         L"Operations/Quarantine/Journals",
+        L"Operations/Quarantine/Versions",
     };
     for (std::wstring_view relative : directories)
     {
@@ -451,7 +480,7 @@ struct RegistrySnapshot final
                                                             "Install managed path is not a plain directory"));
         }
         std::error_code error;
-        std::filesystem::create_directories(path, error);
+        std::filesystem::create_directories(extended_filesystem_path(path), error);
         if (error || !is_plain_directory(path))
         {
             return cue::Result<void>::failure(
@@ -594,7 +623,7 @@ struct RegistrySnapshot final
                                                         "Atomic write operation ID could not be generated"));
     }
     std::error_code directoryError;
-    std::filesystem::create_directories(a_path.parent_path(), directoryError);
+    std::filesystem::create_directories(extended_filesystem_path(a_path.parent_path()), directoryError);
     if (directoryError)
     {
         return cue::Result<void>::failure(install_error(a_assertContext,
@@ -655,13 +684,43 @@ struct RegistrySnapshot final
     return write_atomic(a_path, std::span(begin, a_bytes.size()), a_assertContext);
 }
 
+/// @brief Native Handleが指定Plain Fileを直接参照するか検証する
+[[nodiscard]] bool handle_matches_plain_file(HANDLE a_handle, const std::filesystem::path &a_path) noexcept
+{
+    FILE_ATTRIBUTE_TAG_INFO attributeInfo{};
+    const auto finalPath = handle_path(a_handle);
+    const std::wstring expected = win32_path(a_path);
+    return GetFileInformationByHandleEx(a_handle, FileAttributeTagInfo, &attributeInfo, sizeof(attributeInfo)) !=
+               FALSE &&
+           (attributeInfo.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
+           finalPath && _wcsicmp(finalPath->c_str(), expected.c_str()) == 0;
+}
+
+/// @brief Versions直下へ入力可能なCanonical Directory名か返す
+[[nodiscard]] bool is_version_directory(std::string_view a_value) noexcept
+{
+    if (a_value.size() < 42U || a_value.front() != 'v')
+    {
+        return false;
+    }
+    const std::size_t separator = a_value.find("--", 1U);
+    if (separator == std::string_view::npos)
+    {
+        return false;
+    }
+    const std::string_view version = a_value.substr(1U, separator - 1U);
+    const std::string_view bundleId = a_value.substr(separator + 2U);
+    return cue::distribution::is_canonical_engine_version(version) &&
+           cue::distribution::is_canonical_bundle_id(bundleId);
+}
+
 /// @brief Fileを作成しないProcess間排他Control Leaseを取得する
 [[nodiscard]] cue::Result<ControlLease> acquire_control_lease(const std::filesystem::path &a_installRoot,
                                                               const cue::AssertContext &a_assertContext) noexcept
 {
     const std::filesystem::path operations = a_installRoot / L"Operations";
     std::error_code error;
-    std::filesystem::create_directories(operations, error);
+    std::filesystem::create_directories(extended_filesystem_path(operations), error);
     if (error || !is_plain_directory(operations))
     {
         return cue::Result<ControlLease>::failure(
@@ -687,16 +746,123 @@ struct RegistrySnapshot final
                               ? "Another Install operation owns the Control Lease"
                               : "Install Control Lease file could not be opened"));
     }
-    FILE_ATTRIBUTE_TAG_INFO attributeInfo{};
-    if (GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo, &attributeInfo, sizeof(attributeInfo)) ==
-            FALSE ||
-        (attributeInfo.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0U)
+    if (!handle_matches_plain_file(handle.get(), lockPath))
     {
         return cue::Result<ControlLease>::failure(install_error(a_assertContext,
                                                                 cue::distribution::DistributionError::InstallConflict,
                                                                 "Install Control Lease path is not a plain file"));
     }
     return cue::Result<ControlLease>::success(ControlLease(std::move(handle)));
+}
+
+/// @brief 起動検証中だけInstall Writerを拒否する共有Control Leaseを取得する
+[[nodiscard]] cue::Result<ControlLease> acquire_shared_control_lease(const std::filesystem::path &a_installRoot,
+                                                                     const cue::AssertContext &a_assertContext) noexcept
+{
+    const std::filesystem::path lockPath = a_installRoot / L"Operations" / L"CueEngine.control.lock";
+    HandleOwner handle(CreateFileW(win32_path(lockPath).c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!handle.valid())
+    {
+        return cue::Result<ControlLease>::failure(install_error(
+            a_assertContext,
+            GetLastError() == ERROR_SHARING_VIOLATION ? cue::distribution::DistributionError::InstallConflict
+                                                      : cue::distribution::DistributionError::PlatformOperationFailed,
+            "Install Control Lease could not be acquired for launch validation"));
+    }
+    if (!handle_matches_plain_file(handle.get(), lockPath))
+    {
+        return cue::Result<ControlLease>::failure(install_error(a_assertContext,
+                                                                cue::distribution::DistributionError::InstallConflict,
+                                                                "Install Control Lease path is not a plain file"));
+    }
+    return cue::Result<ControlLease>::success(ControlLease(std::move(handle)));
+}
+
+/// @brief Version固有Execution Lease File Pathを返す
+[[nodiscard]] std::filesystem::path execution_lease_path(const std::filesystem::path &a_installRoot,
+                                                         std::string_view a_directoryName)
+{
+    return a_installRoot / L"Operations" / L"ExecutionLeases" / (to_wide(a_directoryName).value_or(L"") + L".lock");
+}
+
+/// @brief 排他Control Lease下でVersion固有Execution Lease FileをPlain Fileとして用意する
+[[nodiscard]] cue::Result<void> ensure_execution_lease_file(const std::filesystem::path &a_installRoot,
+                                                            std::string_view a_directoryName,
+                                                            const cue::AssertContext &a_assertContext) noexcept
+{
+    const std::filesystem::path path = execution_lease_path(a_installRoot, a_directoryName);
+    HandleOwner handle(CreateFileW(win32_path(path).c_str(), GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!handle.valid() || !handle_matches_plain_file(handle.get(), path))
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Version Execution Lease file could not be prepared"));
+    }
+    return cue::Result<void>::success();
+}
+
+/// @brief Child Processへ継承する共有Version Execution Leaseを取得する
+[[nodiscard]] cue::Result<HandleOwner> acquire_shared_execution_lease(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    auto ensured = ensure_execution_lease_file(a_installRoot, a_directoryName, a_assertContext);
+    if (!ensured)
+    {
+        return cue::Result<HandleOwner>::failure(std::move(*ensured.try_error()));
+    }
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    const std::filesystem::path path = execution_lease_path(a_installRoot, a_directoryName);
+    HandleOwner handle(CreateFileW(win32_path(path).c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!handle.valid() || !handle_matches_plain_file(handle.get(), path))
+    {
+        return cue::Result<HandleOwner>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Shared Version Execution Lease could not be acquired"));
+    }
+    return cue::Result<HandleOwner>::success(std::move(handle));
+}
+
+/// @brief 新規起動を止めた状態で使用中Versionの終了を待ち排他Execution Leaseを取得する
+[[nodiscard]] cue::Result<HandleOwner> acquire_exclusive_execution_lease(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    const std::filesystem::path path = execution_lease_path(a_installRoot, a_directoryName);
+    const ULONGLONG startedAt = GetTickCount64();
+    while (true)
+    {
+        HandleOwner handle(CreateFileW(win32_path(path).c_str(), GENERIC_READ | GENERIC_WRITE, 0U, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (handle.valid())
+        {
+            if (!handle_matches_plain_file(handle.get(), path))
+            {
+                return cue::Result<HandleOwner>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                                  "Version Execution Lease path is not a plain file"));
+            }
+            return cue::Result<HandleOwner>::success(std::move(handle));
+        }
+        const DWORD code = GetLastError();
+        const bool isBusy = code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION;
+        if (!isBusy || GetTickCount64() - startedAt >= k_workerGateTimeoutMilliseconds)
+        {
+            return cue::Result<HandleOwner>::failure(
+                install_error(a_assertContext,
+                              isBusy ? cue::distribution::DistributionError::InstalledVersionBusy
+                                     : cue::distribution::DistributionError::PlatformOperationFailed,
+                              isBusy ? "Installed Version remained in use until the Uninstall timeout"
+                                     : "Exclusive Version Execution Lease could not be acquired"));
+        }
+        Sleep(k_probePollMilliseconds);
+    }
 }
 
 /// @brief File先頭からWindows x64 PE Machineを検証する
@@ -782,7 +948,9 @@ struct RegistrySnapshot final
     }
     try
     {
-        for (const std::filesystem::directory_entry &entry : std::filesystem::recursive_directory_iterator(a_root))
+        const std::filesystem::path traversalRoot = extended_filesystem_path(a_root);
+        for (const std::filesystem::directory_entry &entry :
+             std::filesystem::recursive_directory_iterator(traversalRoot))
         {
             const DWORD attributes = GetFileAttributesW(win32_path(entry.path()).c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U)
@@ -801,7 +969,7 @@ struct RegistrySnapshot final
                     install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                                   "Bundle contains an unsupported entry"));
             }
-            const std::filesystem::path relative = std::filesystem::relative(entry.path(), a_root);
+            const std::filesystem::path relative = std::filesystem::relative(entry.path(), traversalRoot);
             auto utf8 = to_utf8(relative.generic_wstring());
             if (!utf8)
             {
@@ -921,9 +1089,9 @@ struct RegistrySnapshot final
     }
     if (restoreReadOnly && SetFileAttributesW(path.c_str(), attributes) == FALSE)
     {
-        return cue::Result<void>::failure(install_error(a_assertContext,
-                                                        cue::distribution::DistributionError::PlatformOperationFailed,
-                                                        "Copied Install file read-only attribute could not be restored"));
+        return cue::Result<void>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Copied Install file read-only attribute could not be restored"));
     }
     if (!flushed)
     {
@@ -940,7 +1108,7 @@ struct RegistrySnapshot final
                                             const cue::AssertContext &a_assertContext) noexcept
 {
     std::error_code error;
-    std::filesystem::create_directories(a_destination, error);
+    std::filesystem::create_directories(extended_filesystem_path(a_destination), error);
     if (error)
     {
         return cue::Result<void>::failure(install_error(a_assertContext,
@@ -957,7 +1125,7 @@ struct RegistrySnapshot final
     {
         const std::filesystem::path relativePath = to_wide(relative).value_or(L"");
         const std::filesystem::path destination = a_destination / relativePath;
-        std::filesystem::create_directories(destination.parent_path(), error);
+        std::filesystem::create_directories(extended_filesystem_path(destination.parent_path()), error);
         if (error ||
             CopyFileW(win32_path(a_source / relativePath).c_str(), win32_path(destination).c_str(), TRUE) == FALSE)
         {
@@ -1411,6 +1579,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                                                   const cue::AssertContext &a_assertContext) noexcept
 {
     const std::filesystem::path executable = a_versionRoot / L"Bin" / L"CueEngineInstallerTool.exe";
+    const std::wstring executableNative = win32_path(executable);
     const auto installUtf8 = to_utf8(a_installRoot.native());
     if (!installUtf8)
     {
@@ -1418,7 +1587,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
                                                         "Install Root could not be encoded for Probe"));
     }
-    std::wstring command = quote_argument(executable.native());
+    std::wstring command = quote_argument(executableNative);
     const std::array<std::string, 11U> arguments = {
         "--install-probe",
         "--lease-handle",
@@ -1507,11 +1676,9 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
                                                         "Install Probe environment could not be constructed"));
     }
-    const std::wstring executableNative = win32_path(executable);
-    const std::wstring versionRootNative = win32_path(a_versionRoot);
     const BOOL created = CreateProcessW(executableNative.c_str(), command.data(), nullptr, nullptr, TRUE,
                                         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-                                        environment->data(), versionRootNative.c_str(), &startup.StartupInfo, &process);
+                                        environment->data(), nullptr, &startup.StartupInfo, &process);
     DeleteProcThreadAttributeList(attributes);
     if (created == FALSE)
     {
@@ -1620,6 +1787,52 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
         std::pair(std::move(*executableDigest.try_value()), std::move(*markerDigest.try_value())));
 }
 
+/// @brief Payload Cleanup後もJournalと外部Workerの固定Identityを再検証する
+[[nodiscard]] cue::Result<void> validate_worker_for_journal(const std::filesystem::path &a_installRoot,
+                                                            const cue::distribution::InstallOperationJournal &a_journal,
+                                                            const cue::AssertContext &a_assertContext) noexcept
+{
+    const std::filesystem::path workerRoot =
+        a_installRoot / L"Operations" / L"Workers" / to_wide(a_journal.workerId).value_or(L"");
+    const std::filesystem::path executable = workerRoot / L"CueEngineInstallWorker.exe";
+    const std::filesystem::path markerPath = workerRoot / k_workerMarkerName;
+    if (!is_plain_directory(workerRoot) || !is_plain_file(executable) || !is_plain_file(markerPath))
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::BundleValidationFailed,
+                                                        "Uninstall Worker evidence is not plain"));
+    }
+    auto markerText = read_text(markerPath, a_assertContext);
+    if (!markerText)
+    {
+        return cue::Result<void>::failure(std::move(*markerText.try_error()));
+    }
+    auto marker = cue::distribution::read_install_worker_marker(*markerText.try_value(), a_assertContext);
+    if (!marker || marker.try_value()->workerId != a_journal.workerId ||
+        marker.try_value()->bundleId != a_journal.target->bundleId)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::BundleValidationFailed,
+                                                        "Uninstall Worker marker does not match its Journal"));
+    }
+    auto executableBytes = read_file(executable, k_maximumPayloadBytes, a_assertContext);
+    if (!executableBytes || executableBytes.try_value()->size() != marker.try_value()->executable.byteSize ||
+        !is_x64_pe(*executableBytes.try_value()))
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::BundleValidationFailed,
+                                                        "Uninstall Worker executable is invalid"));
+    }
+    auto executableDigest = hash_bytes(*executableBytes.try_value(), a_assertContext);
+    if (!executableDigest || *executableDigest.try_value() != marker.try_value()->executable.sha256)
+    {
+        return cue::Result<void>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
+                          "Uninstall Worker executable digest does not match its marker"));
+    }
+    return cue::Result<void>::success();
+}
+
 /// @brief ManifestのInstall WorkerをOperation Stagingで検証してVersion外へAtomic Publishする
 [[nodiscard]] cue::Result<std::pair<std::string, std::string>> publish_worker(
     const std::filesystem::path &a_installRoot, const std::filesystem::path &a_versionRoot,
@@ -1635,9 +1848,9 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
         a_installRoot / L"Operations" / L"WorkerStaging" / to_wide(a_operationId).value_or(L"");
     const std::filesystem::path stagingRoot = stagingParent / to_wide(a_bundle.workerId).value_or(L"");
     std::error_code error;
-    std::filesystem::remove_all(stagingParent, error);
+    std::filesystem::remove_all(extended_filesystem_path(stagingParent), error);
     error.clear();
-    std::filesystem::create_directories(stagingRoot, error);
+    std::filesystem::create_directories(extended_filesystem_path(stagingRoot), error);
     const std::filesystem::path stagedExecutable = stagingRoot / L"CueEngineInstallWorker.exe";
     if (error || CopyFileW(win32_path(a_versionRoot / to_wide(a_bundle.worker.relativePath).value_or(L"")).c_str(),
                            win32_path(stagedExecutable).c_str(), TRUE) == FALSE)
@@ -1678,7 +1891,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     {
         return validated;
     }
-    std::filesystem::create_directories(finalRoot.parent_path(), error);
+    std::filesystem::create_directories(extended_filesystem_path(finalRoot.parent_path()), error);
     if (error)
     {
         return cue::Result<std::pair<std::string, std::string>>::failure(
@@ -1694,7 +1907,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
         }
         return cue::Result<std::pair<std::string, std::string>>::failure(std::move(*published.try_error()));
     }
-    std::filesystem::remove_all(stagingParent, error);
+    std::filesystem::remove_all(extended_filesystem_path(stagingParent), error);
     return validate_worker(finalRoot, a_bundle, a_assertContext);
 }
 
@@ -1730,6 +1943,60 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
         cue::distribution::InstalledVersionState::Selectable,
     };
     return cue::Result<cue::distribution::InstalledVersionEntry>::success(std::move(entry));
+}
+
+/// @brief Registry EntryとVersion／Worker Evidenceを一つの再検証Snapshotとして読み込む
+[[nodiscard]] cue::Result<InstalledVersionSnapshot> read_installed_version(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName, bool a_allowPendingRemoval,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    if (!is_version_directory(a_directoryName))
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(
+            install_error(a_assertContext, DistributionError::InvalidInstallState,
+                          "Installed Version directory identity is invalid"));
+    }
+    auto registrySnapshot = read_registry(a_installRoot, a_assertContext);
+    if (!registrySnapshot || !registrySnapshot.try_value()->registry)
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(
+            registrySnapshot ? install_error(a_assertContext, DistributionError::InvalidInstallState,
+                                             "Installed Versions Registry is unavailable")
+                             : std::move(*registrySnapshot.try_error()));
+    }
+    InstalledVersionsRegistry registry = std::move(*registrySnapshot.try_value()->registry);
+    const auto found = std::ranges::find_if(registry.versions, [a_directoryName](const InstalledVersionEntry &a_entry)
+                                            { return a_entry.directoryName == a_directoryName; });
+    if (found == registry.versions.end() ||
+        (!a_allowPendingRemoval && found->state != InstalledVersionState::Selectable))
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(
+            install_error(a_assertContext, DistributionError::InvalidInstallState,
+                          "Installed Version is not selectable in the Registry"));
+    }
+    const InstalledVersionEntry entry = *found;
+    const std::filesystem::path versionRoot = a_installRoot / L"Versions" / to_wide(a_directoryName).value_or(L"");
+    auto bundle = validate_bundle(versionRoot, true, a_assertContext);
+    if (!bundle)
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(std::move(*bundle.try_error()));
+    }
+    auto rebuilt =
+        build_version_entry(a_installRoot, versionRoot, *bundle.try_value(), a_directoryName, a_assertContext);
+    if (!rebuilt)
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(std::move(*rebuilt.try_error()));
+    }
+    rebuilt.try_value()->state = entry.state;
+    if (*rebuilt.try_value() != entry)
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(
+            install_error(a_assertContext, DistributionError::InstallConflict,
+                          "Installed Version Evidence does not match the Registry"));
+    }
+    InstalledVersionSnapshot snapshot{std::move(registry), entry, std::move(*bundle.try_value())};
+    return cue::Result<InstalledVersionSnapshot>::success(std::move(snapshot));
 }
 
 /// @brief Recovery Source EvidenceがPublish直前にも一致するか返す
@@ -1832,7 +2099,7 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     }
     const std::filesystem::path quarantineRoot = a_installRoot / L"Operations" / L"Quarantine" / L"Journals";
     std::error_code error;
-    std::filesystem::create_directories(quarantineRoot, error);
+    std::filesystem::create_directories(extended_filesystem_path(quarantineRoot), error);
     if (error || !is_plain_directory(quarantineRoot))
     {
         return cue::Result<void>::failure(
@@ -1859,7 +2126,7 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
     const std::filesystem::path root = a_installRoot / L"Operations" / L"Journals";
     const std::filesystem::path quarantineRoot = a_installRoot / L"Operations" / L"Quarantine" / L"Journals";
     std::error_code error;
-    std::filesystem::create_directories(root, error);
+    std::filesystem::create_directories(extended_filesystem_path(root), error);
     if (error)
     {
         return cue::Result<decltype(result)>::failure(
@@ -1868,14 +2135,16 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
     }
     try
     {
-        if (std::filesystem::directory_iterator(quarantineRoot) != std::filesystem::directory_iterator{})
+        if (std::filesystem::directory_iterator(extended_filesystem_path(quarantineRoot)) !=
+            std::filesystem::directory_iterator{})
         {
             return cue::Result<decltype(result)>::failure(
                 install_error(a_assertContext, cue::distribution::DistributionError::InstallRecoveryBlocked,
                               "Quarantined Install Journal requires explicit repair"));
         }
         std::vector<std::filesystem::path> journalPaths;
-        for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(root))
+        for (const std::filesystem::directory_entry &entry :
+             std::filesystem::directory_iterator(extended_filesystem_path(root)))
         {
             if (journalPaths.size() >= k_maximumInstallEntries)
             {
@@ -2184,9 +2453,8 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                     return cue::Result<InstalledVersionsRegistry>::failure(std::move(*written.try_error()));
                 }
             }
-            const std::filesystem::path reconciledPath =
-                a_installRoot / L"Operations" / L"Journals" /
-                (to_wide(reconciled.operationId).value_or(L"") + L".json");
+            const std::filesystem::path reconciledPath = a_installRoot / L"Operations" / L"Journals" /
+                                                         (to_wide(reconciled.operationId).value_or(L"") + L".json");
             auto durable = read_journal(reconciledPath, a_assertContext);
             if (!durable || durable.try_value()->first != reconciled)
             {
@@ -2195,9 +2463,9 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                                             "Reconciled Install Journal could not be revalidated")
                             : std::move(*durable.try_error()));
             }
-            journal.blockedOperations.push_back(
-                {reconciled.operationId, reconciled.kind, reconciled.target->directoryName, reconciled.stage,
-                 std::move(durable.try_value()->second)});
+            journal.blockedOperations.push_back({reconciled.operationId, reconciled.kind,
+                                                 reconciled.target->directoryName, reconciled.stage,
+                                                 std::move(durable.try_value()->second)});
             blockedDirectories.insert(current.first.target->directoryName);
         }
         for (const BlockedInstallOperation &blocked : journal.blockedOperations)
@@ -2209,14 +2477,14 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
         }
         const std::filesystem::path versions = a_installRoot / L"Versions";
         std::error_code error;
-        std::filesystem::create_directories(versions, error);
+        std::filesystem::create_directories(extended_filesystem_path(versions), error);
         if (error)
         {
             return cue::Result<InstalledVersionsRegistry>::failure(
                 install_error(a_assertContext, DistributionError::PlatformOperationFailed,
                               "Versions directory could not be created for Registry Recovery"));
         }
-        std::filesystem::directory_iterator iterator(versions, error);
+        std::filesystem::directory_iterator iterator(extended_filesystem_path(versions), error);
         const std::filesystem::directory_iterator end;
         std::size_t versionCount = 0U;
         for (; !error && iterator != end; iterator.increment(error))
@@ -2437,6 +2705,118 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
     return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::success(std::move(result));
 }
 
+/// @brief RollbackまたはUninstallの同一Version未完了Journalだけを検索する
+[[nodiscard]] cue::Result<std::optional<cue::distribution::InstallOperationJournal>> find_version_operation_journal(
+    const std::filesystem::path &a_installRoot, cue::distribution::InstallOperationKind a_kind,
+    const cue::distribution::InstalledVersionEntry &a_entry, std::string_view a_workerId,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    auto journals = read_all_journals(a_installRoot, a_assertContext);
+    if (!journals)
+    {
+        return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::failure(
+            std::move(*journals.try_error()));
+    }
+    std::optional<cue::distribution::InstallOperationJournal> result;
+    for (const auto &item : *journals.try_value())
+    {
+        const auto &journal = item.first;
+        if (journal.kind == a_kind && journal.target && journal.target->directoryName == a_entry.directoryName)
+        {
+            if (result || journal.target->bundleId != a_entry.bundleId ||
+                journal.target->manifestDigest != a_entry.manifestDigest || journal.workerId != a_workerId)
+            {
+                return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                                  "Incomplete Version operation Journal identity does not match"));
+            }
+            result = journal;
+            continue;
+        }
+        return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Another incomplete Install operation requires recovery"));
+    }
+    return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::success(std::move(result));
+}
+
+/// @brief 指定Versionの未完了Uninstall Journalだけを読取る
+[[nodiscard]] cue::Result<std::optional<cue::distribution::InstallOperationJournal>> find_uninstall_journal(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    auto journals = read_all_journals(a_installRoot, a_assertContext);
+    if (!journals)
+    {
+        return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::failure(
+            std::move(*journals.try_error()));
+    }
+    std::optional<cue::distribution::InstallOperationJournal> result;
+    std::size_t recoveryCount = 0U;
+    for (const auto &item : *journals.try_value())
+    {
+        const auto &journal = item.first;
+        if (journal.kind == cue::distribution::InstallOperationKind::RegistryRecovery)
+        {
+            if (++recoveryCount > 1U)
+            {
+                return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::InstallRecoveryBlocked,
+                                  "Multiple Registry Recovery Journals exist"));
+            }
+            continue;
+        }
+        if (journal.kind == cue::distribution::InstallOperationKind::Uninstall && journal.target &&
+            journal.target->directoryName == a_directoryName && !result)
+        {
+            result = journal;
+            continue;
+        }
+        return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Another incomplete Install operation requires recovery"));
+    }
+    return cue::Result<std::optional<cue::distribution::InstallOperationJournal>>::success(std::move(result));
+}
+
+/// @brief Operation IDとWorker IDが一致する単一Uninstall Journalを読取る
+[[nodiscard]] cue::Result<cue::distribution::InstallOperationJournal> read_worker_uninstall_journal(
+    const std::filesystem::path &a_installRoot, std::string_view a_operationId, std::string_view a_workerId,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    auto journals = read_all_journals(a_installRoot, a_assertContext);
+    if (!journals)
+    {
+        return cue::Result<cue::distribution::InstallOperationJournal>::failure(std::move(*journals.try_error()));
+    }
+    std::optional<cue::distribution::InstallOperationJournal> result;
+    std::size_t recoveryCount = 0U;
+    for (const auto &item : *journals.try_value())
+    {
+        const cue::distribution::InstallOperationJournal &journal = item.first;
+        if (journal.kind == cue::distribution::InstallOperationKind::RegistryRecovery && ++recoveryCount <= 1U)
+        {
+            continue;
+        }
+        if (!result && journal.kind == cue::distribution::InstallOperationKind::Uninstall && journal.target &&
+            journal.operationId == a_operationId && journal.workerId == a_workerId)
+        {
+            result = journal;
+            continue;
+        }
+        return cue::Result<cue::distribution::InstallOperationJournal>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Uninstall Worker requires exactly one matching Journal"));
+    }
+    if (!result)
+    {
+        return cue::Result<cue::distribution::InstallOperationJournal>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Uninstall Worker Journal is missing"));
+    }
+    return cue::Result<cue::distribution::InstallOperationJournal>::success(std::move(*result));
+}
+
 /// @brief RegistryへVersion EntryをExpected Generation／Revision照合付きでPublishする
 [[nodiscard]] cue::Result<std::uint64_t> publish_registry_entry(
     const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
@@ -2523,14 +2903,14 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
         a_installRoot / L"Operations" / L"Staging" / to_wide(a_operationId).value_or(L"");
     const std::filesystem::path workerStaging =
         a_installRoot / L"Operations" / L"WorkerStaging" / to_wide(a_operationId).value_or(L"");
-    std::filesystem::remove_all(staging, error);
+    std::filesystem::remove_all(extended_filesystem_path(staging), error);
     if (error)
     {
         return cue::Result<void>::failure(install_error(a_assertContext,
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
                                                         "Install Version Staging cleanup failed"));
     }
-    std::filesystem::remove_all(workerStaging, error);
+    std::filesystem::remove_all(extended_filesystem_path(workerStaging), error);
     if (error)
     {
         return cue::Result<void>::failure(install_error(a_assertContext,
@@ -2546,6 +2926,519 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                                                         "Completed Install Journal cleanup failed"));
     }
     return cue::Result<void>::success();
+}
+
+/// @brief Rollback Journalを選択Publishから最終再検証まで冪等再開する
+[[nodiscard]] cue::Result<cue::distribution::WindowsRollbackOutcome> execute_rollback(
+    const std::filesystem::path &a_installRoot, cue::distribution::InstallOperationJournal a_journal,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    const std::string &directoryName = a_journal.target->directoryName;
+    if (a_journal.expectedRegistry->revision == std::numeric_limits<std::uint64_t>::max())
+    {
+        return cue::Result<WindowsRollbackOutcome>::failure(
+            install_error(a_assertContext, DistributionError::ResourceLimitExceeded,
+                          "Installed Versions Registry revision cannot advance for Rollback"));
+    }
+    if (a_journal.stage == InstallOperationStage::Prepared)
+    {
+        auto snapshot = read_installed_version(a_installRoot, directoryName, false, a_assertContext);
+        if (!snapshot || snapshot.try_value()->entry.bundleId != a_journal.target->bundleId ||
+            snapshot.try_value()->entry.manifestDigest != a_journal.target->manifestDigest ||
+            snapshot.try_value()->entry.workerId != a_journal.workerId)
+        {
+            return cue::Result<WindowsRollbackOutcome>::failure(
+                snapshot ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                         "Rollback target Evidence changed")
+                         : std::move(*snapshot.try_error()));
+        }
+        InstalledVersionsRegistry registry = std::move(snapshot.try_value()->registry);
+        if (registry.generationId == a_journal.expectedRegistry->generationId &&
+            registry.revision == a_journal.expectedRegistry->revision && registry.selectedVersion != directoryName)
+        {
+            registry.selectedVersion = directoryName;
+            ++registry.revision;
+            auto published = write_registry(a_installRoot, registry, a_assertContext);
+            if (!published)
+            {
+                return cue::Result<WindowsRollbackOutcome>::failure(std::move(*published.try_error()));
+            }
+        }
+        auto selected = read_installed_version(a_installRoot, directoryName, false, a_assertContext);
+        if (!selected || selected.try_value()->registry.generationId != a_journal.expectedRegistry->generationId ||
+            selected.try_value()->registry.revision != a_journal.expectedRegistry->revision + 1U ||
+            selected.try_value()->registry.selectedVersion != directoryName)
+        {
+            return cue::Result<WindowsRollbackOutcome>::failure(
+                selected ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                         "Rollback selection Publish could not be revalidated")
+                         : std::move(*selected.try_error()));
+        }
+        auto advanced =
+            advance_journal(a_installRoot, a_journal, InstallOperationStage::SelectionPublished, a_assertContext);
+        if (!advanced)
+        {
+            return cue::Result<WindowsRollbackOutcome>::failure(std::move(*advanced.try_error()));
+        }
+    }
+    auto selected = read_installed_version(a_installRoot, directoryName, false, a_assertContext);
+    if (!selected || selected.try_value()->registry.generationId != a_journal.expectedRegistry->generationId ||
+        selected.try_value()->registry.revision != a_journal.expectedRegistry->revision + 1U ||
+        selected.try_value()->registry.selectedVersion != directoryName ||
+        selected.try_value()->entry.bundleId != a_journal.target->bundleId ||
+        selected.try_value()->entry.manifestDigest != a_journal.target->manifestDigest ||
+        selected.try_value()->entry.workerId != a_journal.workerId)
+    {
+        return cue::Result<WindowsRollbackOutcome>::failure(
+            selected ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                     "Completed Rollback state could not be revalidated")
+                     : std::move(*selected.try_error()));
+    }
+    const std::uint64_t registryRevision = selected.try_value()->registry.revision;
+    auto cleaned = cleanup_operation(a_installRoot, a_journal.operationId, a_assertContext);
+    if (!cleaned)
+    {
+        return cue::Result<WindowsRollbackOutcome>::failure(std::move(*cleaned.try_error()));
+    }
+    WindowsRollbackOutcome outcome{a_journal.operationId, directoryName, registryRevision, false};
+    return cue::Result<WindowsRollbackOutcome>::success(std::move(outcome));
+}
+
+/// @brief Uninstall完了時に許可する通常またはRegistry Recovery後のRevisionか返す
+[[nodiscard]] bool is_completed_uninstall_revision(std::uint64_t a_revision, std::uint64_t a_expectedRevision) noexcept
+{
+    const bool recoveredRevision = a_revision == a_expectedRevision;
+    const bool canAdvance = a_expectedRevision <= std::numeric_limits<std::uint64_t>::max() - 2U;
+    return recoveredRevision || (canAdvance && a_revision == a_expectedRevision + 2U);
+}
+
+/// @brief Uninstall Journal対象VersionのQuarantine PathをOperation Identityから導出する
+[[nodiscard]] std::filesystem::path uninstall_quarantine_path(
+    const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal)
+{
+    return a_installRoot / L"Operations" / L"Quarantine" / L"Versions" /
+           (to_wide(a_journal.target->directoryName).value_or(L"") + L"--" +
+            to_wide(a_journal.operationId).value_or(L""));
+}
+
+/// @brief Uninstall Journal IdentityとPayload／Worker Evidenceの一致を検証する
+[[nodiscard]] cue::Result<std::pair<BundleSnapshot, cue::distribution::InstalledVersionEntry>>
+validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std::filesystem::path &a_payloadRoot,
+                           const cue::distribution::InstallOperationJournal &a_journal,
+                           const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    auto bundle = validate_bundle(a_payloadRoot, true, a_assertContext);
+    if (!bundle)
+    {
+        return cue::Result<std::pair<BundleSnapshot, InstalledVersionEntry>>::failure(std::move(*bundle.try_error()));
+    }
+    auto entry = build_version_entry(a_installRoot, a_payloadRoot, *bundle.try_value(), a_journal.target->directoryName,
+                                     a_assertContext);
+    if (!entry)
+    {
+        return cue::Result<std::pair<BundleSnapshot, InstalledVersionEntry>>::failure(std::move(*entry.try_error()));
+    }
+    if (entry.try_value()->bundleId != a_journal.target->bundleId ||
+        entry.try_value()->manifestDigest != a_journal.target->manifestDigest ||
+        entry.try_value()->workerId != a_journal.workerId)
+    {
+        return cue::Result<std::pair<BundleSnapshot, InstalledVersionEntry>>::failure(
+            install_error(a_assertContext, DistributionError::InstallConflict,
+                          "Uninstall target Evidence does not match its Journal"));
+    }
+    return cue::Result<std::pair<BundleSnapshot, InstalledVersionEntry>>::success(
+        std::pair(std::move(*bundle.try_value()), std::move(*entry.try_value())));
+}
+
+/// @brief Selectable VersionをPendingRemovalへ変更して新規起動を停止する
+[[nodiscard]] cue::Result<void> publish_removal_block(const std::filesystem::path &a_installRoot,
+                                                      const cue::distribution::InstallOperationJournal &a_journal,
+                                                      const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    auto snapshot = read_registry(a_installRoot, a_assertContext);
+    if (!snapshot || !snapshot.try_value()->registry)
+    {
+        return cue::Result<void>::failure(
+            snapshot ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                     "Installed Versions Registry is unavailable during Uninstall")
+                     : std::move(*snapshot.try_error()));
+    }
+    InstalledVersionsRegistry registry = std::move(*snapshot.try_value()->registry);
+    const auto target = std::ranges::find_if(registry.versions, [&a_journal](const InstalledVersionEntry &a_entry)
+                                             { return a_entry.directoryName == a_journal.target->directoryName; });
+    if (target == registry.versions.end())
+    {
+        if (registry.generationId != a_journal.expectedRegistry->generationId ||
+            registry.revision != a_journal.expectedRegistry->revision)
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                            "Recovered Registry does not match the Uninstall Journal"));
+        }
+        return cue::Result<void>::success();
+    }
+    if (target->bundleId != a_journal.target->bundleId || target->manifestDigest != a_journal.target->manifestDigest ||
+        target->workerId != a_journal.workerId)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                        "Uninstall Registry Entry identity changed"));
+    }
+    if (target->state == InstalledVersionState::Selectable)
+    {
+        if (a_journal.expectedRegistry->revision > std::numeric_limits<std::uint64_t>::max() - 2U)
+        {
+            return cue::Result<void>::failure(
+                install_error(a_assertContext, DistributionError::ResourceLimitExceeded,
+                              "Installed Versions Registry revision cannot advance for Uninstall"));
+        }
+        if (registry.generationId != a_journal.expectedRegistry->generationId ||
+            registry.revision != a_journal.expectedRegistry->revision)
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                            "Installed Versions Registry changed before Uninstall"));
+        }
+        const auto replacement =
+            std::ranges::find_if(registry.versions,
+                                 [&a_journal](const InstalledVersionEntry &a_entry)
+                                 {
+                                     return a_entry.directoryName != a_journal.target->directoryName &&
+                                            a_entry.state == InstalledVersionState::Selectable;
+                                 });
+        if (replacement == registry.versions.end())
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext,
+                                                            DistributionError::InstalledVersionProtected,
+                                                            "The last selectable Installed Version cannot be removed"));
+        }
+        target->state = InstalledVersionState::PendingRemoval;
+        if (registry.selectedVersion == target->directoryName)
+        {
+            registry.selectedVersion = replacement->directoryName;
+        }
+        ++registry.revision;
+        auto published = write_registry(a_installRoot, registry, a_assertContext);
+        if (!published)
+        {
+            return cue::Result<void>::failure(std::move(*published.try_error()));
+        }
+    }
+    auto durable = read_registry(a_installRoot, a_assertContext);
+    if (!durable || !durable.try_value()->registry)
+    {
+        return cue::Result<void>::failure(durable ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                                                  "PendingRemoval Registry Publish is unavailable")
+                                                  : std::move(*durable.try_error()));
+    }
+    const InstalledVersionsRegistry &published = *durable.try_value()->registry;
+    const auto blocked = std::ranges::find_if(published.versions, [&a_journal](const InstalledVersionEntry &a_entry)
+                                              { return a_entry.directoryName == a_journal.target->directoryName; });
+    if (published.generationId != a_journal.expectedRegistry->generationId ||
+        published.revision != a_journal.expectedRegistry->revision + 1U || blocked == published.versions.end() ||
+        blocked->state != InstalledVersionState::PendingRemoval ||
+        published.selectedVersion == a_journal.target->directoryName)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                        "PendingRemoval Registry Publish could not be revalidated"));
+    }
+    return cue::Result<void>::success();
+}
+
+/// @brief Quarantine済みVersion EntryをRegistryからAtomic削除する
+[[nodiscard]] cue::Result<void> publish_registry_removal(const std::filesystem::path &a_installRoot,
+                                                         const cue::distribution::InstallOperationJournal &a_journal,
+                                                         const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    auto snapshot = read_registry(a_installRoot, a_assertContext);
+    if (!snapshot || !snapshot.try_value()->registry)
+    {
+        return cue::Result<void>::failure(
+            snapshot ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                     "Installed Versions Registry is unavailable during removal Publish")
+                     : std::move(*snapshot.try_error()));
+    }
+    InstalledVersionsRegistry registry = std::move(*snapshot.try_value()->registry);
+    auto target = std::ranges::find_if(registry.versions, [&a_journal](const InstalledVersionEntry &a_entry)
+                                       { return a_entry.directoryName == a_journal.target->directoryName; });
+    if (target != registry.versions.end())
+    {
+        if (target->state != InstalledVersionState::PendingRemoval ||
+            registry.generationId != a_journal.expectedRegistry->generationId ||
+            registry.revision != a_journal.expectedRegistry->revision + 1U ||
+            target->bundleId != a_journal.target->bundleId ||
+            target->manifestDigest != a_journal.target->manifestDigest || target->workerId != a_journal.workerId)
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                            "PendingRemoval Registry Entry changed before removal"));
+        }
+        registry.versions.erase(target);
+        ++registry.revision;
+        auto published = write_registry(a_installRoot, registry, a_assertContext);
+        if (!published)
+        {
+            return cue::Result<void>::failure(std::move(*published.try_error()));
+        }
+    }
+    auto durable = read_registry(a_installRoot, a_assertContext);
+    if (!durable || !durable.try_value()->registry)
+    {
+        return cue::Result<void>::failure(durable ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                                                  "Registry removal Publish is unavailable")
+                                                  : std::move(*durable.try_error()));
+    }
+    const InstalledVersionsRegistry &published = *durable.try_value()->registry;
+    const bool targetAbsent =
+        std::ranges::none_of(published.versions, [&a_journal](const InstalledVersionEntry &a_entry)
+                             { return a_entry.directoryName == a_journal.target->directoryName; });
+    if (published.generationId != a_journal.expectedRegistry->generationId || !targetAbsent ||
+        !is_completed_uninstall_revision(published.revision, a_journal.expectedRegistry->revision))
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                        "Registry removal Publish could not be revalidated"));
+    }
+    return cue::Result<void>::success();
+}
+
+/// @brief Uninstall JournalをPendingRemoval、Quarantine、Registry削除の順で冪等再開する
+[[nodiscard]] cue::Result<void> execute_uninstall(const std::filesystem::path &a_installRoot,
+                                                  cue::distribution::InstallOperationJournal a_journal,
+                                                  const cue::AssertContext &a_assertContext) noexcept
+{
+    using namespace cue::distribution;
+    const std::filesystem::path versionRoot =
+        a_installRoot / L"Versions" / to_wide(a_journal.target->directoryName).value_or(L"");
+    const std::filesystem::path quarantine = uninstall_quarantine_path(a_installRoot, a_journal);
+    if (a_journal.stage == InstallOperationStage::Prepared)
+    {
+        auto evidence = validate_uninstall_payload(a_installRoot, versionRoot, a_journal, a_assertContext);
+        if (!evidence)
+        {
+            return cue::Result<void>::failure(std::move(*evidence.try_error()));
+        }
+        auto blocked = publish_removal_block(a_installRoot, a_journal, a_assertContext);
+        if (!blocked)
+        {
+            return cue::Result<void>::failure(std::move(*blocked.try_error()));
+        }
+        auto advanced =
+            advance_journal(a_installRoot, a_journal, InstallOperationStage::RemovalBlocked, a_assertContext);
+        if (!advanced)
+        {
+            return cue::Result<void>::failure(std::move(*advanced.try_error()));
+        }
+    }
+    if (a_journal.stage == InstallOperationStage::RemovalBlocked)
+    {
+        const bool hasVersion = is_plain_directory(versionRoot);
+        const bool hasQuarantine = is_plain_directory(quarantine);
+        if (hasVersion == hasQuarantine)
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                            "Uninstall Version and Quarantine state is ambiguous"));
+        }
+        if (hasVersion)
+        {
+            auto evidence = validate_uninstall_payload(a_installRoot, versionRoot, a_journal, a_assertContext);
+            if (!evidence)
+            {
+                return cue::Result<void>::failure(std::move(*evidence.try_error()));
+            }
+            if (MoveFileExW(win32_path(versionRoot).c_str(), win32_path(quarantine).c_str(), MOVEFILE_WRITE_THROUGH) ==
+                FALSE)
+            {
+                return cue::Result<void>::failure(
+                    install_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                  "Installed Version could not be moved to Uninstall Quarantine"));
+            }
+        }
+        auto quarantined = validate_uninstall_payload(a_installRoot, quarantine, a_journal, a_assertContext);
+        if (!quarantined)
+        {
+            return cue::Result<void>::failure(std::move(*quarantined.try_error()));
+        }
+        auto advanced =
+            advance_journal(a_installRoot, a_journal, InstallOperationStage::VersionQuarantined, a_assertContext);
+        if (!advanced)
+        {
+            return cue::Result<void>::failure(std::move(*advanced.try_error()));
+        }
+    }
+    if (a_journal.stage == InstallOperationStage::VersionQuarantined)
+    {
+        auto quarantined = validate_uninstall_payload(a_installRoot, quarantine, a_journal, a_assertContext);
+        if (!quarantined)
+        {
+            return cue::Result<void>::failure(std::move(*quarantined.try_error()));
+        }
+        auto removed = publish_registry_removal(a_installRoot, a_journal, a_assertContext);
+        if (!removed)
+        {
+            return cue::Result<void>::failure(std::move(*removed.try_error()));
+        }
+        auto advanced =
+            advance_journal(a_installRoot, a_journal, InstallOperationStage::RegistryEntryRemoved, a_assertContext);
+        if (!advanced)
+        {
+            return cue::Result<void>::failure(std::move(*advanced.try_error()));
+        }
+    }
+    auto finalRegistry = read_registry(a_installRoot, a_assertContext);
+    if (!finalRegistry || !finalRegistry.try_value()->registry)
+    {
+        return cue::Result<void>::failure(finalRegistry
+                                              ? install_error(a_assertContext, DistributionError::InstallConflict,
+                                                              "Completed Uninstall Registry is unavailable")
+                                              : std::move(*finalRegistry.try_error()));
+    }
+    const InstalledVersionsRegistry &registry = *finalRegistry.try_value()->registry;
+    const bool targetAbsent =
+        std::ranges::none_of(registry.versions, [&a_journal](const InstalledVersionEntry &a_entry)
+                             { return a_entry.directoryName == a_journal.target->directoryName; });
+    if (registry.generationId != a_journal.expectedRegistry->generationId || !targetAbsent ||
+        !is_completed_uninstall_revision(registry.revision, a_journal.expectedRegistry->revision))
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::InstallConflict,
+                                                        "Completed Uninstall Registry could not be revalidated"));
+    }
+    if (is_plain_directory(quarantine))
+    {
+        auto quarantined = validate_uninstall_payload(a_installRoot, quarantine, a_journal, a_assertContext);
+        if (!quarantined)
+        {
+            return cue::Result<void>::failure(std::move(*quarantined.try_error()));
+        }
+        std::error_code error;
+        std::filesystem::remove_all(extended_filesystem_path(quarantine), error);
+        if (error)
+        {
+            return cue::Result<void>::failure(install_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                                            "Uninstall Quarantine cleanup failed"));
+        }
+    }
+    auto cleaned = cleanup_operation(a_installRoot, a_journal.operationId, a_assertContext);
+    if (!cleaned)
+    {
+        return cleaned;
+    }
+    return cue::Result<void>::success();
+}
+
+/// @brief 現在Process Imageが検証済み外部Worker Pathから起動されたか確認する
+[[nodiscard]] bool is_current_worker_executable(const std::filesystem::path &a_expected) noexcept
+{
+    std::array<wchar_t, 32768U> currentPath{};
+    const DWORD length = GetModuleFileNameW(nullptr, currentPath.data(), static_cast<DWORD>(currentPath.size()));
+    if (length == 0U || length >= currentPath.size())
+    {
+        return false;
+    }
+    const std::filesystem::path current(std::wstring_view(currentPath.data(), length));
+    HandleOwner expectedHandle(CreateFileW(win32_path(a_expected).c_str(), FILE_READ_ATTRIBUTES,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    HandleOwner currentHandle(CreateFileW(win32_path(current).c_str(), FILE_READ_ATTRIBUTES,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    const auto expectedFinal = expectedHandle.valid() ? handle_path(expectedHandle.get()) : std::nullopt;
+    const auto currentFinal = currentHandle.valid() ? handle_path(currentHandle.get()) : std::nullopt;
+    return expectedFinal && currentFinal && _wcsicmp(expectedFinal->c_str(), currentFinal->c_str()) == 0;
+}
+
+/// @brief Version外WorkerへGate Handleだけを継承してUninstall再開を委譲する
+[[nodiscard]] cue::Result<std::uint32_t> launch_uninstall_worker(
+    const std::filesystem::path &a_installRoot, const cue::distribution::InstallOperationJournal &a_journal,
+    ControlLease &a_controlLease, const cue::AssertContext &a_assertContext) noexcept
+{
+    const std::filesystem::path executable = a_installRoot / L"Operations" / L"Workers" /
+                                             to_wide(a_journal.workerId).value_or(L"") / L"CueEngineInstallWorker.exe";
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HandleOwner gate(CreateEventW(&security, TRUE, FALSE, nullptr));
+    if (!gate.valid())
+    {
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker release gate could not be created"));
+    }
+    const auto installUtf8 = to_utf8(a_installRoot.native());
+    if (!installUtf8)
+    {
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Install Root could not be encoded for Uninstall Worker"));
+    }
+    std::wstring command = quote_argument(win32_path(executable));
+    const std::array<std::string, 9U> arguments = {
+        "--uninstall-worker",  "--gate-handle", std::to_string(reinterpret_cast<std::uintptr_t>(gate.get())),
+        "--install-root",      *installUtf8,    "--operation-id",
+        a_journal.operationId, "--worker-id",   a_journal.workerId,
+    };
+    for (const std::string &argument : arguments)
+    {
+        command.push_back(L' ');
+        command.append(quote_argument(to_wide(argument).value_or(L"")));
+    }
+    SIZE_T attributeBytes = 0U;
+    static_cast<void>(InitializeProcThreadAttributeList(nullptr, 1U, 0U, &attributeBytes));
+    if (attributeBytes == 0U)
+    {
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker inheritance allowlist size could not be determined"));
+    }
+    std::vector<std::byte> attributeStorage(attributeBytes);
+    auto *attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+    if (InitializeProcThreadAttributeList(attributes, 1U, 0U, &attributeBytes) == FALSE)
+    {
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker inheritance allowlist could not be configured"));
+    }
+    HANDLE inheritedHandle = gate.get();
+    if (UpdateProcThreadAttribute(attributes, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inheritedHandle,
+                                  sizeof(inheritedHandle), nullptr, nullptr) == FALSE)
+    {
+        DeleteProcThreadAttributeList(attributes);
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker inheritance Handle could not be configured"));
+    }
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = attributes;
+    PROCESS_INFORMATION process{};
+    auto environment = make_probe_environment();
+    if (!environment)
+    {
+        DeleteProcThreadAttributeList(attributes);
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker environment could not be constructed"));
+    }
+    const BOOL created = CreateProcessW(win32_path(executable).c_str(), command.data(), nullptr, nullptr, TRUE,
+                                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                                        environment->data(), nullptr, &startup.StartupInfo, &process);
+    DeleteProcThreadAttributeList(attributes);
+    if (created == FALSE)
+    {
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker process could not be created"));
+    }
+    HandleOwner processHandle(process.hProcess);
+    HandleOwner threadHandle(process.hThread);
+    const std::uint32_t processId = process.dwProcessId;
+    a_controlLease.release();
+    if (SetEvent(gate.get()) == FALSE)
+    {
+        static_cast<void>(TerminateProcess(processHandle.get(), 90U));
+        static_cast<void>(WaitForSingleObject(processHandle.get(), INFINITE));
+        return cue::Result<std::uint32_t>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Uninstall Worker release gate could not be signaled"));
+    }
+    return cue::Result<std::uint32_t>::success(std::uint32_t{processId});
 }
 
 /// @brief Install／Update Journalを現在Stageの直後から冪等再開する
@@ -2573,7 +3466,7 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
         if (!reuseStaging)
         {
             std::error_code error;
-            std::filesystem::remove_all(operationRoot, error);
+            std::filesystem::remove_all(extended_filesystem_path(operationRoot), error);
             if (error)
             {
                 return Result<WindowsInstallOutcome>::failure(
@@ -2608,7 +3501,7 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
         if (!is_plain_directory(versionRoot))
         {
             std::error_code error;
-            std::filesystem::create_directories(versionRoot.parent_path(), error);
+            std::filesystem::create_directories(extended_filesystem_path(versionRoot.parent_path()), error);
             if (error)
             {
                 return Result<WindowsInstallOutcome>::failure(install_error(a_assertContext,
@@ -2661,7 +3554,7 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                         install_error(a_assertContext, DistributionError::InstallConflict,
                                       "Install Probe quarantine destination already exists"));
                 }
-                std::filesystem::create_directories(quarantine.parent_path(), error);
+                std::filesystem::create_directories(extended_filesystem_path(quarantine.parent_path()), error);
                 quarantined = !error && MoveFileExW(win32_path(versionRoot).c_str(), win32_path(quarantine).c_str(),
                                                     MOVEFILE_WRITE_THROUGH) != FALSE;
             }
@@ -2746,6 +3639,59 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
 
 namespace cue::distribution
 {
+WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(std::uintptr_t a_handle,
+                                                                             std::string a_installRoot,
+                                                                             std::string a_versionDirectory) noexcept
+    : m_handle(a_handle), m_installRoot(std::move(a_installRoot)), m_versionDirectory(std::move(a_versionDirectory))
+{
+}
+
+WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
+    WindowsInstalledVersionExecutionLease &&a_other) noexcept
+    : m_handle(std::exchange(a_other.m_handle, 0U)), m_installRoot(std::move(a_other.m_installRoot)),
+      m_versionDirectory(std::move(a_other.m_versionDirectory))
+{
+}
+
+WindowsInstalledVersionExecutionLease &WindowsInstalledVersionExecutionLease::operator=(
+    WindowsInstalledVersionExecutionLease &&a_other) noexcept
+{
+    if (this != &a_other)
+    {
+        if (m_handle != 0U)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_handle)));
+        }
+        m_handle = std::exchange(a_other.m_handle, 0U);
+        m_installRoot = std::move(a_other.m_installRoot);
+        m_versionDirectory = std::move(a_other.m_versionDirectory);
+    }
+    return *this;
+}
+
+WindowsInstalledVersionExecutionLease::~WindowsInstalledVersionExecutionLease() noexcept
+{
+    if (m_handle != 0U)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_handle)));
+    }
+}
+
+std::uintptr_t WindowsInstalledVersionExecutionLease::native_handle() const noexcept
+{
+    return m_handle;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::install_root() const noexcept
+{
+    return m_installRoot;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::version_directory() const noexcept
+{
+    return m_versionDirectory;
+}
+
 Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallRequest &a_request,
                                                          const AssertContext &a_assertContext) noexcept
 {
@@ -2773,7 +3719,7 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
             return Result<WindowsInstallOutcome>::failure(std::move(*bundle.try_error()));
         }
         std::error_code error;
-        std::filesystem::create_directories(*installRoot, error);
+        std::filesystem::create_directories(extended_filesystem_path(*installRoot), error);
         if (error || !is_plain_directory(*installRoot) || !has_plain_existing_ancestry(*installRoot))
         {
             return Result<WindowsInstallOutcome>::failure(
@@ -2975,6 +3921,450 @@ Result<void> run_windows_install_probe(const WindowsInstallProbeRequest &a_reque
         {
             return Result<void>::failure(std::move(*payload.try_error()));
         }
+        return Result<void>::success();
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<WindowsRollbackOutcome> rollback_windows_installed_version(const WindowsInstalledVersionRequest &a_request,
+                                                                  const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        auto installRoot = normalize_absolute(a_request.installRoot);
+        if (!installRoot || !is_local_fixed_path(*installRoot) || !is_plain_directory(*installRoot) ||
+            !has_plain_existing_ancestry(*installRoot) || !is_version_directory(a_request.versionDirectory))
+        {
+            return Result<WindowsRollbackOutcome>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Rollback request paths are invalid"));
+        }
+        auto controlLease = acquire_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<WindowsRollbackOutcome>::failure(std::move(*controlLease.try_error()));
+        }
+        auto directories = ensure_managed_directories(*installRoot, a_assertContext);
+        if (!directories)
+        {
+            return Result<WindowsRollbackOutcome>::failure(std::move(*directories.try_error()));
+        }
+        const std::filesystem::path versionRoot =
+            *installRoot / L"Versions" / to_wide(a_request.versionDirectory).value_or(L"");
+        auto bundle = validate_bundle(versionRoot, true, a_assertContext);
+        if (!bundle)
+        {
+            return Result<WindowsRollbackOutcome>::failure(std::move(*bundle.try_error()));
+        }
+        auto registry = ensure_registry(*installRoot, bundle.try_value()->workerId, a_assertContext);
+        if (!registry)
+        {
+            return Result<WindowsRollbackOutcome>::failure(std::move(*registry.try_error()));
+        }
+        auto snapshot = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
+        if (!snapshot)
+        {
+            return Result<WindowsRollbackOutcome>::failure(std::move(*snapshot.try_error()));
+        }
+        auto resumable =
+            find_version_operation_journal(*installRoot, InstallOperationKind::Rollback, snapshot.try_value()->entry,
+                                           snapshot.try_value()->bundle.workerId, a_assertContext);
+        if (!resumable)
+        {
+            return Result<WindowsRollbackOutcome>::failure(std::move(*resumable.try_error()));
+        }
+        if (!resumable.try_value()->has_value() &&
+            snapshot.try_value()->registry.selectedVersion == a_request.versionDirectory)
+        {
+            WindowsRollbackOutcome outcome{"", a_request.versionDirectory, snapshot.try_value()->registry.revision,
+                                           true};
+            return Result<WindowsRollbackOutcome>::success(std::move(outcome));
+        }
+        InstallOperationJournal journal;
+        if (resumable.try_value()->has_value())
+        {
+            journal = std::move(**resumable.try_value());
+        }
+        else
+        {
+            auto operationId = make_uuid();
+            if (!operationId)
+            {
+                return Result<WindowsRollbackOutcome>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                            "Rollback operation ID could not be generated"));
+            }
+            journal.operationId = std::move(*operationId);
+            journal.kind = InstallOperationKind::Rollback;
+            journal.stage = InstallOperationStage::Prepared;
+            journal.workerId = snapshot.try_value()->entry.workerId;
+            journal.expectedRegistry =
+                ExpectedRegistry{snapshot.try_value()->registry.generationId, snapshot.try_value()->registry.revision};
+            journal.target =
+                InstallOperationTarget{snapshot.try_value()->entry.directoryName, snapshot.try_value()->entry.bundleId,
+                                       snapshot.try_value()->entry.manifestDigest};
+            auto written = write_journal(*installRoot, journal, a_assertContext);
+            if (!written)
+            {
+                return Result<WindowsRollbackOutcome>::failure(std::move(*written.try_error()));
+            }
+        }
+        return execute_rollback(*installRoot, std::move(journal), a_assertContext);
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_execution_lease(
+    const WindowsInstalledVersionRequest &a_request, const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        auto installRoot = normalize_absolute(a_request.installRoot);
+        if (!installRoot || !is_local_fixed_path(*installRoot) || !is_plain_directory(*installRoot) ||
+            !has_plain_existing_ancestry(*installRoot) || !is_version_directory(a_request.versionDirectory))
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                        "Installed Version launch request is invalid"));
+        }
+        auto controlLease = acquire_shared_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*controlLease.try_error()));
+        }
+        const std::filesystem::path journalsRoot = *installRoot / L"Operations" / L"Journals";
+        if (!is_plain_directory(journalsRoot))
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Install Journal directory is unavailable"));
+        }
+        std::error_code journalError;
+        const std::filesystem::directory_iterator journal(extended_filesystem_path(journalsRoot), journalError);
+        if (journalError || journal != std::filesystem::directory_iterator{})
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "An incomplete Install operation blocks Version launch"));
+        }
+        auto snapshot = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
+        if (!snapshot || snapshot.try_value()->registry.selectedVersion != a_request.versionDirectory)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                snapshot ? make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                                   "Requested Version is not the selected Installed Version")
+                         : std::move(*snapshot.try_error()));
+        }
+        const InstalledVersionSnapshot expected = *snapshot.try_value();
+        auto executionLease = acquire_shared_execution_lease(*installRoot, a_request.versionDirectory, a_assertContext);
+        if (!executionLease)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*executionLease.try_error()));
+        }
+        auto revalidated = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
+        if (!revalidated || revalidated.try_value()->registry != expected.registry ||
+            revalidated.try_value()->entry != expected.entry ||
+            revalidated.try_value()->registry.selectedVersion != a_request.versionDirectory)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                revalidated ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                      "Installed Version changed while acquiring its Execution Lease")
+                            : std::move(*revalidated.try_error()));
+        }
+        auto encodedRoot = to_utf8(installRoot->native());
+        if (!encodedRoot)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                        "Install Root could not be encoded for its Execution Lease"));
+        }
+        WindowsInstalledVersionExecutionLease lease(
+            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()), std::move(*encodedRoot),
+            a_request.versionDirectory);
+        return Result<WindowsInstalledVersionExecutionLease>::success(std::move(lease));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<WindowsUninstallOutcome> uninstall_windows_installed_version(const WindowsInstalledVersionRequest &a_request,
+                                                                    const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        auto installRoot = normalize_absolute(a_request.installRoot);
+        if (!installRoot || !is_local_fixed_path(*installRoot) || !is_plain_directory(*installRoot) ||
+            !has_plain_existing_ancestry(*installRoot) || !is_version_directory(a_request.versionDirectory))
+        {
+            return Result<WindowsUninstallOutcome>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Uninstall request paths are invalid"));
+        }
+        auto controlLease = acquire_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<WindowsUninstallOutcome>::failure(std::move(*controlLease.try_error()));
+        }
+        auto directories = ensure_managed_directories(*installRoot, a_assertContext);
+        if (!directories)
+        {
+            return Result<WindowsUninstallOutcome>::failure(std::move(*directories.try_error()));
+        }
+        auto resumable = find_uninstall_journal(*installRoot, a_request.versionDirectory, a_assertContext);
+        if (!resumable)
+        {
+            return Result<WindowsUninstallOutcome>::failure(std::move(*resumable.try_error()));
+        }
+        InstallOperationJournal journal;
+        if (resumable.try_value()->has_value())
+        {
+            journal = **resumable.try_value();
+            const std::filesystem::path versionRoot =
+                *installRoot / L"Versions" / to_wide(a_request.versionDirectory).value_or(L"");
+            const std::filesystem::path quarantine = uninstall_quarantine_path(*installRoot, journal);
+            const bool hasVersion = is_plain_directory(versionRoot);
+            const bool hasQuarantine = is_plain_directory(quarantine);
+            if (hasVersion || hasQuarantine)
+            {
+                if (hasVersion && hasQuarantine)
+                {
+                    return Result<WindowsUninstallOutcome>::failure(
+                        make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                "Uninstall Version and Quarantine state is ambiguous"));
+                }
+                const std::filesystem::path &payloadRoot = hasVersion ? versionRoot : quarantine;
+                auto evidence = validate_uninstall_payload(*installRoot, payloadRoot, journal, a_assertContext);
+                if (!evidence)
+                {
+                    return Result<WindowsUninstallOutcome>::failure(std::move(*evidence.try_error()));
+                }
+            }
+            else if (journal.stage != InstallOperationStage::RegistryEntryRemoved)
+            {
+                return Result<WindowsUninstallOutcome>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                            "Uninstall Payload is missing before its final cleanup Stage"));
+            }
+            auto registry = ensure_registry(*installRoot, journal.workerId, a_assertContext);
+            if (!registry)
+            {
+                return Result<WindowsUninstallOutcome>::failure(std::move(*registry.try_error()));
+            }
+            auto reconciled = find_uninstall_journal(*installRoot, a_request.versionDirectory, a_assertContext);
+            if (!reconciled || !reconciled.try_value()->has_value())
+            {
+                return Result<WindowsUninstallOutcome>::failure(
+                    reconciled ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                         "Uninstall Journal disappeared during Registry recovery")
+                               : std::move(*reconciled.try_error()));
+            }
+            journal = std::move(**reconciled.try_value());
+        }
+        else
+        {
+            const std::filesystem::path versionRoot =
+                *installRoot / L"Versions" / to_wide(a_request.versionDirectory).value_or(L"");
+            auto versionBundle = validate_bundle(versionRoot, true, a_assertContext);
+            if (!versionBundle)
+            {
+                return Result<WindowsUninstallOutcome>::failure(std::move(*versionBundle.try_error()));
+            }
+            auto registry = ensure_registry(*installRoot, versionBundle.try_value()->workerId, a_assertContext);
+            if (!registry)
+            {
+                return Result<WindowsUninstallOutcome>::failure(std::move(*registry.try_error()));
+            }
+            auto snapshot = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
+            if (!snapshot)
+            {
+                return Result<WindowsUninstallOutcome>::failure(std::move(*snapshot.try_error()));
+            }
+            const InstalledVersionEntry entry = snapshot.try_value()->entry;
+            const std::size_t selectableCount = static_cast<std::size_t>(std::ranges::count_if(
+                snapshot.try_value()->registry.versions, [](const InstalledVersionEntry &a_version)
+                { return a_version.state == InstalledVersionState::Selectable; }));
+            if (selectableCount <= 1U)
+            {
+                return Result<WindowsUninstallOutcome>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::InstalledVersionProtected,
+                                            "The last selectable Installed Version cannot be removed"));
+            }
+            auto operationId = make_uuid();
+            if (!operationId)
+            {
+                return Result<WindowsUninstallOutcome>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                            "Uninstall operation ID could not be generated"));
+            }
+            journal.operationId = std::move(*operationId);
+            journal.kind = InstallOperationKind::Uninstall;
+            journal.stage = InstallOperationStage::Prepared;
+            journal.workerId = entry.workerId;
+            journal.expectedRegistry =
+                ExpectedRegistry{snapshot.try_value()->registry.generationId, snapshot.try_value()->registry.revision};
+            journal.target = InstallOperationTarget{entry.directoryName, entry.bundleId, entry.manifestDigest};
+            auto written = write_journal(*installRoot, journal, a_assertContext);
+            if (!written)
+            {
+                return Result<WindowsUninstallOutcome>::failure(std::move(*written.try_error()));
+            }
+        }
+        auto worker = validate_worker_for_journal(*installRoot, journal, a_assertContext);
+        if (!worker)
+        {
+            return Result<WindowsUninstallOutcome>::failure(std::move(*worker.try_error()));
+        }
+        auto leaseFile = ensure_execution_lease_file(*installRoot, a_request.versionDirectory, a_assertContext);
+        if (!leaseFile)
+        {
+            return Result<WindowsUninstallOutcome>::failure(std::move(*leaseFile.try_error()));
+        }
+        auto processId = launch_uninstall_worker(*installRoot, journal, *controlLease.try_value(), a_assertContext);
+        if (!processId)
+        {
+            return Result<WindowsUninstallOutcome>::failure(std::move(*processId.try_error()));
+        }
+        WindowsUninstallOutcome outcome{journal.operationId, a_request.versionDirectory, journal.workerId,
+                                        *processId.try_value()};
+        return Result<WindowsUninstallOutcome>::success(std::move(outcome));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<void> run_windows_uninstall_worker(const WindowsUninstallWorkerRequest &a_request,
+                                          const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        if (a_request.gateHandle == 0U || !is_canonical_bundle_id(a_request.operationId) ||
+            !is_canonical_sha256(a_request.workerId))
+        {
+            return Result<void>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Uninstall Worker request is invalid"));
+        }
+        HandleOwner gate(reinterpret_cast<HANDLE>(a_request.gateHandle));
+        DWORD gateFlags = 0U;
+        if (GetHandleInformation(gate.get(), &gateFlags) == FALSE || (gateFlags & HANDLE_FLAG_INHERIT) == 0U ||
+            WaitForSingleObject(gate.get(), k_workerGateTimeoutMilliseconds) != WAIT_OBJECT_0 ||
+            SetHandleInformation(gate.get(), HANDLE_FLAG_INHERIT, 0U) == FALSE)
+        {
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                        "Uninstall Worker release gate is invalid or was not signaled"));
+        }
+        auto installRoot = normalize_absolute(a_request.installRoot);
+        if (!installRoot || !is_local_fixed_path(*installRoot) || !is_plain_directory(*installRoot) ||
+            !has_plain_existing_ancestry(*installRoot))
+        {
+            return Result<void>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Uninstall Worker Install Root is invalid"));
+        }
+        auto controlLease = acquire_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<void>::failure(std::move(*controlLease.try_error()));
+        }
+        auto directories = ensure_managed_directories(*installRoot, a_assertContext);
+        if (!directories)
+        {
+            return Result<void>::failure(std::move(*directories.try_error()));
+        }
+        auto journal =
+            read_worker_uninstall_journal(*installRoot, a_request.operationId, a_request.workerId, a_assertContext);
+        if (!journal)
+        {
+            return Result<void>::failure(std::move(*journal.try_error()));
+        }
+        auto registry = ensure_registry(*installRoot, a_request.workerId, a_assertContext);
+        if (!registry)
+        {
+            return Result<void>::failure(std::move(*registry.try_error()));
+        }
+        journal =
+            read_worker_uninstall_journal(*installRoot, a_request.operationId, a_request.workerId, a_assertContext);
+        if (!journal)
+        {
+            return Result<void>::failure(std::move(*journal.try_error()));
+        }
+        const std::filesystem::path versionRoot =
+            *installRoot / L"Versions" / to_wide(journal.try_value()->target->directoryName).value_or(L"");
+        const std::filesystem::path quarantine = uninstall_quarantine_path(*installRoot, *journal.try_value());
+        const bool hasVersion = is_plain_directory(versionRoot);
+        const bool hasQuarantine = is_plain_directory(quarantine);
+        if (hasVersion || hasQuarantine)
+        {
+            if (hasVersion && hasQuarantine)
+            {
+                return Result<void>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                            "Uninstall Worker found ambiguous Version and Quarantine state"));
+            }
+            const std::filesystem::path &payloadRoot = hasVersion ? versionRoot : quarantine;
+            auto evidence =
+                validate_uninstall_payload(*installRoot, payloadRoot, *journal.try_value(), a_assertContext);
+            if (!evidence)
+            {
+                return Result<void>::failure(std::move(*evidence.try_error()));
+            }
+        }
+        else if (journal.try_value()->stage != InstallOperationStage::RegistryEntryRemoved)
+        {
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Uninstall Worker Payload is missing before its final cleanup Stage"));
+        }
+        auto worker = validate_worker_for_journal(*installRoot, *journal.try_value(), a_assertContext);
+        if (!worker)
+        {
+            return Result<void>::failure(std::move(*worker.try_error()));
+        }
+        const std::filesystem::path expectedWorker = *installRoot / L"Operations" / L"Workers" /
+                                                     to_wide(a_request.workerId).value_or(L"") /
+                                                     L"CueEngineInstallWorker.exe";
+        if (!is_current_worker_executable(expectedWorker))
+        {
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Uninstall Worker is not running from its verified external path"));
+        }
+        auto executionLease = acquire_exclusive_execution_lease(
+            *installRoot, journal.try_value()->target->directoryName, a_assertContext);
+        if (!executionLease)
+        {
+            return Result<void>::failure(std::move(*executionLease.try_error()));
+        }
+        const std::string directoryName = journal.try_value()->target->directoryName;
+        auto uninstalled = execute_uninstall(*installRoot, std::move(*journal.try_value()), a_assertContext);
+        if (!uninstalled)
+        {
+            return uninstalled;
+        }
+        executionLease.try_value()->reset();
+        static_cast<void>(DeleteFileW(win32_path(execution_lease_path(*installRoot, directoryName)).c_str()));
         return Result<void>::success();
     }
     catch (const std::bad_alloc &)

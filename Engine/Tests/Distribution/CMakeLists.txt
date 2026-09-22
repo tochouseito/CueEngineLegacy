@@ -68,6 +68,7 @@ if(WIN32)
     add_dependencies(
         CueDistributionWindowsInstallerTests
         CueEngineInstallerTool
+        CueEngineInstallWorker
         CueDistributionInstallerProbeHelper
     )
     add_dependencies(
@@ -146,6 +147,10 @@ if(WIN32)
         NAME Cue.Distribution.WindowsInstallerRecovery
         COMMAND CueDistributionWindowsInstallerTests --registry-recovery
     )
+    add_test(
+        NAME Cue.Distribution.WindowsInstallerVersionOperations
+        COMMAND CueDistributionWindowsInstallerTests --version-operations
+    )
     list(
         APPEND
         cueDistributionTests
@@ -153,6 +158,7 @@ if(WIN32)
         Cue.Distribution.WindowsPublisher
         Cue.Distribution.WindowsInstaller
         Cue.Distribution.WindowsInstallerRecovery
+        Cue.Distribution.WindowsInstallerVersionOperations
     )
 endif()
 
@@ -167,6 +173,7 @@ if(WIN32)
     set_tests_properties(
         Cue.Distribution.WindowsInstaller
         Cue.Distribution.WindowsInstallerRecovery
+        Cue.Distribution.WindowsInstallerVersionOperations
         PROPERTIES TIMEOUT 240
     )
 endif()

@@ -71,6 +71,7 @@ set_property(TARGET CueEngineBootstrap PROPERTY MSVC_RUNTIME_LIBRARY "MultiThrea
 
 target_link_libraries(CueEngineDistributionPublisherTool PRIVATE Cue.Distribution.Windows Cue.Foundation)
 target_link_libraries(CueEngineInstallerTool PRIVATE Cue.Distribution.Windows Cue.Foundation)
+target_link_libraries(CueEngineInstallWorker PRIVATE Cue.Distribution.Windows Cue.Foundation)
 target_include_directories(
     CueEngineDistributionPublisherTool
     PRIVATE
