@@ -35,6 +35,9 @@ constexpr std::wstring_view k_payloadMarkerName = L"CueEnginePayload.complete.js
 constexpr std::wstring_view k_probeMarkerName = L"CueEngineProbe.complete.json";
 constexpr std::wstring_view k_workerMarkerName = L"CueEngineInstallWorker.complete.json";
 constexpr DWORD k_probeTimeoutMilliseconds = 120000U;
+constexpr DWORD k_probePollMilliseconds = 25U;
+constexpr std::size_t k_maximumProbeDiagnosticBytes = 4096U;
+constexpr std::size_t k_maximumProbeDrainBytesPerPoll = 64U * 1024U;
 
 /// @brief Native Handleを一意所有して全経路でCloseする
 class HandleOwner final
@@ -1274,7 +1277,55 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     return environment;
 }
 
-/// @brief 専用Install Probe ProcessへControl Lease Handleだけを継承して実行する
+/// @brief Probe標準出力をProcess待機中に排出し、失敗診断を上限付きで保持する
+[[nodiscard]] cue::Result<void> drain_probe_diagnostics(HANDLE a_pipe, std::string &a_diagnostics,
+                                                        const cue::AssertContext &a_assertContext) noexcept
+{
+    std::array<char, 512U> buffer{};
+    std::size_t drainedBytes = 0U;
+    while (drainedBytes < k_maximumProbeDrainBytesPerPoll)
+    {
+        DWORD availableBytes = 0U;
+        if (PeekNamedPipe(a_pipe, nullptr, 0U, nullptr, &availableBytes, nullptr) == FALSE)
+        {
+            if (GetLastError() == ERROR_BROKEN_PIPE)
+            {
+                return cue::Result<void>::success();
+            }
+            return cue::Result<void>::failure(
+                install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                              "Install Probe diagnostic pipe could not be inspected"));
+        }
+        if (availableBytes == 0U)
+        {
+            return cue::Result<void>::success();
+        }
+        const DWORD requestedBytes = static_cast<DWORD>(
+            std::min<std::size_t>({buffer.size(), availableBytes, k_maximumProbeDrainBytesPerPoll - drainedBytes}));
+        DWORD readBytes = 0U;
+        if (ReadFile(a_pipe, buffer.data(), requestedBytes, &readBytes, nullptr) == FALSE)
+        {
+            if (GetLastError() == ERROR_BROKEN_PIPE)
+            {
+                return cue::Result<void>::success();
+            }
+            return cue::Result<void>::failure(
+                install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                              "Install Probe diagnostic pipe could not be read"));
+        }
+        if (readBytes == 0U)
+        {
+            return cue::Result<void>::success();
+        }
+        const std::size_t retainedBytes =
+            std::min<std::size_t>(readBytes, k_maximumProbeDiagnosticBytes - a_diagnostics.size());
+        a_diagnostics.append(buffer.data(), retainedBytes);
+        drainedBytes += readBytes;
+    }
+    return cue::Result<void>::success();
+}
+
+/// @brief 専用Install Probe ProcessへControl Lease Handleと診断出力先だけを継承して実行する
 [[nodiscard]] cue::Result<void> run_probe_process(const std::filesystem::path &a_installRoot,
                                                   const std::filesystem::path &a_versionRoot,
                                                   std::string_view a_directoryName, std::string_view a_operationId,
@@ -1309,6 +1360,34 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
         command.append(quote_argument(to_wide(argument).value_or(L"")));
     }
 
+    SECURITY_ATTRIBUTES pipeSecurity{};
+    pipeSecurity.nLength = sizeof(pipeSecurity);
+    pipeSecurity.bInheritHandle = TRUE;
+    HANDLE diagnosticReadRaw = INVALID_HANDLE_VALUE;
+    HANDLE diagnosticWriteRaw = INVALID_HANDLE_VALUE;
+    if (CreatePipe(&diagnosticReadRaw, &diagnosticWriteRaw, &pipeSecurity, 0U) == FALSE)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Install Probe diagnostic pipe could not be created"));
+    }
+    HandleOwner diagnosticRead(diagnosticReadRaw);
+    HandleOwner diagnosticWrite(diagnosticWriteRaw);
+    if (SetHandleInformation(diagnosticRead.get(), HANDLE_FLAG_INHERIT, 0U) == FALSE)
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Install Probe diagnostic read handle could not be isolated"));
+    }
+    HandleOwner nullInput(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &pipeSecurity,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!nullInput.valid())
+    {
+        return cue::Result<void>::failure(install_error(a_assertContext,
+                                                        cue::distribution::DistributionError::PlatformOperationFailed,
+                                                        "Install Probe null input handle could not be created"));
+    }
+
     SIZE_T attributeBytes = 0U;
     static_cast<void>(InitializeProcThreadAttributeList(nullptr, 1U, 0U, &attributeBytes));
     if (attributeBytes == 0U)
@@ -1325,8 +1404,9 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
                                                         "Install Probe inheritance allowlist could not be configured"));
     }
-    if (UpdateProcThreadAttribute(attributes, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &a_leaseHandle,
-                                  sizeof(a_leaseHandle), nullptr, nullptr) == FALSE)
+    std::array<HANDLE, 3U> inheritedHandles = {a_leaseHandle, diagnosticWrite.get(), nullInput.get()};
+    if (UpdateProcThreadAttribute(attributes, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritedHandles.data(),
+                                  sizeof(inheritedHandles), nullptr, nullptr) == FALSE)
     {
         DeleteProcThreadAttributeList(attributes);
         return cue::Result<void>::failure(install_error(a_assertContext,
@@ -1335,6 +1415,10 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     }
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = nullInput.get();
+    startup.StartupInfo.hStdOutput = diagnosticWrite.get();
+    startup.StartupInfo.hStdError = diagnosticWrite.get();
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION process{};
     auto environment = make_probe_environment();
@@ -1357,9 +1441,23 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
                                                         "Install Probe process could not be created"));
     }
+    diagnosticWrite.reset();
     HandleOwner processHandle(process.hProcess);
     HandleOwner threadHandle(process.hThread);
-    const DWORD wait = WaitForSingleObject(processHandle.get(), k_probeTimeoutMilliseconds);
+    std::string diagnostics;
+    const ULONGLONG startedAt = GetTickCount64();
+    DWORD wait = WAIT_TIMEOUT;
+    while (wait == WAIT_TIMEOUT && GetTickCount64() - startedAt < k_probeTimeoutMilliseconds)
+    {
+        auto drained = drain_probe_diagnostics(diagnosticRead.get(), diagnostics, a_assertContext);
+        if (!drained)
+        {
+            static_cast<void>(TerminateProcess(processHandle.get(), 91U));
+            static_cast<void>(WaitForSingleObject(processHandle.get(), INFINITE));
+            return drained;
+        }
+        wait = WaitForSingleObject(processHandle.get(), k_probePollMilliseconds);
+    }
     if (wait != WAIT_OBJECT_0)
     {
         static_cast<void>(TerminateProcess(processHandle.get(), 90U));
@@ -1368,12 +1466,21 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
                                                         cue::distribution::DistributionError::PlatformOperationFailed,
                                                         "Install Probe process timed out"));
     }
+    auto drained = drain_probe_diagnostics(diagnosticRead.get(), diagnostics, a_assertContext);
+    if (!drained)
+    {
+        return drained;
+    }
     DWORD exitCode = 0U;
     if (GetExitCodeProcess(processHandle.get(), &exitCode) == FALSE || exitCode != 0U)
     {
         cue::Error error = install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                                          "Install Probe process rejected the Version");
         error.add_context(a_assertContext.fatal_handler(), "Exit code: " + std::to_string(exitCode));
+        if (!diagnostics.empty())
+        {
+            error.add_context(a_assertContext.fatal_handler(), "Probe diagnostics: " + diagnostics);
+        }
         return cue::Result<void>::failure(std::move(error));
     }
     return cue::Result<void>::success();
