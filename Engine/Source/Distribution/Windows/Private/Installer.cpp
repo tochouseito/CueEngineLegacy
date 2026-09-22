@@ -1681,11 +1681,22 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                 install_error(a_assertContext, cue::distribution::DistributionError::InstallRecoveryBlocked,
                               "Quarantined Install Journal requires explicit repair"));
         }
+        std::vector<std::filesystem::path> journalPaths;
         for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(root))
         {
-            if (is_plain_file(entry.path()) && is_journal_atomic_temporary(entry.path()))
+            if (journalPaths.size() >= k_maximumInstallEntries)
             {
-                if (DeleteFileW(win32_path(entry.path()).c_str()) == FALSE && GetLastError() != ERROR_FILE_NOT_FOUND)
+                return cue::Result<decltype(result)>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::ResourceLimitExceeded,
+                                  "Install Journal count exceeds its limit"));
+            }
+            journalPaths.push_back(entry.path());
+        }
+        for (const std::filesystem::path &journalPath : journalPaths)
+        {
+            if (is_plain_file(journalPath) && is_journal_atomic_temporary(journalPath))
+            {
+                if (DeleteFileW(win32_path(journalPath).c_str()) == FALSE && GetLastError() != ERROR_FILE_NOT_FOUND)
                 {
                     return cue::Result<decltype(result)>::failure(
                         install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
@@ -1693,22 +1704,16 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
                 }
                 continue;
             }
-            if (result.size() >= k_maximumInstallEntries)
-            {
-                return cue::Result<decltype(result)>::failure(
-                    install_error(a_assertContext, cue::distribution::DistributionError::ResourceLimitExceeded,
-                                  "Install Journal count exceeds its limit"));
-            }
-            if (!is_plain_file(entry.path()) || entry.path().extension() != L".json")
+            if (!is_plain_file(journalPath) || journalPath.extension() != L".json")
             {
                 return cue::Result<decltype(result)>::failure(
                     install_error(a_assertContext, cue::distribution::DistributionError::InstallRecoveryBlocked,
                                   "Install Journal directory contains an unknown entry"));
             }
-            auto journal = read_journal(entry.path(), a_assertContext);
+            auto journal = read_journal(journalPath, a_assertContext);
             if (!journal)
             {
-                auto quarantined = quarantine_invalid_journal(a_installRoot, entry.path(), a_assertContext);
+                auto quarantined = quarantine_invalid_journal(a_installRoot, journalPath, a_assertContext);
                 if (!quarantined)
                 {
                     return cue::Result<decltype(result)>::failure(std::move(*quarantined.try_error()));
@@ -1719,7 +1724,7 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
             }
             const std::filesystem::path expectedName =
                 to_wide(journal.try_value()->first.operationId).value_or(L"") + L".json";
-            if (entry.path().filename() != expectedName)
+            if (journalPath.filename() != expectedName)
             {
                 return cue::Result<decltype(result)>::failure(
                     install_error(a_assertContext, cue::distribution::DistributionError::InstallRecoveryBlocked,
