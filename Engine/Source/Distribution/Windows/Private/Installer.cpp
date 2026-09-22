@@ -2293,6 +2293,12 @@ read_all_journals(const std::filesystem::path &a_installRoot, const cue::AssertC
             }
             if (quarantined)
             {
+                auto validatedQuarantine =
+                    validate_published_payload(quarantine, a_bundle, directoryName, a_assertContext);
+                if (!validatedQuarantine)
+                {
+                    return Result<WindowsInstallOutcome>::failure(std::move(*validatedQuarantine.try_error()));
+                }
                 auto cleaned = cleanup_operation(a_installRoot, a_journal.operationId, a_assertContext);
                 if (!cleaned)
                 {

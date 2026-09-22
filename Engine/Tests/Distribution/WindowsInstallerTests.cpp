@@ -633,6 +633,12 @@ void test_probe_quarantine_crash_resume(const cue::AssertContext &a_assertContex
         installRoot / L"Operations" / L"Quarantine" /
         (std::filesystem::path(entry.directoryName).native() + L"-77777777-7777-4777-8777-777777777777");
     require(MoveFileExW(versionRoot.c_str(), quarantine.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE);
+    const std::filesystem::path quarantinedSource = quarantine / L"Engine" / L"Source" / L"Foundation" / L"Test.cpp";
+    write_text(quarantinedSource, "bad\n");
+    require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
+    require(std::filesystem::exists(journalPath));
+    require(CopyFileW((bundleRoot / L"Engine" / L"Source" / L"Foundation" / L"Test.cpp").c_str(),
+                      quarantinedSource.c_str(), FALSE) != FALSE);
     require(!cue::distribution::install_windows_source_sdk(request, a_assertContext));
     require(!std::filesystem::exists(journalPath));
     require(std::filesystem::is_directory(quarantine));
