@@ -1795,6 +1795,8 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
             cue::distribution::rollback_windows_installed_version(installedVersion, a_assertContext);
         require(selectedOriginalWhileRunning.has_value() &&
                 !selectedOriginalWhileRunning.try_value()->wasAlreadySelected);
+        const std::filesystem::path addedSource =
+            inspectedVersionRoot / L"Engine" / L"Source" / L"Foundation" / L"AddedDuringBuild.h";
         {
             cue::ChildProcessCancellation buildCancellation;
             auto buildLease = cue::distribution::acquire_windows_installed_source_build_lease(
@@ -1803,7 +1805,11 @@ void test_version_operations(const cue::AssertContext &a_assertContext)
             HANDLE sourceWriter = CreateFileW(extended_path(installedSource).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             require(sourceWriter == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+            write_text(addedSource, "#pragma once\n");
+            auto unchanged = buildLease.try_value()->value().validate_unchanged(buildCancellation, a_assertContext);
+            require(!unchanged);
         }
+        require(DeleteFileW(extended_path(addedSource).c_str()) != FALSE);
         cue::ChildProcessCancellation cancelledBuild;
         cancelledBuild.request_cancel();
         auto cancelledBuildLease = cue::distribution::acquire_windows_installed_source_build_lease(

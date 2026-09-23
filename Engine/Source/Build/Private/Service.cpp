@@ -1182,6 +1182,20 @@ struct GameBuildService::Impl final
             finish_cancelled(a_operationId);
             return;
         }
+        if (inputLease)
+        {
+            auto inputValid = inputLease->validate_before_artifact_publish(a_cancellation, *assertContext);
+            if (!inputValid)
+            {
+                finish_error(a_operationId, *inputValid.try_error());
+                return;
+            }
+            if (a_cancellation.is_cancel_requested())
+            {
+                finish_cancelled(a_operationId);
+                return;
+            }
+        }
         auto published = artifactPublisher->publish(a_plan, a_cancellation, std::move(buildLease),
                                                     make_lock_deadline(settings.buildTimeout));
         if (!published)

@@ -205,6 +205,13 @@ class InstalledSourceBuildInputLease final : public cue::BuildInputLease
         : m_lease(std::move(a_lease))
     {
     }
+    /// @brief Installed Source Treeの変更通知をArtifact公開前に検証する
+    [[nodiscard]] cue::Result<void> validate_before_artifact_publish(
+        const cue::ChildProcessCancellation &a_cancellation,
+        const cue::AssertContext &a_assertContext) noexcept override
+    {
+        return m_lease.validate_unchanged(a_cancellation, a_assertContext);
+    }
     /// @brief Distribution Leaseを通してNative Lock群を解放する
     ~InstalledSourceBuildInputLease() override = default;
 

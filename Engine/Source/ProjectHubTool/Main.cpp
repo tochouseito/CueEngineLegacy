@@ -169,6 +169,8 @@ struct InstalledEngineOperationCompletion final
     cue::project_hub::InstalledEngineOperationKind kind =
         cue::project_hub::InstalledEngineOperationKind::RollbackVersion;
     std::optional<cue::Error> failure;
+    std::optional<std::vector<cue::project_hub::InstalledEngineVersionView>> versions;
+    std::optional<cue::Error> inspectionFailure;
 };
 
 /// @brief Project Hub PresenterをTool Host CallbackとEditor Process Adapterへ接続する
@@ -303,13 +305,27 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
             m_installedEngineOperationWorker.join();
         }
         m_installedEngineOperationRunning = false;
+        bool refreshed = false;
+        if (completion->versions)
+        {
+            cue::Result<void> replaced =
+                m_service->replace_installed_engine_versions(std::move(*completion->versions));
+            refreshed = replaced.has_value();
+            if (!replaced && !completion->failure)
+            {
+                m_presenter->report_installed_engine_operation_failure(*replaced.try_error());
+            }
+        }
+        else if (completion->inspectionFailure && !completion->failure)
+        {
+            m_presenter->report_installed_engine_operation_failure(*completion->inspectionFailure);
+        }
         if (completion->failure)
         {
             m_presenter->report_installed_engine_operation_failure(*completion->failure);
-            static_cast<void>(refresh_installed_engine_versions(false));
             return;
         }
-        if (!refresh_installed_engine_versions(true))
+        if (!refreshed)
         {
             return;
         }
@@ -374,9 +390,20 @@ class ProjectHubToolClient final : public cue::tool_host::ToolHostClient
                             }
                         }
                     }
+                    std::optional<std::vector<cue::project_hub::InstalledEngineVersionView>> versions;
+                    std::optional<cue::Error> inspectionFailure;
+                    auto inspectedVersions = make_installed_engine_views(installRoot, *m_assertContext);
+                    if (inspectedVersions)
+                    {
+                        versions.emplace(std::move(*inspectedVersions.try_value()));
+                    }
+                    else
+                    {
+                        inspectionFailure.emplace(std::move(*inspectedVersions.try_error()));
+                    }
                     std::lock_guard lock(m_installedEngineOperationMutex);
-                    m_installedEngineOperationCompletion.emplace(
-                        InstalledEngineOperationCompletion{request.kind, std::move(failure)});
+                    m_installedEngineOperationCompletion.emplace(InstalledEngineOperationCompletion{
+                        request.kind, std::move(failure), std::move(versions), std::move(inspectionFailure)});
                 });
         }
         catch (...)

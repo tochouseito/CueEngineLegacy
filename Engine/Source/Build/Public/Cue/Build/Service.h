@@ -109,6 +109,9 @@ class BuildInputLease
   public:
     BuildInputLease(const BuildInputLease &) = delete;
     BuildInputLease &operator=(const BuildInputLease &) = delete;
+    /// @brief Build終了時に外部入力がLease取得後から変更されていないか公開前に検証する
+    [[nodiscard]] virtual Result<void> validate_before_artifact_publish(
+        const ChildProcessCancellation &a_cancellation, const AssertContext &a_assertContext) noexcept = 0;
     /// @brief 派生Leaseを通してPlatform固有Lockを解放する
     virtual ~BuildInputLease() = default;
 

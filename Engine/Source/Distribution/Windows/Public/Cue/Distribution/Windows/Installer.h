@@ -4,6 +4,7 @@
 #include <Cue/Foundation/Result.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +18,8 @@ class ChildProcessCancellation;
 
 namespace cue::distribution
 {
+class WindowsInstalledSourceMutationMonitor;
+
 /// @brief Local Developer BundleをPer-user Install Rootへ導入する要求
 struct WindowsInstallRequest final
 {
@@ -203,6 +206,9 @@ class WindowsInstalledSourceBuildLease final
     WindowsInstalledSourceBuildLease(WindowsInstalledSourceBuildLease &&a_other) noexcept;
     /// @brief 現在のHandle群を解放して所有権を移動する
     WindowsInstalledSourceBuildLease &operator=(WindowsInstalledSourceBuildLease &&a_other) noexcept;
+    /// @brief Build開始後のSource Tree変更をArtifact公開前にFail-closedで検証する
+    [[nodiscard]] Result<void> validate_unchanged(const ChildProcessCancellation &a_cancellation,
+                                                  const AssertContext &a_assertContext) noexcept;
     /// @brief Build入力を固定したNative Handle群を閉じる
     ~WindowsInstalledSourceBuildLease() noexcept;
 
@@ -212,9 +218,12 @@ class WindowsInstalledSourceBuildLease final
         const ChildProcessCancellation &a_cancellation,
         const AssertContext &a_assertContext) noexcept;
     /// @brief 再検証済みVersion Payloadを固定するHandle群を所有する
-    explicit WindowsInstalledSourceBuildLease(std::vector<std::uintptr_t> a_handles) noexcept;
+    explicit WindowsInstalledSourceBuildLease(
+        std::vector<std::uintptr_t> a_handles,
+        std::unique_ptr<WindowsInstalledSourceMutationMonitor> a_mutationMonitor) noexcept;
 
     std::vector<std::uintptr_t> m_handles;
+    std::unique_ptr<WindowsInstalledSourceMutationMonitor> m_mutationMonitor;
 };
 
 /// @brief 検証済みLocal Developer Source SDKを排他Install Transactionで導入する

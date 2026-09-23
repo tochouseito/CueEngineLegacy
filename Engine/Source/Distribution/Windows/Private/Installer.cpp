@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <set>
@@ -4081,6 +4082,114 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
 
 namespace cue::distribution
 {
+/// @brief Installed Source Treeの変更通知をBuild終了まで一度だけ監視する
+class WindowsInstalledSourceMutationMonitor final
+{
+  public:
+    WindowsInstalledSourceMutationMonitor(const WindowsInstalledSourceMutationMonitor &) = delete;
+    WindowsInstalledSourceMutationMonitor &operator=(const WindowsInstalledSourceMutationMonitor &) = delete;
+    /// @brief Pending変更通知を取消してNative Handleを閉じる
+    ~WindowsInstalledSourceMutationMonitor() noexcept
+    {
+        if (m_pending)
+        {
+            static_cast<void>(CancelIoEx(m_directory.get(), &m_overlapped));
+            DWORD transferred = 0U;
+            static_cast<void>(GetOverlappedResult(m_directory.get(), &m_overlapped, &transferred, TRUE));
+        }
+    }
+
+    /// @brief PlainなVersion Rootへ再帰変更通知を登録する
+    [[nodiscard]] static Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>> create(
+        const std::filesystem::path &a_versionRoot, const AssertContext &a_assertContext) noexcept
+    {
+        try
+        {
+            HandleOwner directory(CreateFileW(
+                win32_path(a_versionRoot).c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OVERLAPPED, nullptr));
+            if (!directory.valid() || !handle_matches_plain_directory(directory.get(), a_versionRoot))
+            {
+                return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                            "Installed Source Root could not be monitored for Build"));
+            }
+            HandleOwner event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            if (!event.valid())
+            {
+                return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                            "Installed Source mutation monitor event could not be created"));
+            }
+            auto monitor = std::unique_ptr<WindowsInstalledSourceMutationMonitor>(
+                new WindowsInstalledSourceMutationMonitor(std::move(directory), std::move(event)));
+            monitor->m_overlapped.hEvent = monitor->m_event.get();
+            constexpr DWORD notifyFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                                           FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
+                                           FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SECURITY;
+            if (ReadDirectoryChangesW(monitor->m_directory.get(), monitor->m_buffer.data(),
+                                      static_cast<DWORD>(monitor->m_buffer.size()), TRUE, notifyFilter, nullptr,
+                                      &monitor->m_overlapped, nullptr) == FALSE)
+            {
+                return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                            "Installed Source mutation monitor could not be started"));
+            }
+            monitor->m_pending = true;
+            return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::success(std::move(monitor));
+        }
+        catch (const std::bad_alloc &)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        catch (...)
+        {
+            terminate_exception(a_assertContext);
+        }
+    }
+
+    /// @brief 変更通知の完了または監視異常をBuild入力競合として返す
+    [[nodiscard]] Result<void> validate_unchanged(const ChildProcessCancellation &a_cancellation,
+                                                  const AssertContext &a_assertContext) noexcept
+    {
+        if (a_cancellation.is_cancel_requested())
+        {
+            return Result<void>::success();
+        }
+        DWORD transferred = 0U;
+        if (GetOverlappedResult(m_directory.get(), &m_overlapped, &transferred, FALSE) != FALSE)
+        {
+            m_pending = false;
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Installed Source changed while the Build was running"));
+        }
+        const DWORD error = GetLastError();
+        if (error == ERROR_IO_INCOMPLETE)
+        {
+            return Result<void>::success();
+        }
+        m_pending = false;
+        return Result<void>::failure(
+            make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                    "Installed Source mutation monitor failed while the Build was running"));
+    }
+
+  private:
+    /// @brief 監視Directoryと通知Eventの所有権を取得する
+    WindowsInstalledSourceMutationMonitor(HandleOwner a_directory, HandleOwner a_event) noexcept
+        : m_directory(std::move(a_directory)), m_event(std::move(a_event))
+    {
+    }
+
+    HandleOwner m_directory;
+    HandleOwner m_event;
+    OVERLAPPED m_overlapped{};
+    std::array<std::byte, 64U * 1024U> m_buffer{};
+    bool m_pending = false;
+};
+
 WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
     std::uintptr_t a_handle, std::uintptr_t a_editorHandle,
     std::vector<std::uintptr_t> a_editorAncestryHandles, std::string a_installRoot,
@@ -4228,14 +4337,15 @@ const std::string &WindowsInstalledVersionExecutionLease::publisher_build_identi
 }
 
 WindowsInstalledSourceBuildLease::WindowsInstalledSourceBuildLease(
-    std::vector<std::uintptr_t> a_handles) noexcept
-    : m_handles(std::move(a_handles))
+    std::vector<std::uintptr_t> a_handles,
+    std::unique_ptr<WindowsInstalledSourceMutationMonitor> a_mutationMonitor) noexcept
+    : m_handles(std::move(a_handles)), m_mutationMonitor(std::move(a_mutationMonitor))
 {
 }
 
 WindowsInstalledSourceBuildLease::WindowsInstalledSourceBuildLease(
     WindowsInstalledSourceBuildLease &&a_other) noexcept
-    : m_handles(std::move(a_other.m_handles))
+    : m_handles(std::move(a_other.m_handles)), m_mutationMonitor(std::move(a_other.m_mutationMonitor))
 {
     a_other.m_handles.clear();
 }
@@ -4250,9 +4360,22 @@ WindowsInstalledSourceBuildLease &WindowsInstalledSourceBuildLease::operator=(
             static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
         }
         m_handles = std::move(a_other.m_handles);
+        m_mutationMonitor = std::move(a_other.m_mutationMonitor);
         a_other.m_handles.clear();
     }
     return *this;
+}
+
+Result<void> WindowsInstalledSourceBuildLease::validate_unchanged(
+    const ChildProcessCancellation &a_cancellation, const AssertContext &a_assertContext) noexcept
+{
+    if (!m_mutationMonitor)
+    {
+        return Result<void>::failure(
+            make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                    "Installed Source Build lease has no mutation monitor"));
+    }
+    return m_mutationMonitor->validate_unchanged(a_cancellation, a_assertContext);
 }
 
 WindowsInstalledSourceBuildLease::~WindowsInstalledSourceBuildLease() noexcept
@@ -5094,6 +5217,11 @@ Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installe
                 a_assertContext, DistributionError::PlatformOperationFailed,
                 "Installed Source Inventory enumeration failed"));
         }
+        auto mutationMonitor = WindowsInstalledSourceMutationMonitor::create(versionRoot, a_assertContext);
+        if (!mutationMonitor)
+        {
+            return BuildLeaseResult::failure(std::move(*mutationMonitor.try_error()));
+        }
         auto revalidated = read_installed_version(*installRoot, a_executionLease.version_directory(), false,
                                                   a_assertContext, &a_cancellation);
         if (!revalidated && a_cancellation.is_cancel_requested())
@@ -5117,7 +5245,7 @@ Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installe
         {
             handles.push_back(reinterpret_cast<std::uintptr_t>(handle.release()));
         }
-        WindowsInstalledSourceBuildLease lease(std::move(handles));
+        WindowsInstalledSourceBuildLease lease(std::move(handles), std::move(*mutationMonitor.try_value()));
         return BuildLeaseResult::success(
             std::optional<WindowsInstalledSourceBuildLease>(std::move(lease)));
     }

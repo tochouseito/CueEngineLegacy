@@ -53,6 +53,7 @@ struct RunnerState final
 struct InputLeaseState final
 {
     std::atomic<std::uint32_t> acquisitions = 0U;
+    std::atomic<std::uint32_t> validations = 0U;
     std::atomic<std::uint32_t> liveLeases = 0U;
     std::atomic<bool> blockUntilCancelled = false;
     std::atomic<bool> active = false;
@@ -65,6 +66,13 @@ class TestInputLease final : public cue::BuildInputLease
     explicit TestInputLease(InputLeaseState &a_state) noexcept : m_state(&a_state)
     {
         m_state->liveLeases.fetch_add(1U, std::memory_order_release);
+    }
+    /// @brief Test Leaseは外部入力を持たないため公開前検証を成功させる
+    [[nodiscard]] cue::Result<void> validate_before_artifact_publish(
+        const cue::ChildProcessCancellation &, const cue::AssertContext &) noexcept override
+    {
+        m_state->validations.fetch_add(1U, std::memory_order_release);
+        return cue::Result<void>::success();
     }
     /// @brief Build完了時のLease解放をTest共有状態へ記録する
     ~TestInputLease() override
@@ -549,6 +557,7 @@ class TestPublisher final : public cue::BuildArtifactPublisher
            failed.latestSuccessfulArtifact &&
            failed.latestSuccessfulArtifact->artifact_id() == succeeded.artifact->artifact_id() &&
            publisherState.calls == 3U && inputLeaseState.acquisitions.load(std::memory_order_acquire) == 5U &&
+           inputLeaseState.validations.load(std::memory_order_acquire) == 3U &&
            inputLeaseState.liveLeases.load(std::memory_order_acquire) == 0U;
 }
 
