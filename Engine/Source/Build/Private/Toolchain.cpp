@@ -64,6 +64,8 @@ void add_diagnostic(cue::BuildEnvironmentReport &a_report, cue::BuildEnvironment
         return "MSVC compiler";
     case cue::BuildToolKind::WindowsSdk:
         return "Windows SDK";
+    case cue::BuildToolKind::Git:
+        return "Git for Windows";
     }
     return "Build tool";
 }

@@ -565,7 +565,7 @@ void replace_path(std::string &a_text, std::string_view a_prefix, std::string_vi
 /// @brief Version 1で永続化できるTool種別か検証する
 [[nodiscard]] bool valid_tool_kind(cue::BuildToolKind a_kind) noexcept
 {
-    return a_kind >= cue::BuildToolKind::CMake && a_kind <= cue::BuildToolKind::WindowsSdk;
+    return a_kind >= cue::BuildToolKind::CMake && a_kind <= cue::BuildToolKind::Git;
 }
 
 /// @brief Version 1で永続化できる対応可否か検証する
@@ -1567,7 +1567,7 @@ class JsonSchemaReader final
 [[nodiscard]] bool read_tool(JsonSchemaReader &a_reader) noexcept
 {
     if (!a_reader.begin_object() || !a_reader.member("kind") ||
-        !a_reader.unsigned_integer(static_cast<std::uint64_t>(cue::BuildToolKind::WindowsSdk)) || !a_reader.comma() ||
+        !a_reader.unsigned_integer(static_cast<std::uint64_t>(cue::BuildToolKind::Git)) || !a_reader.comma() ||
         !a_reader.member("path") || !a_reader.string() || !a_reader.comma() || !a_reader.member("root") ||
         !a_reader.string() || !a_reader.comma() || !a_reader.member("version"))
     {
@@ -1619,7 +1619,7 @@ class JsonSchemaReader final
     }
     if (!(a_reader.next_is('n')
               ? a_reader.null_value()
-              : a_reader.unsigned_integer(static_cast<std::uint64_t>(cue::BuildToolKind::WindowsSdk))))
+              : a_reader.unsigned_integer(static_cast<std::uint64_t>(cue::BuildToolKind::Git))))
     {
         return false;
     }

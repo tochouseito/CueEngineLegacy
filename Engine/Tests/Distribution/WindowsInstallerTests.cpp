@@ -736,9 +736,10 @@ void test_worker_system_imports()
 
 /// @brief Install Transaction用の完全なCanonical Test Bundleを作成する
 void create_bundle(const std::filesystem::path &a_bundleRoot, const cue::AssertContext &a_assertContext,
-                   const std::filesystem::path &a_probeExecutable = installer_executable(),
-                   std::size_t a_paddingBytes = 0U, std::string a_bundleId = "12345678-1234-4abc-8def-1234567890ab",
-                   std::string a_engineVersion = "1.0.0", std::byte a_sourceByte = std::byte{'c'})
+                    const std::filesystem::path &a_probeExecutable = installer_executable(),
+                    std::size_t a_paddingBytes = 0U, std::string a_bundleId = "12345678-1234-4abc-8def-1234567890ab",
+                    std::string a_engineVersion = "1.0.0", std::byte a_sourceByte = std::byte{'c'},
+                    std::string a_minimumCompilerVersion = "19.51.36231")
 {
     using cue::distribution::DistributionFileRole;
     static const std::vector<std::byte> executable = read_bytes(installer_executable());
@@ -758,7 +759,8 @@ void create_bundle(const std::filesystem::path &a_bundleRoot, const cue::AssertC
     manifest.sourceInventoryHash = std::string(64U, '1');
     manifest.dependencyDefinitionId = std::string(64U, '2');
     manifest.publisherBuildIdentity = publisher_identity();
-    manifest.minimumToolchain = {"4.2.0", "2.44.0", "msvc", "19.51.36231", "10.0.26100.0"};
+    manifest.minimumToolchain = {"4.2.0", "2.44.0", "msvc", std::move(a_minimumCompilerVersion),
+                                 "10.0.26100.0"};
     manifest.entryPoints = {
         "Bin/CueEngineBootstrap.exe", "Bin/CueProjectHubTool.exe",      "Bin/CueEditorTool.exe",
         "Bin/CueRuntimeHost.exe",     "Bin/CueEngineInstallerTool.exe", "Bin/CueEngineInstallWorker.exe",
@@ -805,6 +807,23 @@ void create_bundle(const std::filesystem::path &a_bundleRoot, const cue::AssertC
     auto manifestBytes = cue::distribution::write_distribution_manifest(manifest, a_assertContext);
     require(manifestBytes.has_value());
     write_text(a_bundleRoot / L"CueEngineDistribution.json", *manifestBytes.try_value());
+}
+
+/// @brief 非対応ToolchainをInstall Root作成前に拒否するか検証する
+void test_unsupported_prerequisite_has_no_install_side_effect(const cue::AssertContext &a_assertContext)
+{
+    TemporaryRoot temporary;
+    const std::filesystem::path bundleRoot = temporary.path() / L"UnsupportedPrerequisiteBundle";
+    const std::filesystem::path installRoot = temporary.path() / L"UnsupportedPrerequisiteInstall";
+    create_bundle(bundleRoot, a_assertContext, installer_executable(), 0U,
+                  "12345678-1234-4abc-8def-1234567890ab", "1.0.0", std::byte{'c'}, "99.0.0");
+
+    const cue::distribution::WindowsInstallRequest request{utf8_path(bundleRoot), utf8_path(installRoot), false, true};
+    const auto installed = cue::distribution::install_windows_source_sdk(request, a_assertContext);
+    require(!installed);
+    require(installed.try_error()->summary() ==
+            "MSVC x64 prerequisite is missing or older than the Bundle minimum version");
+    require(!std::filesystem::exists(installRoot));
 }
 
 /// @brief RegistryをCanonical Readerで読み込む
@@ -2058,6 +2077,11 @@ int main(int a_argumentCount, char **a_arguments)
     {
         test_version_operations(assertContext);
         test_version_installer_self_uninstall(assertContext);
+        return 0;
+    }
+    if (a_argumentCount == 2 && std::string_view(a_arguments[1]) == "--prerequisites")
+    {
+        test_unsupported_prerequisite_has_no_install_side_effect(assertContext);
         return 0;
     }
     if (a_argumentCount != 1)

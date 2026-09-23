@@ -275,7 +275,7 @@ BuildEnvironmentRequirements current_windows_build_requirements(const AssertCont
         requirements.hostArchitecture = BuildArchitecture::X64;
         requirements.supportedConfigurations = {BuildConfiguration::Debug, BuildConfiguration::Development,
                                                 BuildConfiguration::Release};
-        requirements.tools.reserve(4U);
+        requirements.tools.reserve(5U);
         const auto cmakeMinimum = parse_version(build_metadata::k_cmakeMinimumVersion);
         if (!cmakeMinimum || cmakeMinimum->major == UINT32_MAX)
         {
@@ -305,6 +305,8 @@ BuildEnvironmentRequirements current_windows_build_requirements(const AssertCont
         BuildToolVersion sdkMaximum = *sdkVersion;
         ++sdkMaximum.build;
         requirements.tools.push_back({BuildToolKind::WindowsSdk, *sdkVersion, sdkMaximum, BuildArchitecture::X64});
+        requirements.tools.push_back(
+            {BuildToolKind::Git, {2U, 44U, 0U, 0U}, {3U, 0U, 0U, 0U}, BuildArchitecture::X64});
         return requirements;
     }
     catch (...)
@@ -324,7 +326,7 @@ BuildEnvironmentInventory discover_current_windows_build_environment(const Asser
         inventory.engineSourceAvailable =
             has_marker(inventory.engineSourceRoot, L"Engine\\Source\\GameModule\\CMakeLists.txt", a_assertContext);
         inventory.engineBinaryAvailable = has_marker(inventory.engineBinaryRoot, L"CMakeCache.txt", a_assertContext);
-        inventory.candidates.reserve(4U);
+        inventory.candidates.reserve(5U);
 
         const auto cmakeWindowsPath = to_windows_path(build_metadata::k_cmakeCommand, a_assertContext);
         std::optional<std::string> cmakeRoot;
@@ -353,6 +355,15 @@ BuildEnvironmentInventory discover_current_windows_build_environment(const Asser
                                                         compilerRootUtf8 ? *compilerRootUtf8 : std::string_view{},
                                                         a_assertContext));
         inventory.candidates.push_back(probe_windows_sdk(a_assertContext));
+        const auto gitWindowsPath = to_windows_path(build_metadata::k_gitCommand, a_assertContext);
+        std::optional<std::string> gitRoot;
+        if (gitWindowsPath)
+        {
+            const std::filesystem::path gitPath(*gitWindowsPath);
+            gitRoot = to_utf8_path(gitPath.parent_path().parent_path().native(), a_assertContext);
+        }
+        inventory.candidates.push_back(probe_executable(BuildToolKind::Git, build_metadata::k_gitCommand,
+                                                        gitRoot ? *gitRoot : std::string_view{}, a_assertContext));
         return inventory;
     }
     catch (...)

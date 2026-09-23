@@ -5,6 +5,8 @@ target_sources(
     PRIVATE
         Private/Installer.cpp
         Private/SourceSdkPublisher.cpp
+        Private/WindowsDeveloperPrerequisites.cpp
+        Private/WindowsDeveloperPrerequisites.h
         Private/WindowsDirectoryAncestryLock.cpp
         Private/WindowsDirectoryAncestryLock.h
         Private/WindowsStablePath.cpp
@@ -25,7 +27,9 @@ target_link_libraries(
     PRIVATE
         Cue.IO.Windows
         Cue.Platform.Windows
+        advapi32
         ole32
+        version
 )
 target_compile_features(Cue.Distribution.Windows PUBLIC cxx_std_20)
 target_include_directories(Cue.Distribution.Windows PUBLIC Public)

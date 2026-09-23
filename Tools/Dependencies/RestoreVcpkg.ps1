@@ -55,6 +55,58 @@ function Test-SamePath
     return $Left.Equals($Right, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-GitForWindowsVersion
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.WorkingDirectory = $repositoryRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    [void]$startInfo.ArgumentList.Add("--version")
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try
+    {
+        if (-not $process.Start())
+        {
+            throw "Git for Windows prerequisite could not be started."
+        }
+        $standardOutput = $process.StandardOutput.ReadToEndAsync()
+        $standardError = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(15000))
+        {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "Git for Windows prerequisite diagnosis timed out."
+        }
+        $outputText = $standardOutput.GetAwaiter().GetResult().Trim()
+        [void]$standardError.GetAwaiter().GetResult()
+        $versionMatch = [Text.RegularExpressions.Regex]::Match(
+            $outputText,
+            '^git version (\d+)\.(\d+)\.(\d+)\.windows\.\d+$',
+            [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if ($process.ExitCode -ne 0 -or -not $versionMatch.Success)
+        {
+            throw "Git for Windows prerequisite identity could not be diagnosed."
+        }
+        return [Version]::new(
+            [int]$versionMatch.Groups[1].Value,
+            [int]$versionMatch.Groups[2].Value,
+            [int]$versionMatch.Groups[3].Value)
+    }
+    finally
+    {
+        $process.Dispose()
+    }
+}
+
 if (-not [IO.Path]::IsPathFullyQualified($ToolRoot) -or -not [IO.Path]::IsPathFullyQualified($InstallRoot))
 {
     throw "ToolRoot and InstallRoot must be absolute paths."
@@ -67,6 +119,11 @@ if (-not [IO.Path]::IsPathFullyQualified($GitExecutable) -or
 $gitExecutable = [IO.Path]::GetFullPath($GitExecutable)
 $toolRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($ToolRoot))
 $installedRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($InstallRoot))
+$gitVersion = Get-GitForWindowsVersion -Executable $gitExecutable
+if ($gitVersion -lt [Version]::new(2, 44, 0))
+{
+    throw "Git for Windows 2.44.0 or newer is required before dependency restore."
+}
 
 if ((Test-SamePath -Left $toolRoot -Right $installedRoot) -or
     (Test-PathInside -Candidate $toolRoot -Root $installedRoot) -or

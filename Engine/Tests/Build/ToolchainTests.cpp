@@ -29,7 +29,7 @@ class TestFatalHandler final : public cue::FatalHandler
     }
 };
 
-/// @brief 4種Toolを要求するx64 Engine契約を返す
+/// @brief 5種Toolを要求するx64 Engine契約を返す
 [[nodiscard]] cue::BuildEnvironmentRequirements make_requirements()
 {
     cue::BuildEnvironmentRequirements requirements;
@@ -40,11 +40,12 @@ class TestFatalHandler final : public cue::FatalHandler
         {cue::BuildToolKind::CMake, {4U, 2U, 0U, 0U}, {5U, 0U, 0U, 0U}, cue::BuildArchitecture::X64},
         {cue::BuildToolKind::VisualStudio, {18U, 0U, 0U, 0U}, {19U, 0U, 0U, 0U}, cue::BuildArchitecture::X64},
         {cue::BuildToolKind::MsvcCompiler, {19U, 51U, 0U, 0U}, {19U, 52U, 0U, 0U}, cue::BuildArchitecture::X64},
-        {cue::BuildToolKind::WindowsSdk, {10U, 0U, 26100U, 0U}, {10U, 0U, 26100U, 1U}, cue::BuildArchitecture::X64}};
+        {cue::BuildToolKind::WindowsSdk, {10U, 0U, 26100U, 0U}, {10U, 0U, 26100U, 1U}, cue::BuildArchitecture::X64},
+        {cue::BuildToolKind::Git, {2U, 44U, 0U, 0U}, {3U, 0U, 0U, 0U}, cue::BuildArchitecture::X64}};
     return requirements;
 }
 
-/// @brief 検証済み候補を4種持つInventoryを返す
+/// @brief 検証済み候補を5種持つInventoryを返す
 [[nodiscard]] cue::BuildEnvironmentInventory make_inventory()
 {
     cue::BuildEnvironmentInventory inventory;
@@ -60,7 +61,9 @@ class TestFatalHandler final : public cue::FatalHandler
                             {cue::BuildToolKind::MsvcCompiler, "C:/VS/cl.exe", "C:/VS/VC/Tools/MSVC/14.51",
                              cue::BuildToolVersion{19U, 51U, 36256U, 0U}, cue::BuildArchitecture::X64, true},
                             {cue::BuildToolKind::WindowsSdk, "C:/Kits/10/Include/10.0.26100.0", "C:/Kits/10",
-                             cue::BuildToolVersion{10U, 0U, 26100U, 0U}, cue::BuildArchitecture::X64, true}};
+                             cue::BuildToolVersion{10U, 0U, 26100U, 0U}, cue::BuildArchitecture::X64, true},
+                            {cue::BuildToolKind::Git, "C:/Program Files/Git/cmd/git.exe", "C:/Program Files/Git",
+                             cue::BuildToolVersion{2U, 47U, 1U, 2U}, cue::BuildArchitecture::X64, true}};
     return inventory;
 }
 
@@ -78,11 +81,11 @@ class TestFatalHandler final : public cue::FatalHandler
     return false;
 }
 
-/// @brief 既知の互換候補が全4種選択されるか検証する
+/// @brief 既知の互換候補が全5種選択されるか検証する
 [[nodiscard]] bool test_supported(const cue::AssertContext &a_assertContext)
 {
     const auto report = cue::validate_build_environment(make_inventory(), make_requirements(), a_assertContext);
-    return report.support == cue::BuildEnvironmentSupport::Supported && report.selectedTools.size() == 4U &&
+    return report.support == cue::BuildEnvironmentSupport::Supported && report.selectedTools.size() == 5U &&
            report.supportedConfigurations.size() == 3U && report.diagnostics.empty();
 }
 
@@ -117,6 +120,17 @@ class TestFatalHandler final : public cue::FatalHandler
     const auto report = cue::validate_build_environment(inventory, make_requirements(), a_assertContext);
     return report.support == cue::BuildEnvironmentSupport::Unsupported &&
            has_diagnostic(report, cue::BuildEnvironmentDiagnosticCode::UnsupportedTool);
+}
+
+/// @brief Git for Windows 2.44未満をBuild／Restore前の非対応Toolとして診断するか検証する
+[[nodiscard]] bool test_unsupported_git(const cue::AssertContext &a_assertContext)
+{
+    auto inventory = make_inventory();
+    inventory.candidates.back().version = cue::BuildToolVersion{2U, 43U, 9U, 0U};
+    const auto report = cue::validate_build_environment(inventory, make_requirements(), a_assertContext);
+    return report.support == cue::BuildEnvironmentSupport::Unsupported &&
+           has_diagnostic(report, cue::BuildEnvironmentDiagnosticCode::UnsupportedTool) &&
+           report.selectedTools.size() == 4U;
 }
 
 /// @brief 既知の非x64 ArchitectureをUnknownではなくUnsupportedとして診断するか検証する
@@ -171,6 +185,7 @@ int main()
     cue::AssertContext assertContext(logger, fatalHandler);
     return test_supported(assertContext) && test_missing(assertContext) && test_optional_engine_binary(assertContext) &&
                    test_unsupported(assertContext) &&
+                   test_unsupported_git(assertContext) &&
                    test_unsupported_architecture(assertContext) && test_ambiguous(assertContext) &&
                    test_safe_path_format(assertContext) && test_safe_command_line_format(assertContext)
                ? 0

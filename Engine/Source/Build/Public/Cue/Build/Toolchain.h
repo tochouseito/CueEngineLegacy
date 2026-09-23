@@ -18,7 +18,8 @@ enum class BuildToolKind : std::uint8_t
     CMake,
     VisualStudio,
     MsvcCompiler,
-    WindowsSdk
+    WindowsSdk,
+    Git
 };
 
 /// @brief Build ToolまたはHostのArchitecture

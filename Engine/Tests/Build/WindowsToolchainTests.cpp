@@ -54,8 +54,8 @@ int main()
                                             nativeSystem.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_INTEL &&
                                             nativeSystem.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_ARM64 &&
                                             inventory.hostArchitecture == cue::BuildArchitecture::Unknown);
-    if (inventory.candidates.size() == 4U && report.support == cue::BuildEnvironmentSupport::Supported &&
-        report.selectedTools.size() == 4U && report.supportedConfigurations.size() == 3U &&
+    if (inventory.candidates.size() == 5U && report.support == cue::BuildEnvironmentSupport::Supported &&
+        report.selectedTools.size() == 5U && report.supportedConfigurations.size() == 3U &&
         report.diagnostics.empty() && nativeArchitectureMatches)
     {
         return 0;
