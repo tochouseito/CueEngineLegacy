@@ -980,10 +980,12 @@ struct GameBuildService::Impl final
 
     /// @brief 注入依存とOwner Threadを記録してIdle Service状態を準備する
     Impl(CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
-         std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher, const AssertContext &a_assertContext) noexcept
+         std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher,
+         std::unique_ptr<BuildInputLeaseProvider> a_inputLeaseProvider,
+         const AssertContext &a_assertContext) noexcept
         : settings(std::move(a_settings)), processRunner(std::move(a_processRunner)),
-          artifactPublisher(std::move(a_artifactPublisher)), assertContext(&a_assertContext),
-          ownerThread(std::this_thread::get_id())
+          artifactPublisher(std::move(a_artifactPublisher)), inputLeaseProvider(std::move(a_inputLeaseProvider)),
+          assertContext(&a_assertContext), ownerThread(std::this_thread::get_id())
     {
     }
 
@@ -1124,6 +1126,30 @@ struct GameBuildService::Impl final
                  ChildProcessCancellation &a_cancellation) noexcept
     {
         Observer observer(*this, a_operationId);
+        std::unique_ptr<BuildInputLease> inputLease;
+        if (inputLeaseProvider)
+        {
+            auto acquiredInput = inputLeaseProvider->acquire(a_plan, a_cancellation);
+            if (!acquiredInput)
+            {
+                finish_error(a_operationId, *acquiredInput.try_error());
+                return;
+            }
+            if (a_cancellation.is_cancel_requested())
+            {
+                finish_cancelled(a_operationId);
+                return;
+            }
+            if (!*acquiredInput.try_value())
+            {
+                finish_error(a_operationId,
+                             make_service_error(*assertContext, GameBuildServiceError::MissingDependency,
+                                                "Build input lease provider returned no lease"));
+                return;
+            }
+            inputLease = std::move(*acquiredInput.try_value());
+        }
+        static_cast<void>(inputLease);
         auto acquired = artifactPublisher->acquire_build_lease(a_plan, a_cancellation,
                                                                make_lock_deadline(settings.configureTimeout));
         if (!acquired)
@@ -1137,7 +1163,9 @@ struct GameBuildService::Impl final
             return;
         }
         std::unique_ptr<BuildWorkspaceLease> buildLease = std::move(**acquired.try_value());
-        auto built = run_cmake_build(a_plan, settings, a_configureMode, *processRunner, a_cancellation, observer,
+        const CMakeConfigureMode configureMode =
+            inputLeaseProvider ? CMakeConfigureMode::Required : a_configureMode;
+        auto built = run_cmake_build(a_plan, settings, configureMode, *processRunner, a_cancellation, observer,
                                      *assertContext);
         if (!built)
         {
@@ -1153,6 +1181,20 @@ struct GameBuildService::Impl final
         {
             finish_cancelled(a_operationId);
             return;
+        }
+        if (inputLease)
+        {
+            auto inputValid = inputLease->validate_before_artifact_publish(a_cancellation, *assertContext);
+            if (!inputValid)
+            {
+                finish_error(a_operationId, *inputValid.try_error());
+                return;
+            }
+            if (a_cancellation.is_cancel_requested())
+            {
+                finish_cancelled(a_operationId);
+                return;
+            }
         }
         auto published = artifactPublisher->publish(a_plan, a_cancellation, std::move(buildLease),
                                                     make_lock_deadline(settings.buildTimeout));
@@ -1178,6 +1220,7 @@ struct GameBuildService::Impl final
     CMakeRunnerSettings settings;
     std::unique_ptr<ChildProcessRunner> processRunner;
     std::unique_ptr<BuildArtifactPublisher> artifactPublisher;
+    std::unique_ptr<BuildInputLeaseProvider> inputLeaseProvider;
     const AssertContext *assertContext;
     std::thread::id ownerThread;
     mutable std::mutex mutex;
@@ -1222,6 +1265,16 @@ Result<std::unique_ptr<GameBuildService>> GameBuildService::create(
     CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
     std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher, const AssertContext &a_assertContext) noexcept
 {
+    return create(std::move(a_settings), std::move(a_processRunner), std::move(a_artifactPublisher), nullptr,
+                  a_assertContext);
+}
+
+Result<std::unique_ptr<GameBuildService>> GameBuildService::create(
+    CMakeRunnerSettings a_settings, std::unique_ptr<ChildProcessRunner> a_processRunner,
+    std::unique_ptr<BuildArtifactPublisher> a_artifactPublisher,
+    std::unique_ptr<BuildInputLeaseProvider> a_inputLeaseProvider,
+    const AssertContext &a_assertContext) noexcept
+{
     try
     {
         if (!a_processRunner || !a_artifactPublisher)
@@ -1229,8 +1282,9 @@ Result<std::unique_ptr<GameBuildService>> GameBuildService::create(
             return Result<std::unique_ptr<GameBuildService>>::failure(make_service_error(
                 a_assertContext, GameBuildServiceError::MissingDependency, "Build service dependencies are missing"));
         }
-        auto implementation = std::make_unique<Impl>(std::move(a_settings), std::move(a_processRunner),
-                                                     std::move(a_artifactPublisher), a_assertContext);
+        auto implementation =
+            std::make_unique<Impl>(std::move(a_settings), std::move(a_processRunner),
+                                   std::move(a_artifactPublisher), std::move(a_inputLeaseProvider), a_assertContext);
         return Result<std::unique_ptr<GameBuildService>>::success(
             std::unique_ptr<GameBuildService>(new GameBuildService(std::move(implementation))));
     }

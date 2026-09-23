@@ -83,6 +83,13 @@ struct PackageWorkflowSnapshot final
     std::string message;
 };
 
+/// @brief Modular PackageがRuntimeHostを取得する検証済みBuild境界
+enum class RuntimeHostBuildSource : std::uint8_t
+{
+    EngineBinaryRoot,
+    PublishedBuildArtifact
+};
+
 /// @brief Game Build成功ArtifactからStandalone Package公開と起動を直列化するApplication Service
 ///
 /// `start`、`retry`、`advance`、`run`、`wait_for_package`、`wait_for_run_completion`はcreate呼出Threadだけで
@@ -105,7 +112,8 @@ class GamePackageWorkflowService final
         std::unique_ptr<GameBuildService> a_buildService, std::unique_ptr<BuildArtifactReader> a_artifactReader,
         std::unique_ptr<FilesystemRoot> a_projectFilesystem, std::unique_ptr<FilesystemRoot> a_engineBinaryFilesystem,
         std::unique_ptr<ChildProcessRunner> a_runProcessRunner, std::string a_projectRoot,
-        std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, const AssertContext &a_assertContext) noexcept;
+        std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, RuntimeHostBuildSource a_runtimeHostBuildSource,
+        const AssertContext &a_assertContext) noexcept;
 
     /// @brief Runtime Dataを保持してGame Buildを開始し、成功後だけPackage公開へ進む
     [[nodiscard]] Result<void> start(BuildRequest a_buildRequest, CMakeConfigureMode a_configureMode,

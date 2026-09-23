@@ -12,6 +12,7 @@
 #include <Windows.h>
 #include <winioctl.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -750,6 +751,55 @@ void test_windows_artifact_publisher(const std::filesystem::path &a_probe, const
     require(!error);
 }
 
+/// @brief Installed Engine BuildがRuntimeHostを同じ不変Artifactへ公開することを検証する
+void test_installed_game_module_runtime_host(const std::filesystem::path &a_probe,
+                                             const std::filesystem::path &a_runtimeHost,
+                                             const cue::AssertContext &a_assertContext)
+{
+    const std::filesystem::path projectRoot =
+        std::filesystem::temp_directory_path() /
+        ("CueInstalledArtifactTests-" + std::to_string(GetCurrentProcessId()) + "-" +
+         std::string(k_configurationName));
+    const std::filesystem::path installedEngineRoot = projectRoot / "InstalledEngine";
+    std::error_code error;
+    std::filesystem::remove_all(projectRoot, error);
+    require(!error && std::filesystem::create_directories(installedEngineRoot));
+
+    cue::ProjectDescriptor descriptor = make_descriptor(a_assertContext);
+    cue::WindowsInstalledEngineSourceProvenance provenance{
+        generic_path(installedEngineRoot), std::string(40U, 'c'), std::string(64U, 'a'), std::string(64U, 'b')};
+    std::unique_ptr<cue::BuildArtifactPublisher> publisher = take_value(
+        cue::create_windows_build_artifact_publisher(generic_path(projectRoot), descriptor, std::move(provenance),
+                                                     a_assertContext));
+    cue::BuildPlan plan = make_plan(projectRoot, "91234567-89ab-4cde-8f01-23456789abcd", a_assertContext);
+    const std::filesystem::path output =
+        std::filesystem::path(plan.binary_directory()) / "bin" / k_configurationName;
+    require(std::filesystem::create_directories(output));
+    require(std::filesystem::copy_file(a_probe, output / "CueGameModule.dll"));
+    require(std::filesystem::copy_file(a_runtimeHost, output / "CueRuntimeHost.exe"));
+    {
+        std::ofstream pdb(output / "CueGameModule.pdb", std::ios::binary | std::ios::trunc);
+        pdb << "installed-test-symbols-" << k_configurationName;
+        require(static_cast<bool>(pdb));
+    }
+
+    cue::ChildProcessCancellation cancellation;
+    auto lease = take_value(publisher->acquire_build_lease(plan, cancellation, std::nullopt));
+    require(lease.has_value());
+    auto published = take_value(publisher->publish(plan, cancellation, std::move(*lease), std::nullopt));
+    require(published.has_value() && published->files().size() == 4U);
+    const std::filesystem::path version = std::filesystem::path(published->version_directory());
+    require(std::filesystem::is_regular_file(version / "CueRuntimeHost.exe"));
+    const auto runtimeHostFile = std::find_if(
+        published->files().begin(), published->files().end(),
+        [](const cue::BuildArtifactFile &a_file) noexcept { return a_file.relativePath == "CueRuntimeHost.exe"; });
+    require(runtimeHostFile != published->files().end() &&
+            runtimeHostFile->purpose == cue::BuildArtifactFilePurpose::DistributionPayload);
+
+    std::filesystem::remove_all(projectRoot, error);
+    require(!error);
+}
+
 /// @brief Shipping Productの公開、Identity拒否、Current保全、Tamper検出を検証する
 void test_shipping_product_publisher(const std::filesystem::path &a_product,
                                      const std::filesystem::path &a_wrongProjectProduct,
@@ -768,17 +818,38 @@ void test_shipping_product_publisher(const std::filesystem::path &a_product,
     write_text(projectRoot / "CMakePresets.json", "{}\n");
     write_text(projectRoot / "CueProject.json", "{}\n");
     write_text(projectRoot / "Source" / "Game" / "Test.cpp", "int cue_shipping_test = 1;\n");
+    const std::filesystem::path installedEngineRoot = projectRoot / "InstalledEngine";
+    require(std::filesystem::create_directories(installedEngineRoot / "Engine" / "Source"));
+    require(std::filesystem::create_directories(installedEngineRoot / "CMake"));
+    require(std::filesystem::create_directories(installedEngineRoot / "ThirdParty"));
+    write_text(installedEngineRoot / "Engine" / "Source" / "Test.cpp", "int cue_engine_test = 1;\n");
+    write_text(installedEngineRoot / "CMake" / "Test.cmake", "set(CUE_TEST ON)\n");
+    write_text(installedEngineRoot / "CMakeLists.txt", "cmake_minimum_required(VERSION 4.2.0)\n");
+    write_text(installedEngineRoot / "CMakePresets.json", "{}\n");
+    write_text(installedEngineRoot / "ThirdParty" / "vcpkg.json", "{}\n");
+    write_text(installedEngineRoot / "ThirdParty" / "vcpkg-configuration.json", "{}\n");
+    write_text(installedEngineRoot / "ThirdParty" / "vcpkg-tool.json", "{}\n");
 
     cue::ProjectDescriptor descriptor = make_descriptor(a_assertContext);
     SecuritySnapshotObserver securityObserver;
+    cue::WindowsInstalledEngineSourceProvenance installedProvenance{
+        generic_path(installedEngineRoot), std::string(40U, 'c'), std::string(64U, 'a'), std::string(64U, 'b')};
     std::unique_ptr<cue::BuildArtifactPublisher> publisher =
         take_value(cue::detail::create_windows_build_artifact_publisher_for_test(generic_path(projectRoot), descriptor,
+                                                                                 std::move(installedProvenance),
                                                                                  securityObserver, a_assertContext));
     cue::BuildPlan plan = make_shipping_plan(projectRoot, "01234567-89ab-4cde-8f01-23456789abcd", a_assertContext);
     const std::filesystem::path binary(plan.binary_directory());
     const std::filesystem::path output = binary / "bin" / "Release";
     require(std::filesystem::create_directories(output));
-    write_shipping_toolchain_evidence(binary);
+    const auto writeToolchainEvidence = [&](std::string_view a_windowsSdkVersion = CUE_TEST_WINDOWS_SDK_VERSION,
+                                            std::string_view a_platformToolset = CUE_TEST_PLATFORM_TOOLSET,
+                                            std::string_view a_engineRoot = {})
+    {
+        write_shipping_toolchain_evidence(binary, a_windowsSdkVersion, a_platformToolset,
+                                          a_engineRoot.empty() ? generic_path(installedEngineRoot) : a_engineRoot);
+    };
+    writeToolchainEvidence();
     require(std::filesystem::copy_file(a_product, output / "CueGameProduct.exe"));
     {
         std::ofstream pdb(output / "CueGameProduct.pdb", std::ios::binary | std::ios::trunc);
@@ -815,8 +886,13 @@ void test_shipping_product_publisher(const std::filesystem::path &a_product,
         metadata.find("\"configuration\": \"Release\"") != std::string::npos &&
         metadata.find("\"architecture\": \"x64\"") != std::string::npos &&
         metadata.find("\"engineBuildPolicyVersion\": 1") != std::string::npos &&
-        metadata.find("\"engineCommit\": \"") != std::string::npos &&
-        metadata.find("\"engineSourceTreeState\": \"") != std::string::npos &&
+        metadata.find("\"engineCommit\": \"" + std::string(40U, 'c') + "\"") != std::string::npos &&
+        metadata.find("\"engineSourceTreeState\": \"clean\"") != std::string::npos &&
+        metadata.find("\"engineSourceOrigin\": \"InstalledDistribution\"") != std::string::npos &&
+        metadata.find("\"distributionSourceInventorySha256\": \"" + std::string(64U, 'a') + "\"") !=
+            std::string::npos &&
+        metadata.find("\"publisherBuildIdentitySha256\": \"" + std::string(64U, 'b') + "\"") !=
+            std::string::npos &&
         metadata.find("\"engineSourceInventory\": {") != std::string::npos &&
         metadata.find("\"gameSourceInventory\": {") != std::string::npos &&
         metadata.find("\"cmake\": {") != std::string::npos &&
@@ -915,47 +991,48 @@ void test_shipping_product_publisher(const std::filesystem::path &a_product,
     auto mismatchedToolchainLease =
         take_value(publisher->acquire_build_lease(mismatchedToolchainPlan, cancellation, std::nullopt));
     require(mismatchedToolchainLease.has_value());
-    write_shipping_toolchain_evidence(binary, "0.0.0.0");
+    writeToolchainEvidence("0.0.0.0");
     require(
         !publisher->publish(mismatchedToolchainPlan, cancellation, std::move(*mismatchedToolchainLease), std::nullopt)
              .has_value());
     require(read_text(currentPath) == current &&
             !std::filesystem::exists(std::filesystem::path(mismatchedToolchainPlan.candidate_directory())));
-    write_shipping_toolchain_evidence(binary);
+    writeToolchainEvidence();
     auto mismatchedMinorToolsetLease =
         take_value(publisher->acquire_build_lease(mismatchedToolchainPlan, cancellation, std::nullopt));
     require(mismatchedMinorToolsetLease.has_value());
     write_shipping_toolchain_evidence(binary, CUE_TEST_WINDOWS_SDK_VERSION, CUE_TEST_PLATFORM_TOOLSET,
-                                      CUE_TEST_ENGINE_ROOT, "14.99.99999");
+                                      generic_path(installedEngineRoot), "14.99.99999");
     require(!publisher
                  ->publish(mismatchedToolchainPlan, cancellation, std::move(*mismatchedMinorToolsetLease), std::nullopt)
                  .has_value());
     require(read_text(currentPath) == current &&
             !std::filesystem::exists(std::filesystem::path(mismatchedToolchainPlan.candidate_directory())));
-    write_shipping_toolchain_evidence(binary);
+    writeToolchainEvidence();
     auto mismatchedProjectToolsetLease =
         take_value(publisher->acquire_build_lease(mismatchedToolchainPlan, cancellation, std::nullopt));
     require(mismatchedProjectToolsetLease.has_value());
     write_shipping_toolchain_evidence(binary, CUE_TEST_WINDOWS_SDK_VERSION, CUE_TEST_PLATFORM_TOOLSET,
-                                      CUE_TEST_ENGINE_ROOT, CUE_TEST_MSVC_TOOLSET_VERSION, "14.51.99999");
+                                      generic_path(installedEngineRoot), CUE_TEST_MSVC_TOOLSET_VERSION,
+                                      "14.51.99999");
     require(!publisher
                  ->publish(mismatchedToolchainPlan, cancellation, std::move(*mismatchedProjectToolsetLease),
                            std::nullopt)
                  .has_value());
     require(read_text(currentPath) == current &&
             !std::filesystem::exists(std::filesystem::path(mismatchedToolchainPlan.candidate_directory())));
-    write_shipping_toolchain_evidence(binary);
+    writeToolchainEvidence();
     auto mismatchedPlatformToolsetLease =
         take_value(publisher->acquire_build_lease(mismatchedToolchainPlan, cancellation, std::nullopt));
     require(mismatchedPlatformToolsetLease.has_value());
-    write_shipping_toolchain_evidence(binary, CUE_TEST_WINDOWS_SDK_VERSION, "v999");
+    writeToolchainEvidence(CUE_TEST_WINDOWS_SDK_VERSION, "v999");
     require(
         !publisher
              ->publish(mismatchedToolchainPlan, cancellation, std::move(*mismatchedPlatformToolsetLease), std::nullopt)
              .has_value());
     require(read_text(currentPath) == current &&
             !std::filesystem::exists(std::filesystem::path(mismatchedToolchainPlan.candidate_directory())));
-    write_shipping_toolchain_evidence(binary);
+    writeToolchainEvidence();
     auto mismatchedEngineRootLease =
         take_value(publisher->acquire_build_lease(mismatchedToolchainPlan, cancellation, std::nullopt));
     require(mismatchedEngineRootLease.has_value());
@@ -966,7 +1043,7 @@ void test_shipping_product_publisher(const std::filesystem::path &a_product,
              .has_value());
     require(read_text(currentPath) == current &&
             !std::filesystem::exists(std::filesystem::path(mismatchedToolchainPlan.candidate_directory())));
-    write_shipping_toolchain_evidence(binary);
+    writeToolchainEvidence();
 
     cue::BuildPlan changedSourcePlan =
         make_shipping_plan(projectRoot, "41234567-89ab-4cde-8f01-23456789abcd", a_assertContext);
@@ -978,6 +1055,19 @@ void test_shipping_product_publisher(const std::filesystem::path &a_product,
     require(read_text(currentPath) == current &&
             !std::filesystem::exists(std::filesystem::path(changedSourcePlan.candidate_directory())));
     write_text(projectRoot / "Source" / "Game" / "Test.cpp", "int cue_shipping_test = 1;\n");
+
+    cue::BuildPlan changedEngineSourcePlan =
+        make_shipping_plan(projectRoot, "71234567-89ab-4cde-8f01-23456789abcd", a_assertContext);
+    auto changedEngineSourceLease =
+        take_value(publisher->acquire_build_lease(changedEngineSourcePlan, cancellation, std::nullopt));
+    require(changedEngineSourceLease.has_value());
+    write_text(installedEngineRoot / "Engine" / "Source" / "Test.cpp", "int cue_engine_test = 2;\n");
+    require(!publisher
+                 ->publish(changedEngineSourcePlan, cancellation, std::move(*changedEngineSourceLease), std::nullopt)
+                 .has_value());
+    require(read_text(currentPath) == current &&
+            !std::filesystem::exists(std::filesystem::path(changedEngineSourcePlan.candidate_directory())));
+    write_text(installedEngineRoot / "Engine" / "Source" / "Test.cpp", "int cue_engine_test = 1;\n");
 
     cue::BuildPlan signedPlan =
         make_signed_shipping_plan(projectRoot, "51234567-89ab-4cde-8f01-23456789abcd", a_assertContext);
@@ -1036,6 +1126,8 @@ int main(int a_argumentCount, char **a_arguments)
     test_windows_artifact_publisher(std::filesystem::path(a_arguments[1]), std::filesystem::path(a_arguments[2]),
                                     std::filesystem::path(a_arguments[3]), std::filesystem::path(a_arguments[4]),
                                     std::filesystem::path(a_arguments[5]), assertContext);
+    test_installed_game_module_runtime_host(std::filesystem::path(a_arguments[1]),
+                                            std::filesystem::path(a_arguments[5]), assertContext);
     test_shipping_product_publisher(std::filesystem::path(a_arguments[6]), std::filesystem::path(a_arguments[7]),
                                     std::filesystem::path(a_arguments[8]), std::filesystem::path(a_arguments[9]),
                                     assertContext);

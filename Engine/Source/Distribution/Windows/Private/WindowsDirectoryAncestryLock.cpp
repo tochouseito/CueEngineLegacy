@@ -152,4 +152,11 @@ void WindowsDirectoryAncestryLock::release() noexcept
     }
     m_handles.clear();
 }
+
+std::vector<std::uintptr_t> WindowsDirectoryAncestryLock::take_handles() noexcept
+{
+    std::vector<std::uintptr_t> handles = std::move(m_handles);
+    m_handles.clear();
+    return handles;
+}
 } // namespace cue::distribution::windows_detail

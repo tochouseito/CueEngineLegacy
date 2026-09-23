@@ -96,6 +96,19 @@ class TestFatalHandler final : public cue::FatalHandler
            has_diagnostic(report, cue::BuildEnvironmentDiagnosticCode::MissingTool);
 }
 
+/// @brief Installed Source SDK契約が事前Build TreeなしでToolchainを利用可能と判定するか検証する
+[[nodiscard]] bool test_optional_engine_binary(const cue::AssertContext &a_assertContext)
+{
+    auto inventory = make_inventory();
+    inventory.engineBinaryRoot.clear();
+    inventory.engineBinaryAvailable = false;
+    auto requirements = make_requirements();
+    requirements.requiresEngineBinary = false;
+    const auto report = cue::validate_build_environment(inventory, requirements, a_assertContext);
+    return report.support == cue::BuildEnvironmentSupport::Supported &&
+           !has_diagnostic(report, cue::BuildEnvironmentDiagnosticCode::MissingEngineBinary);
+}
+
 /// @brief 既知だが範囲外のVersionをUnsupportedとして診断するか検証する
 [[nodiscard]] bool test_unsupported(const cue::AssertContext &a_assertContext)
 {
@@ -156,7 +169,8 @@ int main()
     std::vector<std::unique_ptr<cue::LogSink>> sinks;
     cue::Logger logger(fatalHandler, std::move(sinks));
     cue::AssertContext assertContext(logger, fatalHandler);
-    return test_supported(assertContext) && test_missing(assertContext) && test_unsupported(assertContext) &&
+    return test_supported(assertContext) && test_missing(assertContext) && test_optional_engine_binary(assertContext) &&
+                   test_unsupported(assertContext) &&
                    test_unsupported_architecture(assertContext) && test_ambiguous(assertContext) &&
                    test_safe_path_format(assertContext) && test_safe_command_line_format(assertContext)
                ? 0

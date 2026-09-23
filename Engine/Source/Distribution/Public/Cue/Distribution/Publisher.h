@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -17,6 +18,8 @@ class AssertContext;
 
 namespace cue::distribution
 {
+using DistributionHashCancellationCallback = bool (*)(const void *) noexcept;
+
 /// @brief Publisher開始／Inventory後に再取得するRepository State Evidence
 struct RepositoryStateEvidence final
 {
@@ -79,4 +82,10 @@ struct DistributionPublisherInventory final
 /// @brief Platform Adapterが読んだPayload Byte列のSHA-256をlowercase hexadecimalで返す
 [[nodiscard]] Result<std::string> compute_distribution_sha256(std::span<const std::byte> a_bytes,
                                                                const AssertContext &a_assertContext) noexcept;
+/// @brief Platform Adapterが読んだPayloadを1 MiB単位で取消可能にSHA-256へ変換する
+///
+/// 取消が観測された場合は成功した空Optionalを返す。
+[[nodiscard]] Result<std::optional<std::string>> compute_distribution_sha256_cancellable(
+    std::span<const std::byte> a_bytes, DistributionHashCancellationCallback a_cancellation,
+    const void *a_cancellationContext, const AssertContext &a_assertContext) noexcept;
 } // namespace cue::distribution

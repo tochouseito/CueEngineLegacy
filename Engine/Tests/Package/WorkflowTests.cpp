@@ -205,6 +205,7 @@ struct PublisherState final
     std::atomic<bool> invalidPortableExecutable = false;
     std::atomic<bool> oversizedRuntimePeImage = false;
     std::atomic<bool> oversizedRuntimePeInventory = false;
+    std::atomic<bool> runtimeHostOnlyInventoryOverflow = false;
     std::atomic<bool> readerLeaseActive = false;
     std::atomic<bool> artifactReadWithoutLease = false;
     std::atomic<bool> packageWriteWithLease = false;
@@ -549,18 +550,25 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         const std::vector<std::byte> moduleBytes = m_state->invalidPortableExecutable.load(std::memory_order_acquire)
                                                        ? text_bytes("test-game-module")
                                                        : make_test_pe();
+        const std::vector<std::byte> runtimeHostBytes = make_test_pe();
         const std::vector<std::byte> pdbBytes = text_bytes("test-debug-symbols");
         const std::vector<std::byte> metadataBytes = text_bytes("{\"schemaVersion\":1}\n");
         const bool hasOversizedInventory = m_state->oversizedRuntimePeInventory.load(std::memory_order_acquire);
+        const bool hasRuntimeHostOnlyOverflow =
+            m_state->runtimeHostOnlyInventoryOverflow.load(std::memory_order_acquire);
         auto modulePayload = cue::package::PackageFilePayload::create(
             cue::package::PackageFileRole::GameModule, "CueGameModule.dll", moduleBytes, *m_assertContext);
         auto metadataPayload =
             cue::package::PackageFilePayload::create(cue::package::PackageFileRole::GameModuleMetadata,
                                                      "CueGameModule.metadata.json", metadataBytes, *m_assertContext);
-        if (!modulePayload || !metadataPayload)
+        auto runtimeHostPayload = cue::package::PackageFilePayload::create(
+            cue::package::PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", runtimeHostBytes, *m_assertContext);
+        if (!modulePayload || !metadataPayload || !runtimeHostPayload)
         {
             return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(
-                modulePayload ? std::move(*metadataPayload.try_error()) : std::move(*modulePayload.try_error()));
+                !modulePayload ? std::move(*modulePayload.try_error())
+                               : (!metadataPayload ? std::move(*metadataPayload.try_error())
+                                                   : std::move(*runtimeHostPayload.try_error())));
         }
         const std::string artifactId(a_plan.operation_id());
         const std::filesystem::path versionDirectory = std::filesystem::path(a_plan.project_root()) /
@@ -570,9 +578,12 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         std::filesystem::create_directories(versionDirectory, error);
         if (error || !write_file(versionDirectory / L"CueGameModule.dll", moduleBytes) ||
             !write_file(versionDirectory / L"CueGameModule.pdb", pdbBytes) ||
+            !write_file(versionDirectory / L"CueRuntimeHost.exe", runtimeHostBytes) ||
             !write_file(versionDirectory / L"CueGameModule.metadata.json", metadataBytes) ||
             (hasOversizedInventory && (!write_file(versionDirectory / L"RuntimeDependencyA.dll", moduleBytes) ||
-                                       !write_file(versionDirectory / L"RuntimeDependencyB.dll", moduleBytes))))
+                                       !write_file(versionDirectory / L"RuntimeDependencyB.dll", moduleBytes))) ||
+            (hasRuntimeHostOnlyOverflow &&
+             !write_file(versionDirectory / L"RuntimeDependencyC.dll", moduleBytes)))
         {
             cue::ErrorCode code = cue::ErrorCode::create(m_assertContext->fatal_handler(), "Cue.Package.Test", 1);
             return cue::Result<std::optional<cue::BuildArtifactInventory>>::failure(cue::Error::create(
@@ -586,15 +597,25 @@ class MaterializingPublisher final : public cue::BuildArtifactPublisher
         const std::uint64_t moduleSize = m_state->oversizedRuntimePeImage.load(std::memory_order_acquire)
                                              ? cue::package::k_maximumRuntimePeImageBytes + 1U
                                              : moduleBytes.size();
+        const std::uint64_t runtimeHostSize = hasRuntimeHostOnlyOverflow
+                                                  ? cue::package::k_maximumRuntimePeImageBytes
+                                                  : runtimeHostBytes.size();
         std::vector<cue::BuildArtifactFile> files = {{"CueGameModule.dll", moduleSize, std::move(moduleHash)},
                                                      {"CueGameModule.pdb", pdbBytes.size(), std::string(64U, 'a')},
                                                      {"CueGameModule.metadata.json", metadataBytes.size(),
-                                                      std::string(metadataPayload.try_value()->entry().sha256())}};
+                                                      std::string(metadataPayload.try_value()->entry().sha256())},
+                                                     {"CueRuntimeHost.exe", runtimeHostSize,
+                                                      std::string(runtimeHostPayload.try_value()->entry().sha256())}};
         if (hasOversizedInventory)
         {
             const std::string dependencyHash(modulePayload.try_value()->entry().sha256());
             files.push_back({"RuntimeDependencyA.dll", cue::package::k_maximumRuntimePeImageBytes, dependencyHash});
             files.push_back({"RuntimeDependencyB.dll", cue::package::k_maximumRuntimePeImageBytes, dependencyHash});
+        }
+        if (hasRuntimeHostOnlyOverflow)
+        {
+            files.push_back({"RuntimeDependencyC.dll", cue::package::k_maximumRuntimePeImageBytes,
+                             std::string(modulePayload.try_value()->entry().sha256())});
         }
         auto inventory = cue::BuildArtifactInventory::create(a_plan, artifactId, std::move(files), *m_assertContext);
         if (!inventory)
@@ -826,15 +847,11 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     TestDirectory directory;
     const std::filesystem::path projectRoot = directory.path() / L"Project";
     const std::filesystem::path engineRoot = directory.path() / L"Engine";
-    const std::filesystem::path hostPath = engineRoot / L"bin" / L"Debug" / L"CueRuntimeHost.exe";
     std::filesystem::create_directories(projectRoot);
-    std::filesystem::create_directories(hostPath.parent_path());
-    {
-        const std::vector<std::byte> hostBytes = make_test_pe();
-        std::ofstream host(hostPath, std::ios::binary);
-        host.write(reinterpret_cast<const char *>(hostBytes.data()), static_cast<std::streamsize>(hostBytes.size()));
-    }
-
+    std::filesystem::create_directories(engineRoot);
+    constexpr std::string_view firstOperation = "01234567-89ab-4cde-8f01-23456789abcd";
+    cue::BuildRequest firstRequest =
+        make_request(projectRoot.generic_string(), std::string(firstOperation), a_assertContext);
     RunnerState buildRunner;
     RunnerState runRunner;
     PublisherState publisher;
@@ -854,18 +871,17 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     auto workflow = cue::package::GamePackageWorkflowService::create(
         std::move(buildService), std::make_unique<MaterializingArtifactReader>(publisher),
         std::move(guardedProjectFilesystem), std::move(*engineFilesystem.try_value()),
-        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {}, a_assertContext);
+        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {},
+        cue::package::RuntimeHostBuildSource::PublishedBuildArtifact, a_assertContext);
     auto runtimeData = make_runtime_data(a_assertContext);
     if (!require(workflow && runtimeData))
     {
         return false;
     }
     std::unique_ptr<cue::package::GamePackageWorkflowService> service = std::move(*workflow.try_value());
-    constexpr std::string_view firstOperation = "01234567-89ab-4cde-8f01-23456789abcd";
     if (!require(
-            service->start(make_request(projectRoot.generic_string(), std::string(firstOperation), a_assertContext),
-                           cue::CMakeConfigureMode::Required, {1U, 0U, 0U}, std::string(k_projectId),
-                           *runtimeData.try_value()) &&
+            service->start(std::move(firstRequest), cue::CMakeConfigureMode::Required, {1U, 0U, 0U},
+                           std::string(k_projectId), *runtimeData.try_value()) &&
             service->wait_for_package()))
     {
         return false;
@@ -974,6 +990,19 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
         return false;
     }
     publisher.oversizedRuntimePeInventory.store(false, std::memory_order_release);
+    publisher.runtimeHostOnlyInventoryOverflow.store(true, std::memory_order_release);
+    if (!require(service->retry("19234567-89ab-4cde-8f01-23456789abcd", {1U, 0U, 0U}, std::string(k_projectId),
+                                *runtimeData.try_value()) &&
+                 service->wait_for_package()))
+    {
+        return false;
+    }
+    if (!require(service->snapshot().state == cue::package::PackageWorkflowState::Failed &&
+                 publisher.artifactReadCalls.load(std::memory_order_acquire) > artifactReadsBeforeResourceLimits))
+    {
+        return false;
+    }
+    publisher.runtimeHostOnlyInventoryOverflow.store(false, std::memory_order_release);
     publisher.corruptInventory.store(true, std::memory_order_release);
     if (!require(service->retry("21234567-89ab-4cde-8f01-23456789abcd", {1U, 0U, 0U}, std::string(k_projectId),
                                 *runtimeData.try_value()) &&
@@ -1151,7 +1180,8 @@ class MaterializingArtifactReader final : public cue::BuildArtifactReader
     auto workflow = cue::package::GamePackageWorkflowService::create(
         std::move(*build.try_value()), std::make_unique<MaterializingArtifactReader>(publisher),
         std::move(guardedProjectFilesystem), std::move(*engineFilesystem.try_value()),
-        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {}, a_assertContext);
+        std::make_unique<ControlledRunner>(runRunner), projectRoot.generic_string(), {},
+        cue::package::RuntimeHostBuildSource::EngineBinaryRoot, a_assertContext);
     auto runtimeData = make_runtime_data(a_assertContext);
     if (!require(workflow && runtimeData))
     {

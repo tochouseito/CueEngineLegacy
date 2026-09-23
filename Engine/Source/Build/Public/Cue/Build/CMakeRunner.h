@@ -43,6 +43,8 @@ struct CMakeRunnerSettings final
     std::optional<std::chrono::milliseconds> buildTimeout;
     /// @brief CMake ConfigureとMSBuildへ固定するVisual Studio minor Toolset Version
     std::string visualStudioToolsetVersion;
+    /// @brief Game Moduleと同じ外部Build TreeでConfiguration一致RuntimeHostもBuildする
+    bool buildsRuntimeHost = false;
 };
 
 /// @brief 完了StageとCapture済みLogを一つの所有値へ束ねる

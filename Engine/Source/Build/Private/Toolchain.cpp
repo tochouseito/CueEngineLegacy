@@ -260,7 +260,7 @@ BuildEnvironmentReport validate_build_environment(const BuildEnvironmentInventor
                             std::nullopt, a_inventory.engineSourceRoot, "CueEngine source root is unavailable",
                             "Select a CueEngine checkout containing Engine/Source/GameModule"});
         }
-        if (!a_inventory.engineBinaryAvailable)
+        if (a_requirements.requiresEngineBinary && !a_inventory.engineBinaryAvailable)
         {
             add_diagnostic(report,
                            {BuildEnvironmentDiagnosticCode::MissingEngineBinary, BuildEnvironmentSupport::Unknown,

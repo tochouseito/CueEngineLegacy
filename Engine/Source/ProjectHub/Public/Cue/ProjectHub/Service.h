@@ -32,6 +32,27 @@ struct ProjectStorageMetadata final
     std::uint64_t byteSize;
 };
 
+/// @brief Project Hubが表示し選択する一つのInstalled Engine Version
+struct InstalledEngineVersionView final
+{
+    std::string directoryName;
+    std::string displayName;
+    EngineVersion engineVersion;
+    std::string bundleId;
+    std::string manifestDigest;
+    std::string diagnostic;
+    bool isAvailable;
+    bool isSelected;
+};
+
+/// @brief Editor起動直前にDistribution層で再検証するInstalled Version Identity
+struct InstalledEngineLaunchIdentity final
+{
+    std::string versionDirectory;
+    std::string bundleId;
+    std::string manifestDigest;
+};
+
 /// @brief Stored Locator を開く Platform Composition 境界
 class ProjectHubPlatform
 {
@@ -75,6 +96,7 @@ struct ProjectHubConfiguration final
     ProjectCapabilityProfile capabilityProfile;
     ProjectCapabilitySnapshot capabilitySnapshot;
     EngineCompatibility blankProjectCompatibility;
+    std::vector<InstalledEngineVersionView> installedEngineVersions;
 };
 
 /// @brief Project HubがUIへ提示する作成Template
@@ -173,18 +195,21 @@ class EditorLaunchRequest final
     [[nodiscard]] std::string_view engine_compatibility_id() const noexcept;
     [[nodiscard]] const std::optional<std::string> &initial_scene_locator() const noexcept;
     [[nodiscard]] const std::optional<std::string> &expected_initial_scene_asset_id() const noexcept;
+    [[nodiscard]] const std::optional<InstalledEngineLaunchIdentity> &installed_engine_identity() const noexcept;
 
   private:
     friend class ProjectHubService;
     EditorLaunchRequest(std::string &&a_projectDescriptorLocator, std::string &&a_expectedProjectId,
                         std::string &&a_engineCompatibilityId, std::optional<std::string> &&a_initialSceneLocator,
-                        std::optional<std::string> &&a_expectedInitialSceneAssetId) noexcept;
+                        std::optional<std::string> &&a_expectedInitialSceneAssetId,
+                        std::optional<InstalledEngineLaunchIdentity> &&a_installedEngineIdentity) noexcept;
 
     std::string m_projectDescriptorLocator;
     std::string m_expectedProjectId;
     std::string m_engineCompatibilityId;
     std::optional<std::string> m_initialSceneLocator;
     std::optional<std::string> m_expectedInitialSceneAssetId;
+    std::optional<InstalledEngineLaunchIdentity> m_installedEngineIdentity;
 };
 
 /// @brief Project Registry、Descriptor、Compatibilityを束ねるUI非依存Application Service
@@ -211,6 +236,14 @@ class ProjectHubService final
 
     [[nodiscard]] std::span<const ProjectTemplateView> templates() const noexcept;
     [[nodiscard]] std::span<const ProjectRowView> projects() const noexcept;
+    [[nodiscard]] std::span<const InstalledEngineVersionView> installed_engine_versions() const noexcept;
+
+    /// @brief Session内で使う検証済みInstalled Engine Versionを選択しProject互換Viewを再評価する
+    [[nodiscard]] Result<void> select_installed_engine_version(std::string_view a_versionDirectory) noexcept;
+
+    /// @brief Distribution層で再検査したInstalled Version一覧へ置換しProject互換Viewを再評価する
+    [[nodiscard]] Result<void> replace_installed_engine_versions(
+        std::vector<InstalledEngineVersionView> a_versions) noexcept;
 
     /// @brief 全Recent Locatorを再検査し、欠損や破損をEntry単位で隔離してViewModelを更新する
     /// @note ErrorのRoot CodeがCue.IO/IoError::DurabilityUnknownなら変更は公開済みでprojectsの旧Spanは無効

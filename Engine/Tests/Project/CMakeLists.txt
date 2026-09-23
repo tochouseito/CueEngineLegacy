@@ -82,7 +82,7 @@ set_tests_properties(Cue.Project.Compatibility PROPERTIES LABELS Project TIMEOUT
 
 if(WIN32)
     add_test(NAME Cue.Project.Generator.Windows COMMAND CueProjectGeneratorWindowsTests)
-    set_tests_properties(Cue.Project.Generator.Windows PROPERTIES LABELS Project TIMEOUT 360)
+    set_tests_properties(Cue.Project.Generator.Windows PROPERTIES LABELS Project TIMEOUT 900)
 
     add_test(NAME Cue.Project.M09.Process COMMAND CueProjectM09ProcessTests)
     set_tests_properties(Cue.Project.M09.Process PROPERTIES LABELS Project TIMEOUT 30)

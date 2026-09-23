@@ -10,6 +10,11 @@ namespace cue
 class AssertContext;
 }
 
+namespace cue::distribution
+{
+class WindowsInstalledVersionExecutionLease;
+}
+
 namespace cue::project_hub
 {
 /// @brief 起動済みEditor Processの終了状態をNative Handleなしで監視する境界
@@ -36,5 +41,6 @@ class WindowsEditorProcess
 /// @brief Editor Launch Requestを独立Windows Processへ変換し、監視可能な一意所有者を返す
 [[nodiscard]] Result<std::unique_ptr<WindowsEditorProcess>> launch_windows_editor_process(
     std::string_view a_editorExecutableLocator, const EditorLaunchRequest &a_request,
-    const AssertContext &a_assertContext) noexcept;
+    const AssertContext &a_assertContext,
+    distribution::WindowsInstalledVersionExecutionLease *a_executionLease = nullptr) noexcept;
 } // namespace cue::project_hub

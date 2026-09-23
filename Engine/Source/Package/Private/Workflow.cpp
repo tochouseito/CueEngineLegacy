@@ -552,7 +552,8 @@ class PackageRunGuard final
     std::uint64_t totalBytes = 0U;
     for (const cue::BuildArtifactFile &file : a_files)
     {
-        if (file.relativePath == "CueGameModule.pdb" || file.relativePath == "CueGameModule.metadata.json")
+        if (file.relativePath == "CueGameModule.pdb" || file.relativePath == "CueGameModule.metadata.json" ||
+            file.relativePath == "CueRuntimeHost.exe")
         {
             continue;
         }
@@ -584,12 +585,14 @@ struct GamePackageWorkflowService::Impl final
     Impl(std::unique_ptr<GameBuildService> a_buildService, std::unique_ptr<BuildArtifactReader> a_artifactReader,
          std::unique_ptr<FilesystemRoot> a_projectFilesystem, std::unique_ptr<FilesystemRoot> a_engineBinaryFilesystem,
          std::unique_ptr<ChildProcessRunner> a_runProcessRunner, std::string a_projectRoot,
-         std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, const AssertContext &a_assertContext) noexcept
+         std::vector<ChildProcessEnvironmentEntry> a_runEnvironment,
+         RuntimeHostBuildSource a_runtimeHostBuildSource, const AssertContext &a_assertContext) noexcept
         : buildService(std::move(a_buildService)), artifactReader(std::move(a_artifactReader)),
           projectFilesystem(std::move(a_projectFilesystem)),
           engineBinaryFilesystem(std::move(a_engineBinaryFilesystem)), runProcessRunner(std::move(a_runProcessRunner)),
           projectRoot(std::move(a_projectRoot)), runEnvironment(std::move(a_runEnvironment)),
-          assertContext(&a_assertContext), ownerThread(std::this_thread::get_id())
+          runtimeHostBuildSource(a_runtimeHostBuildSource), assertContext(&a_assertContext),
+          ownerThread(std::this_thread::get_id())
     {
     }
 
@@ -797,15 +800,6 @@ struct GamePackageWorkflowService::Impl final
 
             std::vector<PackageFilePayload> payloads;
             payloads.reserve(a_artifact.files().size() + 3U);
-            Result<PackageFilePayload> runtimeHost = read_payload(
-                *engineBinaryFilesystem, join_relative("bin", join_relative(configuration, "CueRuntimeHost.exe")),
-                PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
-            if (!runtimeHost)
-            {
-                return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
-            }
-            payloads.push_back(std::move(*runtimeHost.try_value()));
-
             const std::optional<std::string> artifactDirectory =
                 make_project_relative(projectRoot, a_artifact.version_directory());
             if (!artifactDirectory)
@@ -829,6 +823,47 @@ struct GamePackageWorkflowService::Impl final
             }
             std::unique_ptr<BuildArtifactReadLease> artifactReadLease = std::move(**acquired.try_value());
 
+            if (runtimeHostBuildSource == RuntimeHostBuildSource::PublishedBuildArtifact)
+            {
+                const auto runtimeHostFile =
+                    std::find_if(a_artifact.files().begin(), a_artifact.files().end(),
+                                 [](const BuildArtifactFile &a_file) noexcept
+                                 { return a_file.relativePath == "CueRuntimeHost.exe"; });
+                if (runtimeHostFile == a_artifact.files().end())
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(make_workflow_error(
+                        *assertContext, WorkflowError::ArtifactMismatch,
+                        "Published Build Artifact does not contain RuntimeHost"));
+                }
+                Result<PackageFilePayload> runtimeHost = read_payload(
+                    *projectFilesystem, join_relative(*artifactDirectory, runtimeHostFile->relativePath),
+                    PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
+                if (!runtimeHost)
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
+                }
+                if (runtimeHost.try_value()->entry().byte_size() != runtimeHostFile->byteSize ||
+                    runtimeHost.try_value()->entry().sha256() != runtimeHostFile->contentHash)
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(make_workflow_error(
+                        *assertContext, WorkflowError::ArtifactMismatch,
+                        "RuntimeHost bytes differ from the published inventory"));
+                }
+                payloads.push_back(std::move(*runtimeHost.try_value()));
+            }
+            else
+            {
+                Result<PackageFilePayload> runtimeHost = read_payload(
+                    *engineBinaryFilesystem,
+                    join_relative("bin", join_relative(configuration, "CueRuntimeHost.exe")),
+                    PackageFileRole::RuntimeHost, "CueRuntimeHost.exe", k_maximumRuntimePeImageBytes);
+                if (!runtimeHost)
+                {
+                    return Result<PublishedRuntimePackageSnapshot>::failure(std::move(*runtimeHost.try_error()));
+                }
+                payloads.push_back(std::move(*runtimeHost.try_value()));
+            }
+
             for (const BuildArtifactFile &file : a_artifact.files())
             {
                 if (a_cancellation.is_cancel_requested())
@@ -836,7 +871,7 @@ struct GamePackageWorkflowService::Impl final
                     return Result<PublishedRuntimePackageSnapshot>::failure(make_workflow_error(
                         *assertContext, WorkflowError::PackagePublicationFailed, "Package publication was cancelled"));
                 }
-                if (file.relativePath == "CueGameModule.pdb")
+                if (file.relativePath == "CueGameModule.pdb" || file.relativePath == "CueRuntimeHost.exe")
                 {
                     continue;
                 }
@@ -981,6 +1016,7 @@ struct GamePackageWorkflowService::Impl final
     std::unique_ptr<ChildProcessRunner> runProcessRunner;
     std::string projectRoot;
     std::vector<ChildProcessEnvironmentEntry> runEnvironment;
+    RuntimeHostBuildSource runtimeHostBuildSource = RuntimeHostBuildSource::EngineBinaryRoot;
     const AssertContext *assertContext;
     std::thread::id ownerThread;
     mutable std::mutex mutex;
@@ -1030,12 +1066,15 @@ Result<std::unique_ptr<GamePackageWorkflowService>> GamePackageWorkflowService::
     std::unique_ptr<GameBuildService> a_buildService, std::unique_ptr<BuildArtifactReader> a_artifactReader,
     std::unique_ptr<FilesystemRoot> a_projectFilesystem, std::unique_ptr<FilesystemRoot> a_engineBinaryFilesystem,
     std::unique_ptr<ChildProcessRunner> a_runProcessRunner, std::string a_projectRoot,
-    std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, const AssertContext &a_assertContext) noexcept
+    std::vector<ChildProcessEnvironmentEntry> a_runEnvironment, RuntimeHostBuildSource a_runtimeHostBuildSource,
+    const AssertContext &a_assertContext) noexcept
 {
     try
     {
         if (!a_buildService || !a_artifactReader || !a_projectFilesystem || !a_engineBinaryFilesystem ||
-            !a_runProcessRunner || a_projectRoot.empty())
+            !a_runProcessRunner || a_projectRoot.empty() ||
+            (a_runtimeHostBuildSource != RuntimeHostBuildSource::EngineBinaryRoot &&
+             a_runtimeHostBuildSource != RuntimeHostBuildSource::PublishedBuildArtifact))
         {
             return Result<std::unique_ptr<GamePackageWorkflowService>>::failure(make_workflow_error(
                 a_assertContext, WorkflowError::MissingDependency, "Package workflow dependency is missing"));
@@ -1043,7 +1082,7 @@ Result<std::unique_ptr<GamePackageWorkflowService>> GamePackageWorkflowService::
         auto impl = std::make_unique<Impl>(std::move(a_buildService), std::move(a_artifactReader),
                                            std::move(a_projectFilesystem), std::move(a_engineBinaryFilesystem),
                                            std::move(a_runProcessRunner), std::move(a_projectRoot),
-                                           std::move(a_runEnvironment), a_assertContext);
+                                           std::move(a_runEnvironment), a_runtimeHostBuildSource, a_assertContext);
         return Result<std::unique_ptr<GamePackageWorkflowService>>::success(
             std::unique_ptr<GamePackageWorkflowService>(new GamePackageWorkflowService(std::move(impl))));
     }

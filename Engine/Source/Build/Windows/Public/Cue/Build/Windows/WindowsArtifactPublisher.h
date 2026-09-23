@@ -29,6 +29,15 @@ enum class WindowsBuildArtifactError : std::int64_t
     PublisherMismatch
 };
 
+/// @brief Installed Distribution Manifestから引き継ぐGit非依存のEngine Source Provenance
+struct WindowsInstalledEngineSourceProvenance final
+{
+    std::string sourceRoot;
+    std::string sourceRevision;
+    std::string sourceInventoryHash;
+    std::string publisherBuildIdentityDigest;
+};
+
 /// @brief Project契約を所有するWindows Build Artifact Publisherを構築する
 ///
 /// Project RootとDescriptorは呼出中だけ借用し、必要なProject IDとCompatibilityを返却PublisherへCopyする。
@@ -37,6 +46,12 @@ enum class WindowsBuildArtifactError : std::int64_t
 /// 回復可能なPath、Lock、Metadata初期化失敗はErrorを返し、Allocation等の回復不能例外はFatalHandlerへ渡す。
 [[nodiscard]] Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher(
     std::string a_projectRoot, const ProjectDescriptor &a_descriptor, const AssertContext &a_assertContext) noexcept;
+
+/// @brief Installed SDKのManifest ProvenanceへBindingしたWindows Build Artifact Publisherを構築する
+[[nodiscard]] Result<std::unique_ptr<BuildArtifactPublisher>> create_windows_build_artifact_publisher(
+    std::string a_projectRoot, const ProjectDescriptor &a_descriptor,
+    WindowsInstalledEngineSourceProvenance a_engineSourceProvenance,
+    const AssertContext &a_assertContext) noexcept;
 
 /// @brief Project契約へBindingしたWindows Build Artifact Store Readerを構築する
 ///

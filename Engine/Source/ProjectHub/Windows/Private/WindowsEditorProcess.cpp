@@ -1,16 +1,19 @@
 #include <Cue/ProjectHub/Windows/WindowsProjectHubPlatform.h>
 
+#include <Cue/Distribution/Windows/Installer.h>
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Windows/UtfConversion.h>
 #include <Cue/IO/Error.h>
 #include <Cue/ProjectHub/Error.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <Windows.h>
 
@@ -112,6 +115,37 @@ void append_argument(std::wstring &a_commandLine, std::wstring_view a_argument)
                                                           "Editor process did not complete normally", std::move(cause));
 }
 
+/// @brief Leaseが固定したEditor File Identityと起動Pathの現在対象が一致するか返す
+[[nodiscard]] bool matches_locked_editor_file(std::uintptr_t a_lockedHandle,
+                                              const std::wstring &a_executable) noexcept
+{
+    if (a_lockedHandle == 0U)
+    {
+        return false;
+    }
+    const HANDLE locked = reinterpret_cast<HANDLE>(a_lockedHandle);
+    const HANDLE current = CreateFileW(a_executable.c_str(), FILE_READ_ATTRIBUTES,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (current == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    BY_HANDLE_FILE_INFORMATION lockedIdentity{};
+    BY_HANDLE_FILE_INFORMATION currentIdentity{};
+    const bool matches =
+        GetFileInformationByHandleEx(current, FileAttributeTagInfo, &attributes, sizeof(attributes)) != FALSE &&
+        (attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
+        GetFileInformationByHandle(locked, &lockedIdentity) != FALSE &&
+        GetFileInformationByHandle(current, &currentIdentity) != FALSE &&
+        lockedIdentity.dwVolumeSerialNumber == currentIdentity.dwVolumeSerialNumber &&
+        lockedIdentity.nFileIndexHigh == currentIdentity.nFileIndexHigh &&
+        lockedIdentity.nFileIndexLow == currentIdentity.nFileIndexLow;
+    CloseHandle(current);
+    return matches;
+}
+
 /// @brief ProcessとPrimary Thread Handleを一意所有して非待機終了監視を提供する
 class WindowsEditorProcessImpl final : public cue::project_hub::WindowsEditorProcess
 {
@@ -175,7 +209,8 @@ namespace cue::project_hub
 {
 Result<std::unique_ptr<WindowsEditorProcess>> launch_windows_editor_process(
     std::string_view a_editorExecutableLocator, const EditorLaunchRequest &a_request,
-    const AssertContext &a_assertContext) noexcept
+    const AssertContext &a_assertContext,
+    distribution::WindowsInstalledVersionExecutionLease *a_executionLease) noexcept
 {
     Result<std::wstring> executable = to_utf16(a_editorExecutableLocator, a_assertContext);
     if (!executable || executable.try_value()->empty())
@@ -265,6 +300,80 @@ Result<std::unique_ptr<WindowsEditorProcess>> launch_windows_editor_process(
             return Result<std::unique_ptr<WindowsEditorProcess>>::failure(std::move(*sceneAssetId.try_error()));
         }
     }
+    if (a_executionLease != nullptr)
+    {
+        if (a_editorExecutableLocator != a_executionLease->editor_executable() ||
+            a_executionLease->native_handle() == 0U || a_executionLease->native_editor_handle() == 0U)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(make_project_hub_error(
+                a_assertContext, ProjectHubError::EditorLaunchFailed,
+                "Installed Editor executable does not match its validated Execution Lease"));
+        }
+        try
+        {
+            append_argument(commandLine, L"--engine-install-root");
+        }
+        catch (...)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        Result<void> installRoot =
+            append_utf8_argument(commandLine, a_executionLease->install_root(), a_assertContext);
+        if (!installRoot)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(std::move(*installRoot.try_error()));
+        }
+        try
+        {
+            append_argument(commandLine, L"--engine-version-directory");
+        }
+        catch (...)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        Result<void> versionDirectory =
+            append_utf8_argument(commandLine, a_executionLease->version_directory(), a_assertContext);
+        if (!versionDirectory)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(std::move(*versionDirectory.try_error()));
+        }
+        try
+        {
+            append_argument(commandLine, L"--engine-bundle-id");
+        }
+        catch (...)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        Result<void> bundleId = append_utf8_argument(commandLine, a_executionLease->bundle_id(), a_assertContext);
+        if (!bundleId)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(std::move(*bundleId.try_error()));
+        }
+        try
+        {
+            append_argument(commandLine, L"--engine-manifest-digest");
+        }
+        catch (...)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        Result<void> manifestDigest =
+            append_utf8_argument(commandLine, a_executionLease->manifest_digest(), a_assertContext);
+        if (!manifestDigest)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(std::move(*manifestDigest.try_error()));
+        }
+        try
+        {
+            append_argument(commandLine, L"--engine-execution-lease-handle");
+            append_argument(commandLine, std::to_wstring(a_executionLease->native_handle()));
+        }
+        catch (...)
+        {
+            terminate_allocation(a_assertContext);
+        }
+    }
     if (commandLine.size() >= k_maxCommandLineLength)
     {
         return Result<std::unique_ptr<WindowsEditorProcess>>::failure(
@@ -272,11 +381,65 @@ Result<std::unique_ptr<WindowsEditorProcess>> launch_windows_editor_process(
                                    "Editor process command line exceeds the Windows limit"));
     }
 
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
-    const BOOL created = CreateProcessW(executable.try_value()->c_str(), commandLine.data(), nullptr, nullptr, FALSE, 0,
-                                        nullptr, nullptr, &startup, &process);
+    BOOL created = FALSE;
+    if (a_executionLease == nullptr)
+    {
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        created = CreateProcessW(executable.try_value()->c_str(), commandLine.data(), nullptr, nullptr, FALSE, 0,
+                                 nullptr, nullptr, &startup, &process);
+    }
+    else
+    {
+        if (!matches_locked_editor_file(a_executionLease->native_editor_handle(), *executable.try_value()))
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(make_project_hub_error(
+                a_assertContext, ProjectHubError::EditorLaunchFailed,
+                "Installed Editor File Identity changed before process creation"));
+        }
+        SIZE_T attributeBytes = 0U;
+        static_cast<void>(InitializeProcThreadAttributeList(nullptr, 1U, 0U, &attributeBytes));
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || attributeBytes == 0U)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(
+                make_launch_error(a_assertContext, GetLastError()));
+        }
+        std::vector<std::byte> attributeStorage;
+        try
+        {
+            attributeStorage.resize(attributeBytes);
+        }
+        catch (...)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.lpAttributeList =
+            reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+        if (InitializeProcThreadAttributeList(startup.lpAttributeList, 1U, 0U, &attributeBytes) == FALSE)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(
+                make_launch_error(a_assertContext, GetLastError()));
+        }
+        HANDLE inheritedHandle = reinterpret_cast<HANDLE>(a_executionLease->native_handle());
+        if (UpdateProcThreadAttribute(startup.lpAttributeList, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                      &inheritedHandle, sizeof(inheritedHandle), nullptr, nullptr) == FALSE)
+        {
+            const DWORD error = GetLastError();
+            DeleteProcThreadAttributeList(startup.lpAttributeList);
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(make_launch_error(a_assertContext, error));
+        }
+        created = CreateProcessW(executable.try_value()->c_str(), commandLine.data(), nullptr, nullptr, TRUE,
+                                 EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &startup.StartupInfo, &process);
+        const DWORD error = created == FALSE ? GetLastError() : ERROR_SUCCESS;
+        DeleteProcThreadAttributeList(startup.lpAttributeList);
+        if (created == FALSE)
+        {
+            return Result<std::unique_ptr<WindowsEditorProcess>>::failure(make_launch_error(a_assertContext, error));
+        }
+    }
     if (!created)
     {
         return Result<std::unique_ptr<WindowsEditorProcess>>::failure(

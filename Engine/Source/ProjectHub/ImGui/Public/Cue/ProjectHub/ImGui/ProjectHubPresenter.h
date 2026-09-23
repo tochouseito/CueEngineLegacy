@@ -15,6 +15,21 @@ class AssertContext;
 
 namespace cue::project_hub
 {
+/// @brief Project Hub UIからComposition Rootへ渡すInstalled Engine管理操作
+enum class InstalledEngineOperationKind : std::uint8_t
+{
+    InstallUnsignedLocalBundle,
+    RollbackVersion,
+    UninstallVersion
+};
+
+/// @brief Install Bundle RootまたはInstalled Version Directoryを持つ一回限りの操作要求
+struct InstalledEngineOperationRequest final
+{
+    InstalledEngineOperationKind kind = InstalledEngineOperationKind::RollbackVersion;
+    std::string target;
+};
+
 /// @brief ProjectHubServiceの所有ViewをImGui操作へ変換するPresentation Adapter
 class ProjectHubPresenter final
 {
@@ -35,8 +50,9 @@ class ProjectHubPresenter final
     [[nodiscard]] static Result<std::unique_ptr<ProjectHubPresenter>> create(
         ProjectHubService &a_service, const AssertContext &a_assertContext) noexcept;
 
-    /// @brief 現在のService ViewからProject Hub画面を描画し、Editor起動可否を操作へ反映する
-    void draw(bool a_canLaunchEditor = true) noexcept;
+    /// @brief 現在のService ViewからProject Hub画面を描画し、Editor起動とInstalled Engine管理可否を操作へ反映する
+    void draw(bool a_canLaunchEditor = true, bool a_canManageInstalledEngines = false,
+              bool a_isInstalledEngineOperationRunning = false) noexcept;
 
     /// @brief Open操作で生成されたEditor Launch Requestを一度だけ移動して返す
     [[nodiscard]] std::optional<EditorLaunchRequest> take_editor_launch_request() noexcept;
@@ -53,6 +69,15 @@ class ProjectHubPresenter final
     /// @brief Folder Dialog で選択した UTF-8 Absolute Path を既存 Project 登録入力へ反映する
     void apply_registration_selection(std::string_view a_projectLocator) noexcept;
 
+    /// @brief 未署名Local Developer BundleのFolder参照要求を一度だけ返す
+    [[nodiscard]] bool take_engine_bundle_browse_request() noexcept;
+
+    /// @brief Folder Dialogで選択したBundle Rootを明示Install要求へ変換する
+    void apply_engine_bundle_selection(std::string_view a_bundleRoot) noexcept;
+
+    /// @brief Installed Engine管理操作を一度だけ移動して返す
+    [[nodiscard]] std::optional<InstalledEngineOperationRequest> take_installed_engine_operation_request() noexcept;
+
     /// @brief Composition Rootで失敗したFolder Dialogを日本語Messageへ反映する
     void report_folder_browse_failure(const Error &a_error) noexcept;
 
@@ -61,6 +86,15 @@ class ProjectHubPresenter final
 
     /// @brief 監視中Editor Processの正常終了を再操作可能な状態として表示する
     void report_editor_process_completed() noexcept;
+
+    /// @brief Installed Engine管理操作の成功を日本語Messageへ反映する
+    void report_installed_engine_operation_completed(std::string_view a_message) noexcept;
+
+    /// @brief Workerで開始したInstalled Engine管理操作を進行中Messageへ反映する
+    void report_installed_engine_operation_started() noexcept;
+
+    /// @brief Installed Engine管理操作の失敗を日本語Messageへ反映する
+    void report_installed_engine_operation_failure(const Error &a_error) noexcept;
 
     /// @brief Escapeまたは終了操作がTool Session終了を要求したか返す
     [[nodiscard]] bool is_exit_requested() const noexcept;
@@ -76,6 +110,8 @@ class ProjectHubPresenter final
     void draw_register_dialog() noexcept;
     /// @brief 一覧除外確認Dialogを描画する
     void draw_remove_dialog() noexcept;
+    /// @brief Installed Engine Version削除の確認Dialogを描画する
+    void draw_engine_uninstall_dialog() noexcept;
     /// @brief 旧Project Descriptorの明示Migration確認Dialogを描画する
     void draw_migrate_dialog() noexcept;
     /// @brief 選択Projectを再検証してEditor Launch Requestを生成する
@@ -95,14 +131,17 @@ class ProjectHubPresenter final
     std::string m_selectedTemplateId;
     std::string m_pendingRemoveProjectId;
     std::string m_pendingMigrateProjectId;
+    std::string m_pendingUninstallVersionDirectory;
     std::string m_message;
     std::optional<EditorLaunchRequest> m_launchRequest;
+    std::optional<InstalledEngineOperationRequest> m_installedEngineOperationRequest;
     std::string m_parentLocator;
     std::string m_registerLocator;
     std::array<char, 128> m_projectName{};
     bool m_openCreateDialog = false;
     bool m_openRegisterDialog = false;
     bool m_openRemoveDialog = false;
+    bool m_openEngineUninstallDialog = false;
     bool m_openMigrateDialog = false;
     bool m_confirmMovedProject = false;
     bool m_hasError = false;
@@ -110,5 +149,6 @@ class ProjectHubPresenter final
     bool m_isExitRequested = false;
     bool m_destinationBrowseRequested = false;
     bool m_registrationBrowseRequested = false;
+    bool m_engineBundleBrowseRequested = false;
 };
 } // namespace cue::project_hub

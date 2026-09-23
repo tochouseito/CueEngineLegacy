@@ -45,6 +45,20 @@ void require(bool a_condition, std::source_location a_location = std::source_loc
     return std::string(64U, a_value);
 }
 
+struct HashCancellationState final
+{
+    mutable std::size_t calls = 0U;
+    std::size_t cancelAtCall = 0U;
+};
+
+/// @brief 指定回数目のSHA-256取消確認で停止を要求する
+[[nodiscard]] bool request_hash_cancel(const void *a_context) noexcept
+{
+    const HashCancellationState &state = *static_cast<const HashCancellationState *>(a_context);
+    ++state.calls;
+    return state.calls >= state.cancelAtCall;
+}
+
 [[nodiscard]] cue::distribution::PublisherBuildIdentity make_identity()
 {
     return {
@@ -261,5 +275,16 @@ int main()
         std::span<const std::byte>(emptyBytes.data(), 0U), assertContext);
     require(emptyHash.has_value());
     require(*emptyHash.try_value() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    const std::vector<std::byte> cancellableBytes(3U * 1024U * 1024U, std::byte{0x5aU});
+    HashCancellationState cancelledState{0U, 2U};
+    const auto cancelledHash = cue::distribution::compute_distribution_sha256_cancellable(
+        cancellableBytes, &request_hash_cancel, &cancelledState, assertContext);
+    require(cancelledHash.has_value() && !cancelledHash.try_value()->has_value() && cancelledState.calls == 2U);
+    HashCancellationState completedState{0U, 10U};
+    const auto completedHash = cue::distribution::compute_distribution_sha256_cancellable(
+        cancellableBytes, &request_hash_cancel, &completedState, assertContext);
+    const auto expectedHash = cue::distribution::compute_distribution_sha256(cancellableBytes, assertContext);
+    require(completedHash.has_value() && completedHash.try_value()->has_value() && expectedHash.has_value() &&
+            **completedHash.try_value() == *expectedHash.try_value());
     return 0;
 }

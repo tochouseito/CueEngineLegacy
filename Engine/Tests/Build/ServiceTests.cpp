@@ -46,7 +46,80 @@ struct RunnerState final
 {
     std::atomic<RunnerMode> mode = RunnerMode::BlockUntilCancelled;
     std::atomic<std::uint32_t> calls = 0U;
+    std::atomic<std::uint32_t> configureCalls = 0U;
     std::atomic<bool> processActive = false;
+};
+
+struct InputLeaseState final
+{
+    std::atomic<std::uint32_t> acquisitions = 0U;
+    std::atomic<std::uint32_t> validations = 0U;
+    std::atomic<std::uint32_t> liveLeases = 0U;
+    std::atomic<bool> blockUntilCancelled = false;
+    std::atomic<bool> active = false;
+};
+
+class TestInputLease final : public cue::BuildInputLease
+{
+  public:
+    /// @brief Test共有状態へ一つのLive Leaseを記録する
+    explicit TestInputLease(InputLeaseState &a_state) noexcept : m_state(&a_state)
+    {
+        m_state->liveLeases.fetch_add(1U, std::memory_order_release);
+    }
+    /// @brief Test Leaseは外部入力を持たないため公開前検証を成功させる
+    [[nodiscard]] cue::Result<void> validate_before_artifact_publish(
+        const cue::ChildProcessCancellation &, const cue::AssertContext &) noexcept override
+    {
+        m_state->validations.fetch_add(1U, std::memory_order_release);
+        return cue::Result<void>::success();
+    }
+    /// @brief Build完了時のLease解放をTest共有状態へ記録する
+    ~TestInputLease() override
+    {
+        m_state->liveLeases.fetch_sub(1U, std::memory_order_release);
+    }
+
+  private:
+    InputLeaseState *m_state;
+};
+
+class TestInputLeaseProvider final : public cue::BuildInputLeaseProvider
+{
+  public:
+    /// @brief Test共有状態を借用する
+    explicit TestInputLeaseProvider(InputLeaseState &a_state) noexcept : m_state(&a_state)
+    {
+    }
+    /// @brief 各Build開始を記録し、一つのBuild-scoped Leaseを返す
+    [[nodiscard]] cue::Result<std::unique_ptr<cue::BuildInputLease>>
+    acquire(const cue::BuildPlan &, const cue::ChildProcessCancellation &a_cancellation) noexcept override
+    {
+        m_state->acquisitions.fetch_add(1U, std::memory_order_release);
+        m_state->active.store(true, std::memory_order_release);
+        while (m_state->blockUntilCancelled.load(std::memory_order_acquire) &&
+               !a_cancellation.is_cancel_requested())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        m_state->active.store(false, std::memory_order_release);
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(nullptr);
+        }
+        try
+        {
+            std::unique_ptr<cue::BuildInputLease> lease = std::make_unique<TestInputLease>(*m_state);
+            return cue::Result<std::unique_ptr<cue::BuildInputLease>>::success(std::move(lease));
+        }
+        catch (...)
+        {
+            std::_Exit(92);
+        }
+    }
+
+  private:
+    InputLeaseState *m_state;
 };
 
 class ControlledRunner final : public cue::ChildProcessRunner
@@ -59,10 +132,15 @@ class ControlledRunner final : public cue::ChildProcessRunner
 
     /// @brief 指定Modeに従う成功、失敗、Cancel結果と順序付きLogを返す
     [[nodiscard]] cue::Result<cue::ChildProcessResult> run(
-        const cue::ChildProcessRequest &, const cue::ChildProcessCancellation &a_cancellation) noexcept override
+        const cue::ChildProcessRequest &a_request,
+        const cue::ChildProcessCancellation &a_cancellation) noexcept override
     {
         m_state->processActive.store(true, std::memory_order_release);
         const std::uint32_t call = m_state->calls.fetch_add(1U, std::memory_order_relaxed);
+        if (!a_request.arguments().empty() && a_request.arguments().front() == "--preset")
+        {
+            m_state->configureCalls.fetch_add(1U, std::memory_order_relaxed);
+        }
         while (m_state->mode.load(std::memory_order_acquire) == RunnerMode::BlockUntilCancelled &&
                !a_cancellation.is_cancel_requested())
         {
@@ -227,6 +305,20 @@ class TestPublisher final : public cue::BuildArtifactPublisher
     return false;
 }
 
+/// @brief 入力Lease取得がWorker上で開始するまで上限付きで待機する
+[[nodiscard]] bool wait_until_input_lease_active(const InputLeaseState &a_state)
+{
+    for (std::uint32_t attempt = 0U; attempt < 1000U; ++attempt)
+    {
+        if (a_state.active.load(std::memory_order_acquire))
+        {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
 /// @brief Artifact Modelが必須File、Hash、Pathと決定順を検証するか確認する
 [[nodiscard]] bool test_artifact_model(const cue::AssertContext &a_assertContext)
 {
@@ -365,26 +457,33 @@ class TestPublisher final : public cue::BuildArtifactPublisher
 {
     RunnerState runnerState;
     PublisherState publisherState;
+    InputLeaseState inputLeaseState;
     auto created = cue::GameBuildService::create(make_settings(), std::make_unique<ControlledRunner>(runnerState),
                                                  std::make_unique<TestPublisher>(publisherState, a_assertContext),
+                                                 std::make_unique<TestInputLeaseProvider>(inputLeaseState),
                                                  a_assertContext);
     if (!created)
     {
         return false;
     }
     std::unique_ptr<cue::GameBuildService> service = std::move(*created.try_value());
+    inputLeaseState.blockUntilCancelled.store(true, std::memory_order_release);
     auto started = service->start(make_request("01234567-89ab-4cde-8f01-23456789abcd", a_assertContext),
-                                  cue::CMakeConfigureMode::Required);
-    if (!started || !wait_until_running(*service) ||
+                                  cue::CMakeConfigureMode::ReuseCompatibleTree);
+    if (!started || !wait_until_running(*service) || !wait_until_input_lease_active(inputLeaseState) ||
+        runnerState.calls.load(std::memory_order_acquire) != 0U ||
+        inputLeaseState.acquisitions.load(std::memory_order_acquire) != 1U ||
         service->start(make_request("11234567-89ab-4cde-8f01-23456789abcd", a_assertContext),
                        cue::CMakeConfigureMode::Required))
     {
         return false;
     }
-    if (!service->request_cancel() || !service->wait_for_completion())
+    if (!service->request_cancel() || !service->wait_for_completion() ||
+        inputLeaseState.liveLeases.load(std::memory_order_acquire) != 0U)
     {
         return false;
     }
+    inputLeaseState.blockUntilCancelled.store(false, std::memory_order_release);
     cue::BuildOperationSnapshot cancelled = service->snapshot();
     if (cancelled.state != cue::GameBuildOperationState::Cancelled || cancelled.artifact ||
         cancelled.operationId != "01234567-89ab-4cde-8f01-23456789abcd")
@@ -393,7 +492,9 @@ class TestPublisher final : public cue::BuildArtifactPublisher
     }
 
     runnerState.mode.store(RunnerMode::Succeed, std::memory_order_release);
-    if (!service->retry("21234567-89ab-4cde-8f01-23456789abcd") || !service->wait_for_completion())
+    if (!service->retry("21234567-89ab-4cde-8f01-23456789abcd") || !service->wait_for_completion() ||
+        inputLeaseState.liveLeases.load(std::memory_order_acquire) != 0U ||
+        inputLeaseState.acquisitions.load(std::memory_order_acquire) != 2U)
     {
         return false;
     }
@@ -412,10 +513,26 @@ class TestPublisher final : public cue::BuildArtifactPublisher
         }
     }
 
-    publisherState.blockUntilCancelled.store(true, std::memory_order_release);
     if (!service->start(make_request("31234567-89ab-4cde-8f01-23456789abcd", a_assertContext),
+                        cue::CMakeConfigureMode::ReuseCompatibleTree) ||
+        !service->wait_for_completion())
+    {
+        return false;
+    }
+    succeeded = service->snapshot();
+    if (succeeded.state != cue::GameBuildOperationState::Succeeded || !succeeded.artifact ||
+        succeeded.stages.size() != 2U || runnerState.configureCalls.load(std::memory_order_acquire) != 2U ||
+        inputLeaseState.acquisitions.load(std::memory_order_acquire) != 3U)
+    {
+        return false;
+    }
+
+    publisherState.blockUntilCancelled.store(true, std::memory_order_release);
+    if (!service->start(make_request("41234567-89ab-4cde-8f01-23456789abcd", a_assertContext),
                         cue::CMakeConfigureMode::Required) ||
-        !wait_until_publisher_active(publisherState) || !service->request_cancel() || !service->wait_for_completion())
+        !wait_until_publisher_active(publisherState) ||
+        inputLeaseState.liveLeases.load(std::memory_order_acquire) != 1U || !service->request_cancel() ||
+        !service->wait_for_completion() || inputLeaseState.liveLeases.load(std::memory_order_acquire) != 0U)
     {
         return false;
     }
@@ -429,7 +546,7 @@ class TestPublisher final : public cue::BuildArtifactPublisher
     }
 
     runnerState.mode.store(RunnerMode::Fail, std::memory_order_release);
-    if (!service->start(make_request("41234567-89ab-4cde-8f01-23456789abcd", a_assertContext),
+    if (!service->start(make_request("51234567-89ab-4cde-8f01-23456789abcd", a_assertContext),
                         cue::CMakeConfigureMode::Required) ||
         !service->wait_for_completion())
     {
@@ -439,7 +556,9 @@ class TestPublisher final : public cue::BuildArtifactPublisher
     return failed.state == cue::GameBuildOperationState::Failed && !failed.artifact &&
            failed.latestSuccessfulArtifact &&
            failed.latestSuccessfulArtifact->artifact_id() == succeeded.artifact->artifact_id() &&
-           publisherState.calls == 2U;
+           publisherState.calls == 3U && inputLeaseState.acquisitions.load(std::memory_order_acquire) == 5U &&
+           inputLeaseState.validations.load(std::memory_order_acquire) == 3U &&
+           inputLeaseState.liveLeases.load(std::memory_order_acquire) == 0U;
 }
 
 /// @brief Publisher由来CauseのNative Error DomainとCodeをSnapshotへ保持するか検証する

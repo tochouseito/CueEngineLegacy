@@ -25,6 +25,7 @@ set_source_files_properties(
 target_link_libraries(
     CueProjectHubTool
     PRIVATE
+        Cue.Distribution.Windows
         Cue.Foundation.Windows
         Cue.ImGui.Core
         Cue.IO.Windows

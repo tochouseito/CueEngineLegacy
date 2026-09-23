@@ -8,6 +8,7 @@
 #include <Cue/Distribution/Manifest.h>
 #include <Cue/Distribution/Publisher.h>
 #include <Cue/Foundation/Assert.h>
+#include <Cue/Platform/Process.h>
 
 #include <Windows.h>
 #include <objbase.h>
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <set>
@@ -169,6 +171,20 @@ struct InstalledVersionSnapshot final
     cue::distribution::InstalledVersionsRegistry registry;
     cue::distribution::InstalledVersionEntry entry;
     BundleSnapshot bundle;
+};
+
+/// @brief 検証済みVersion Rootから起動に使う絶対Pathを所有する
+struct InstalledVersionLaunchPaths final
+{
+    std::string editorExecutable;
+    std::string engineSourceRoot;
+};
+
+/// @brief Editor Entry Pointと全祖先DirectoryをProcess作成完了まで固定する
+struct LockedInstalledEditor final
+{
+    HandleOwner executable;
+    std::vector<std::uintptr_t> ancestryHandles;
 };
 
 /// @brief 検証時からChild終了まで置換を拒否するInstall Worker Evidence Handle群
@@ -537,8 +553,16 @@ struct ValidatedInstallWorker final
 /// @brief Regular Fileを上限付きで全読込する
 [[nodiscard]] cue::Result<std::vector<std::byte>> read_file(const std::filesystem::path &a_path,
                                                             std::uint64_t a_maximumBytes,
-                                                            const cue::AssertContext &a_assertContext) noexcept
+                                                            const cue::AssertContext &a_assertContext,
+                                                            const cue::ChildProcessCancellation *a_cancellation =
+                                                                nullptr) noexcept
 {
+    if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+    {
+        return cue::Result<std::vector<std::byte>>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
     HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
     if (!handle.valid())
@@ -561,6 +585,12 @@ struct ValidatedInstallWorker final
         std::size_t offset = 0U;
         while (offset < bytes.size())
         {
+            if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+            {
+                return cue::Result<std::vector<std::byte>>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                                  "Installed Source validation was cancelled"));
+            }
             const DWORD request = static_cast<DWORD>(std::min<std::size_t>(bytes.size() - offset, 1024U * 1024U));
             DWORD read = 0U;
             if (ReadFile(handle.get(), bytes.data() + offset, request, &read, nullptr) == FALSE || read == 0U)
@@ -588,6 +618,31 @@ struct ValidatedInstallWorker final
                                                   const cue::AssertContext &a_assertContext) noexcept
 {
     return cue::distribution::compute_distribution_sha256(a_bytes, a_assertContext);
+}
+
+/// @brief Opaque ContextからInstalled Source検証の取消状態を返す
+[[nodiscard]] bool is_hash_cancel_requested(const void *a_context) noexcept
+{
+    return static_cast<const cue::ChildProcessCancellation *>(a_context)->is_cancel_requested();
+}
+
+/// @brief Byte列を1 MiB単位で取消可能なSHA-256へ変換する
+[[nodiscard]] cue::Result<std::optional<std::string>> hash_bytes_cancellable(
+    std::span<const std::byte> a_bytes, const cue::ChildProcessCancellation *a_cancellation,
+    const cue::AssertContext &a_assertContext) noexcept
+{
+    if (a_cancellation == nullptr)
+    {
+        auto digest = hash_bytes(a_bytes, a_assertContext);
+        if (!digest)
+        {
+            return cue::Result<std::optional<std::string>>::failure(std::move(*digest.try_error()));
+        }
+        return cue::Result<std::optional<std::string>>::success(
+            std::optional<std::string>(std::move(*digest.try_value())));
+    }
+    return cue::distribution::compute_distribution_sha256_cancellable(
+        a_bytes, &is_hash_cancel_requested, a_cancellation, a_assertContext);
 }
 
 /// @brief File全体を読んでSHA-256を返す
@@ -953,12 +1008,20 @@ struct ValidatedInstallWorker final
 [[nodiscard]] cue::Result<void> validate_inventory(const std::filesystem::path &a_root,
                                                    const cue::distribution::DistributionManifest &a_manifest,
                                                    bool a_allowInstallMarkers,
-                                                   const cue::AssertContext &a_assertContext) noexcept
+                                                   const cue::AssertContext &a_assertContext,
+                                                   const cue::ChildProcessCancellation *a_cancellation =
+                                                       nullptr) noexcept
 {
     std::set<std::string> expected;
     expected.insert("CueEngineDistribution.json");
     for (const cue::distribution::DistributionFileEntry &file : a_manifest.files)
     {
+        if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+        {
+            return cue::Result<void>::failure(
+                install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                              "Installed Source inventory validation was cancelled"));
+        }
         const std::filesystem::path path = a_root / to_wide(file.relativePath).value_or(L"");
         if (!is_plain_file(path))
         {
@@ -976,15 +1039,25 @@ struct ValidatedInstallWorker final
             error.add_context(a_assertContext.fatal_handler(), file.relativePath);
             return cue::Result<void>::failure(std::move(error));
         }
-        auto bytes = read_file(path, k_maximumPayloadBytes, a_assertContext);
+        auto bytes = read_file(path, k_maximumPayloadBytes, a_assertContext, a_cancellation);
         if (!bytes || bytes.try_value()->size() != file.byteSize)
         {
             return cue::Result<void>::failure(
                 install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                               "Bundle Inventory file size does not match"));
         }
-        auto digest = hash_bytes(*bytes.try_value(), a_assertContext);
-        if (!digest || *digest.try_value() != file.sha256)
+        auto digest = hash_bytes_cancellable(*bytes.try_value(), a_cancellation, a_assertContext);
+        if (!digest)
+        {
+            return cue::Result<void>::failure(std::move(*digest.try_error()));
+        }
+        if (!digest.try_value()->has_value())
+        {
+            return cue::Result<void>::failure(
+                install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                              "Installed Source inventory hashing was cancelled"));
+        }
+        if (**digest.try_value() != file.sha256)
         {
             return cue::Result<void>::failure(
                 install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
@@ -1010,6 +1083,12 @@ struct ValidatedInstallWorker final
         for (const std::filesystem::directory_entry &entry :
              std::filesystem::recursive_directory_iterator(traversalRoot))
         {
+            if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+            {
+                return cue::Result<void>::failure(
+                    install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                                  "Installed Source inventory enumeration was cancelled"));
+            }
             const DWORD attributes = GetFileAttributesW(win32_path(entry.path()).c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U)
             {
@@ -1066,8 +1145,16 @@ struct ValidatedInstallWorker final
 /// @brief Bundle Manifestと全Payloadを読取専用で検証する
 [[nodiscard]] cue::Result<BundleSnapshot> validate_bundle(const std::filesystem::path &a_bundleRoot,
                                                           bool a_allowInstallMarkers,
-                                                          const cue::AssertContext &a_assertContext) noexcept
+                                                          const cue::AssertContext &a_assertContext,
+                                                          const cue::ChildProcessCancellation *a_cancellation =
+                                                              nullptr) noexcept
 {
+    if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+    {
+        return cue::Result<BundleSnapshot>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
     if (!is_plain_directory(a_bundleRoot) || !is_local_fixed_path(a_bundleRoot))
     {
         return cue::Result<BundleSnapshot>::failure(
@@ -1081,7 +1168,7 @@ struct ValidatedInstallWorker final
             install_error(a_assertContext, cue::distribution::DistributionError::BundleValidationFailed,
                           "Bundle Manifest is missing or remote-marked"));
     }
-    auto bytes = read_file(manifestPath, k_maximumManifestBytes, a_assertContext);
+    auto bytes = read_file(manifestPath, k_maximumManifestBytes, a_assertContext, a_cancellation);
     if (!bytes)
     {
         return cue::Result<BundleSnapshot>::failure(std::move(*bytes.try_error()));
@@ -1093,12 +1180,13 @@ struct ValidatedInstallWorker final
     {
         return cue::Result<BundleSnapshot>::failure(std::move(*manifest.try_error()));
     }
-    auto validated = validate_inventory(a_bundleRoot, *manifest.try_value(), a_allowInstallMarkers, a_assertContext);
+    auto validated = validate_inventory(a_bundleRoot, *manifest.try_value(), a_allowInstallMarkers, a_assertContext,
+                                        a_cancellation);
     if (!validated)
     {
         return cue::Result<BundleSnapshot>::failure(std::move(*validated.try_error()));
     }
-    auto manifestDigest = hash_bytes(*bytes.try_value(), a_assertContext);
+    auto manifestDigest = hash_bytes_cancellable(*bytes.try_value(), a_cancellation, a_assertContext);
     auto workerId = cue::distribution::make_install_worker_id(*manifest.try_value(), a_assertContext);
     if (!manifestDigest || !workerId)
     {
@@ -1115,7 +1203,13 @@ struct ValidatedInstallWorker final
             install_error(a_assertContext, cue::distribution::DistributionError::MissingRequiredPayload,
                           "Bundle Install Worker is missing"));
     }
-    BundleSnapshot result{std::move(*manifest.try_value()), manifestBytes, std::move(*manifestDigest.try_value()),
+    if (!manifestDigest.try_value()->has_value())
+    {
+        return cue::Result<BundleSnapshot>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source Manifest hashing was cancelled"));
+    }
+    BundleSnapshot result{std::move(*manifest.try_value()), manifestBytes, std::move(**manifestDigest.try_value()),
                           *worker, std::move(*workerId.try_value())};
     return cue::Result<BundleSnapshot>::success(std::move(result));
 }
@@ -1378,16 +1472,24 @@ struct ValidatedInstallWorker final
 
 /// @brief Payload MarkerとVersion Payloadを再検証してMarker Digestを返す
 [[nodiscard]] cue::Result<std::string> validate_published_payload(const std::filesystem::path &a_versionRoot,
-                                                                  const BundleSnapshot &a_bundle,
-                                                                  std::string_view a_directoryName,
-                                                                  const cue::AssertContext &a_assertContext) noexcept
+                                                                   const BundleSnapshot &a_bundle,
+                                                                   std::string_view a_directoryName,
+                                                                   const cue::AssertContext &a_assertContext,
+                                                                   const cue::ChildProcessCancellation *a_cancellation =
+                                                                       nullptr) noexcept
 {
+    if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+    {
+        return cue::Result<std::string>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
     auto manifest = validate_manifest_digest(a_versionRoot, a_bundle, a_assertContext);
     if (!manifest)
     {
         return cue::Result<std::string>::failure(std::move(*manifest.try_error()));
     }
-    auto validated = validate_inventory(a_versionRoot, a_bundle.manifest, true, a_assertContext);
+    auto validated = validate_inventory(a_versionRoot, a_bundle.manifest, true, a_assertContext, a_cancellation);
     if (!validated)
     {
         return cue::Result<std::string>::failure(std::move(*validated.try_error()));
@@ -1407,7 +1509,18 @@ struct ValidatedInstallWorker final
                           "Published Version Payload marker does not match"));
     }
     const auto *begin = reinterpret_cast<const std::byte *>(text.try_value()->data());
-    return hash_bytes(std::span(begin, text.try_value()->size()), a_assertContext);
+    auto digest = hash_bytes_cancellable(std::span(begin, text.try_value()->size()), a_cancellation, a_assertContext);
+    if (!digest)
+    {
+        return cue::Result<std::string>::failure(std::move(*digest.try_error()));
+    }
+    if (!digest.try_value()->has_value())
+    {
+        return cue::Result<std::string>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
+    return cue::Result<std::string>::success(std::move(**digest.try_value()));
 }
 
 /// @brief Probe Markerを耐久書込みしてDigestを返す
@@ -2004,9 +2117,11 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
 [[nodiscard]] cue::Result<cue::distribution::InstalledVersionEntry> build_version_entry(
     const std::filesystem::path &a_installRoot, const std::filesystem::path &a_versionRoot,
     const BundleSnapshot &a_bundle, std::string_view a_directoryName,
-    const cue::AssertContext &a_assertContext) noexcept
+    const cue::AssertContext &a_assertContext,
+    const cue::ChildProcessCancellation *a_cancellation = nullptr) noexcept
 {
-    auto payloadDigest = validate_published_payload(a_versionRoot, a_bundle, a_directoryName, a_assertContext);
+    auto payloadDigest =
+        validate_published_payload(a_versionRoot, a_bundle, a_directoryName, a_assertContext, a_cancellation);
     auto probeDigest = validate_probe_marker(a_versionRoot, a_bundle, a_directoryName, a_assertContext);
     auto worker = validate_worker(a_installRoot / L"Operations" / L"Workers" / to_wide(a_bundle.workerId).value_or(L""),
                                   a_bundle, a_assertContext);
@@ -2037,9 +2152,16 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
 /// @brief Registry EntryとVersion／Worker Evidenceを一つの再検証Snapshotとして読み込む
 [[nodiscard]] cue::Result<InstalledVersionSnapshot> read_installed_version(
     const std::filesystem::path &a_installRoot, std::string_view a_directoryName, bool a_allowPendingRemoval,
-    const cue::AssertContext &a_assertContext) noexcept
+    const cue::AssertContext &a_assertContext,
+    const cue::ChildProcessCancellation *a_cancellation = nullptr) noexcept
 {
     using namespace cue::distribution;
+    if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(
+            install_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
     if (!is_version_directory(a_directoryName))
     {
         return cue::Result<InstalledVersionSnapshot>::failure(
@@ -2066,13 +2188,19 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     }
     const InstalledVersionEntry entry = *found;
     const std::filesystem::path versionRoot = a_installRoot / L"Versions" / to_wide(a_directoryName).value_or(L"");
-    auto bundle = validate_bundle(versionRoot, true, a_assertContext);
+    auto bundle = validate_bundle(versionRoot, true, a_assertContext, a_cancellation);
     if (!bundle)
     {
         return cue::Result<InstalledVersionSnapshot>::failure(std::move(*bundle.try_error()));
     }
-    auto rebuilt =
-        build_version_entry(a_installRoot, versionRoot, *bundle.try_value(), a_directoryName, a_assertContext);
+    if (a_cancellation != nullptr && a_cancellation->is_cancel_requested())
+    {
+        return cue::Result<InstalledVersionSnapshot>::failure(
+            install_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                          "Installed Source validation was cancelled"));
+    }
+    auto rebuilt = build_version_entry(a_installRoot, versionRoot, *bundle.try_value(), a_directoryName,
+                                       a_assertContext, a_cancellation);
     if (!rebuilt)
     {
         return cue::Result<InstalledVersionSnapshot>::failure(std::move(*rebuilt.try_error()));
@@ -2086,6 +2214,72 @@ void append_unique_directory(std::vector<std::wstring> &a_directories, std::wstr
     }
     InstalledVersionSnapshot snapshot{std::move(registry), entry, std::move(*bundle.try_value())};
     return cue::Result<InstalledVersionSnapshot>::success(std::move(snapshot));
+}
+
+/// @brief 検証済みInstalled VersionからEditor Entry PointとSource SDK Rootの絶対Pathを構築する
+[[nodiscard]] cue::Result<InstalledVersionLaunchPaths> make_installed_version_launch_paths(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName,
+    const InstalledVersionSnapshot &a_snapshot, const cue::AssertContext &a_assertContext) noexcept
+{
+    const auto directoryName = to_wide(a_directoryName);
+    const auto editorRelativePath = to_wide(a_snapshot.bundle.manifest.entryPoints.editor);
+    if (!directoryName || !editorRelativePath)
+    {
+        return cue::Result<InstalledVersionLaunchPaths>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InvalidInstallState,
+                          "Installed Version launch paths are not valid UTF-8"));
+    }
+    const std::filesystem::path versionRoot = a_installRoot / L"Versions" / *directoryName;
+    const std::filesystem::path editorExecutable = versionRoot / *editorRelativePath;
+    if (!is_plain_directory(versionRoot) || !is_plain_file(editorExecutable))
+    {
+        return cue::Result<InstalledVersionLaunchPaths>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Installed Version launch paths no longer match validated evidence"));
+    }
+    auto encodedEditor = to_utf8(editorExecutable.native());
+    auto encodedRoot = to_utf8(versionRoot.native());
+    if (!encodedEditor || !encodedRoot)
+    {
+        return cue::Result<InstalledVersionLaunchPaths>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::PlatformOperationFailed,
+                          "Installed Version launch paths could not be encoded"));
+    }
+    InstalledVersionLaunchPaths paths{std::move(*encodedEditor), std::move(*encodedRoot)};
+    return cue::Result<InstalledVersionLaunchPaths>::success(std::move(paths));
+}
+
+/// @brief 検証済みEntry PointをPath置換拒否Handleとして固定する
+[[nodiscard]] cue::Result<LockedInstalledEditor> lock_installed_editor_executable(
+    const std::filesystem::path &a_installRoot, std::string_view a_directoryName,
+    const InstalledVersionSnapshot &a_snapshot, const cue::AssertContext &a_assertContext) noexcept
+{
+    const auto directoryName = to_wide(a_directoryName);
+    const auto editorRelativePath = to_wide(a_snapshot.bundle.manifest.entryPoints.editor);
+    if (!directoryName || !editorRelativePath)
+    {
+        return cue::Result<LockedInstalledEditor>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InvalidInstallState,
+                          "Installed Editor path is not valid UTF-8"));
+    }
+    const std::filesystem::path editorExecutable =
+        a_installRoot / L"Versions" / *directoryName / *editorRelativePath;
+    auto ancestry = cue::distribution::windows_detail::WindowsDirectoryAncestryLock::acquire(
+        editorExecutable.parent_path(), a_assertContext);
+    if (!ancestry)
+    {
+        return cue::Result<LockedInstalledEditor>::failure(std::move(*ancestry.try_error()));
+    }
+    HandleOwner handle(CreateFileW(win32_path(editorExecutable).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!handle.valid() || !handle_matches_plain_file(handle.get(), editorExecutable))
+    {
+        return cue::Result<LockedInstalledEditor>::failure(
+            install_error(a_assertContext, cue::distribution::DistributionError::InstallConflict,
+                          "Installed Editor executable could not be locked to its validated File Identity"));
+    }
+    LockedInstalledEditor locked{std::move(handle), ancestry.try_value()->take_handles()};
+    return cue::Result<LockedInstalledEditor>::success(std::move(locked));
 }
 
 /// @brief Recovery Source EvidenceがPublish直前にも一致するか返す
@@ -3888,18 +4082,147 @@ validate_uninstall_payload(const std::filesystem::path &a_installRoot, const std
 
 namespace cue::distribution
 {
-WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(std::uintptr_t a_handle,
-                                                                             std::string a_installRoot,
-                                                                             std::string a_versionDirectory) noexcept
-    : m_handle(a_handle), m_installRoot(std::move(a_installRoot)), m_versionDirectory(std::move(a_versionDirectory))
+/// @brief Installed Source Treeの変更通知をBuild終了まで一度だけ監視する
+class WindowsInstalledSourceMutationMonitor final
+{
+  public:
+    WindowsInstalledSourceMutationMonitor(const WindowsInstalledSourceMutationMonitor &) = delete;
+    WindowsInstalledSourceMutationMonitor &operator=(const WindowsInstalledSourceMutationMonitor &) = delete;
+    /// @brief Pending変更通知を取消してNative Handleを閉じる
+    ~WindowsInstalledSourceMutationMonitor() noexcept
+    {
+        if (m_pending)
+        {
+            static_cast<void>(CancelIoEx(m_directory.get(), &m_overlapped));
+            DWORD transferred = 0U;
+            static_cast<void>(GetOverlappedResult(m_directory.get(), &m_overlapped, &transferred, TRUE));
+        }
+    }
+
+    /// @brief PlainなVersion Rootへ再帰変更通知を登録する
+    [[nodiscard]] static Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>> create(
+        const std::filesystem::path &a_versionRoot, const AssertContext &a_assertContext) noexcept
+    {
+        try
+        {
+            HandleOwner directory(CreateFileW(
+                win32_path(a_versionRoot).c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OVERLAPPED, nullptr));
+            if (!directory.valid() || !handle_matches_plain_directory(directory.get(), a_versionRoot))
+            {
+                return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                            "Installed Source Root could not be monitored for Build"));
+            }
+            HandleOwner event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            if (!event.valid())
+            {
+                return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                            "Installed Source mutation monitor event could not be created"));
+            }
+            auto monitor = std::unique_ptr<WindowsInstalledSourceMutationMonitor>(
+                new WindowsInstalledSourceMutationMonitor(std::move(directory), std::move(event)));
+            monitor->m_overlapped.hEvent = monitor->m_event.get();
+            constexpr DWORD notifyFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                                           FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
+                                           FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SECURITY;
+            if (ReadDirectoryChangesW(monitor->m_directory.get(), monitor->m_buffer.data(),
+                                      static_cast<DWORD>(monitor->m_buffer.size()), TRUE, notifyFilter, nullptr,
+                                      &monitor->m_overlapped, nullptr) == FALSE)
+            {
+                return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::failure(
+                    make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                            "Installed Source mutation monitor could not be started"));
+            }
+            monitor->m_pending = true;
+            return Result<std::unique_ptr<WindowsInstalledSourceMutationMonitor>>::success(std::move(monitor));
+        }
+        catch (const std::bad_alloc &)
+        {
+            terminate_allocation(a_assertContext);
+        }
+        catch (...)
+        {
+            terminate_exception(a_assertContext);
+        }
+    }
+
+    /// @brief 変更通知の完了または監視異常をBuild入力競合として返す
+    [[nodiscard]] Result<void> validate_unchanged(const ChildProcessCancellation &a_cancellation,
+                                                  const AssertContext &a_assertContext) noexcept
+    {
+        if (a_cancellation.is_cancel_requested())
+        {
+            return Result<void>::success();
+        }
+        DWORD transferred = 0U;
+        if (GetOverlappedResult(m_directory.get(), &m_overlapped, &transferred, FALSE) != FALSE)
+        {
+            m_pending = false;
+            return Result<void>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Installed Source changed while the Build was running"));
+        }
+        const DWORD error = GetLastError();
+        if (error == ERROR_IO_INCOMPLETE)
+        {
+            return Result<void>::success();
+        }
+        m_pending = false;
+        return Result<void>::failure(
+            make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                    "Installed Source mutation monitor failed while the Build was running"));
+    }
+
+  private:
+    /// @brief 監視Directoryと通知Eventの所有権を取得する
+    WindowsInstalledSourceMutationMonitor(HandleOwner a_directory, HandleOwner a_event) noexcept
+        : m_directory(std::move(a_directory)), m_event(std::move(a_event))
+    {
+    }
+
+    HandleOwner m_directory;
+    HandleOwner m_event;
+    OVERLAPPED m_overlapped{};
+    std::array<std::byte, 64U * 1024U> m_buffer{};
+    bool m_pending = false;
+};
+
+WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
+    std::uintptr_t a_handle, std::uintptr_t a_editorHandle,
+    std::vector<std::uintptr_t> a_editorAncestryHandles, std::string a_installRoot,
+    std::string a_versionDirectory, std::string a_engineVersion, std::string a_bundleId,
+    std::string a_manifestDigest, std::string a_editorExecutable, std::string a_engineSourceRoot,
+    std::string a_engineSourceRevision, std::string a_sourceInventoryHash,
+    std::string a_publisherBuildIdentityDigest) noexcept
+    : m_handle(a_handle), m_editorHandle(a_editorHandle),
+      m_editorAncestryHandles(std::move(a_editorAncestryHandles)), m_installRoot(std::move(a_installRoot)),
+      m_versionDirectory(std::move(a_versionDirectory)), m_engineVersion(std::move(a_engineVersion)),
+      m_bundleId(std::move(a_bundleId)), m_manifestDigest(std::move(a_manifestDigest)),
+      m_editorExecutable(std::move(a_editorExecutable)), m_engineSourceRoot(std::move(a_engineSourceRoot)),
+      m_engineSourceRevision(std::move(a_engineSourceRevision)),
+      m_sourceInventoryHash(std::move(a_sourceInventoryHash)),
+      m_publisherBuildIdentityDigest(std::move(a_publisherBuildIdentityDigest))
 {
 }
 
 WindowsInstalledVersionExecutionLease::WindowsInstalledVersionExecutionLease(
     WindowsInstalledVersionExecutionLease &&a_other) noexcept
-    : m_handle(std::exchange(a_other.m_handle, 0U)), m_installRoot(std::move(a_other.m_installRoot)),
-      m_versionDirectory(std::move(a_other.m_versionDirectory))
+    : m_handle(std::exchange(a_other.m_handle, 0U)),
+      m_editorHandle(std::exchange(a_other.m_editorHandle, 0U)),
+      m_editorAncestryHandles(std::move(a_other.m_editorAncestryHandles)),
+      m_installRoot(std::move(a_other.m_installRoot)),
+      m_versionDirectory(std::move(a_other.m_versionDirectory)), m_engineVersion(std::move(a_other.m_engineVersion)),
+      m_bundleId(std::move(a_other.m_bundleId)), m_manifestDigest(std::move(a_other.m_manifestDigest)),
+      m_editorExecutable(std::move(a_other.m_editorExecutable)),
+      m_engineSourceRoot(std::move(a_other.m_engineSourceRoot)),
+      m_engineSourceRevision(std::move(a_other.m_engineSourceRevision)),
+      m_sourceInventoryHash(std::move(a_other.m_sourceInventoryHash)),
+      m_publisherBuildIdentityDigest(std::move(a_other.m_publisherBuildIdentityDigest))
 {
+    a_other.m_editorAncestryHandles.clear();
 }
 
 WindowsInstalledVersionExecutionLease &WindowsInstalledVersionExecutionLease::operator=(
@@ -3911,9 +4234,28 @@ WindowsInstalledVersionExecutionLease &WindowsInstalledVersionExecutionLease::op
         {
             static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_handle)));
         }
+        if (m_editorHandle != 0U)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_editorHandle)));
+        }
+        for (const std::uintptr_t handle : m_editorAncestryHandles)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+        }
         m_handle = std::exchange(a_other.m_handle, 0U);
+        m_editorHandle = std::exchange(a_other.m_editorHandle, 0U);
+        m_editorAncestryHandles = std::move(a_other.m_editorAncestryHandles);
+        a_other.m_editorAncestryHandles.clear();
         m_installRoot = std::move(a_other.m_installRoot);
         m_versionDirectory = std::move(a_other.m_versionDirectory);
+        m_engineVersion = std::move(a_other.m_engineVersion);
+        m_bundleId = std::move(a_other.m_bundleId);
+        m_manifestDigest = std::move(a_other.m_manifestDigest);
+        m_editorExecutable = std::move(a_other.m_editorExecutable);
+        m_engineSourceRoot = std::move(a_other.m_engineSourceRoot);
+        m_engineSourceRevision = std::move(a_other.m_engineSourceRevision);
+        m_sourceInventoryHash = std::move(a_other.m_sourceInventoryHash);
+        m_publisherBuildIdentityDigest = std::move(a_other.m_publisherBuildIdentityDigest);
     }
     return *this;
 }
@@ -3924,11 +4266,24 @@ WindowsInstalledVersionExecutionLease::~WindowsInstalledVersionExecutionLease() 
     {
         static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_handle)));
     }
+    if (m_editorHandle != 0U)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(m_editorHandle)));
+    }
+    for (const std::uintptr_t handle : m_editorAncestryHandles)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+    }
 }
 
 std::uintptr_t WindowsInstalledVersionExecutionLease::native_handle() const noexcept
 {
     return m_handle;
+}
+
+std::uintptr_t WindowsInstalledVersionExecutionLease::native_editor_handle() const noexcept
+{
+    return m_editorHandle;
 }
 
 const std::string &WindowsInstalledVersionExecutionLease::install_root() const noexcept
@@ -3939,6 +4294,96 @@ const std::string &WindowsInstalledVersionExecutionLease::install_root() const n
 const std::string &WindowsInstalledVersionExecutionLease::version_directory() const noexcept
 {
     return m_versionDirectory;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::engine_version() const noexcept
+{
+    return m_engineVersion;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::bundle_id() const noexcept
+{
+    return m_bundleId;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::manifest_digest() const noexcept
+{
+    return m_manifestDigest;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::editor_executable() const noexcept
+{
+    return m_editorExecutable;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::engine_source_root() const noexcept
+{
+    return m_engineSourceRoot;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::engine_source_revision() const noexcept
+{
+    return m_engineSourceRevision;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::source_inventory_hash() const noexcept
+{
+    return m_sourceInventoryHash;
+}
+
+const std::string &WindowsInstalledVersionExecutionLease::publisher_build_identity_digest() const noexcept
+{
+    return m_publisherBuildIdentityDigest;
+}
+
+WindowsInstalledSourceBuildLease::WindowsInstalledSourceBuildLease(
+    std::vector<std::uintptr_t> a_handles,
+    std::unique_ptr<WindowsInstalledSourceMutationMonitor> a_mutationMonitor) noexcept
+    : m_handles(std::move(a_handles)), m_mutationMonitor(std::move(a_mutationMonitor))
+{
+}
+
+WindowsInstalledSourceBuildLease::WindowsInstalledSourceBuildLease(
+    WindowsInstalledSourceBuildLease &&a_other) noexcept
+    : m_handles(std::move(a_other.m_handles)), m_mutationMonitor(std::move(a_other.m_mutationMonitor))
+{
+    a_other.m_handles.clear();
+}
+
+WindowsInstalledSourceBuildLease &WindowsInstalledSourceBuildLease::operator=(
+    WindowsInstalledSourceBuildLease &&a_other) noexcept
+{
+    if (this != &a_other)
+    {
+        for (const std::uintptr_t handle : m_handles)
+        {
+            static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+        }
+        m_handles = std::move(a_other.m_handles);
+        m_mutationMonitor = std::move(a_other.m_mutationMonitor);
+        a_other.m_handles.clear();
+    }
+    return *this;
+}
+
+Result<void> WindowsInstalledSourceBuildLease::validate_unchanged(
+    const ChildProcessCancellation &a_cancellation, const AssertContext &a_assertContext) noexcept
+{
+    if (!m_mutationMonitor)
+    {
+        return Result<void>::failure(
+            make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                    "Installed Source Build lease has no mutation monitor"));
+    }
+    return m_mutationMonitor->validate_unchanged(a_cancellation, a_assertContext);
+}
+
+WindowsInstalledSourceBuildLease::~WindowsInstalledSourceBuildLease() noexcept
+{
+    for (const std::uintptr_t handle : m_handles)
+    {
+        static_cast<void>(CloseHandle(reinterpret_cast<HANDLE>(handle)));
+    }
 }
 
 Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallRequest &a_request,
@@ -4276,6 +4721,112 @@ Result<WindowsRollbackOutcome> rollback_windows_installed_version(const WindowsI
     }
 }
 
+Result<WindowsInstalledVersionsInspection> inspect_windows_installed_versions(
+    std::string_view a_installRoot, const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        auto installRoot = normalize_absolute(a_installRoot);
+        if (!installRoot || !is_local_fixed_path(*installRoot) || !is_plain_directory(*installRoot) ||
+            !has_plain_existing_ancestry(*installRoot))
+        {
+            return Result<WindowsInstalledVersionsInspection>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                        "Installed Versions inspection root is invalid"));
+        }
+        auto controlLease = acquire_shared_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<WindowsInstalledVersionsInspection>::failure(std::move(*controlLease.try_error()));
+        }
+        auto registrySnapshot = read_registry(*installRoot, a_assertContext);
+        if (!registrySnapshot || !registrySnapshot.try_value()->registry)
+        {
+            return Result<WindowsInstalledVersionsInspection>::failure(
+                registrySnapshot ? make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                                           "Installed Versions Registry is unavailable")
+                                 : std::move(*registrySnapshot.try_error()));
+        }
+        auto encodedRoot = to_utf8(installRoot->native());
+        if (!encodedRoot)
+        {
+            return Result<WindowsInstalledVersionsInspection>::failure(
+                make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                        "Install Root could not be encoded for Project Hub"));
+        }
+        const std::filesystem::path journalsRoot = *installRoot / L"Operations" / L"Journals";
+        if (!is_plain_directory(journalsRoot))
+        {
+            return Result<WindowsInstalledVersionsInspection>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Install Journal directory is unavailable"));
+        }
+        std::error_code journalError;
+        const std::filesystem::directory_iterator journal(extended_filesystem_path(journalsRoot), journalError);
+        if (journalError)
+        {
+            return Result<WindowsInstalledVersionsInspection>::failure(
+                make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                        "Install Journal directory could not be read"));
+        }
+        const bool hasIncompleteJournal = journal != std::filesystem::directory_iterator{};
+        const InstalledVersionsRegistry &registry = *registrySnapshot.try_value()->registry;
+        WindowsInstalledVersionsInspection inspection{std::move(*encodedRoot), registry.revision, {}};
+        inspection.versions.reserve(registry.versions.size());
+        for (const InstalledVersionEntry &entry : registry.versions)
+        {
+            WindowsInstalledVersionInspection version{entry.directoryName,
+                                                       entry.engineVersion,
+                                                       entry.bundleId,
+                                                       entry.manifestDigest,
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       entry.state,
+                                                       registry.selectedVersion == entry.directoryName,
+                                                       false};
+            auto snapshot = read_installed_version(*installRoot, entry.directoryName, true, a_assertContext);
+            if (!snapshot)
+            {
+                version.diagnostic = std::string(snapshot.try_error()->summary());
+                inspection.versions.push_back(std::move(version));
+                continue;
+            }
+            auto paths = make_installed_version_launch_paths(*installRoot, entry.directoryName, *snapshot.try_value(),
+                                                             a_assertContext);
+            if (!paths)
+            {
+                version.diagnostic = std::string(paths.try_error()->summary());
+                inspection.versions.push_back(std::move(version));
+                continue;
+            }
+            version.editorExecutable = std::move(paths.try_value()->editorExecutable);
+            version.engineSourceRoot = std::move(paths.try_value()->engineSourceRoot);
+            if (entry.state == InstalledVersionState::PendingRemoval)
+            {
+                version.diagnostic = "Installed Version is pending removal";
+            }
+            else if (hasIncompleteJournal)
+            {
+                version.diagnostic = "An incomplete Install operation blocks Version launch";
+            }
+            else
+            {
+                version.isAvailable = true;
+            }
+            inspection.versions.push_back(std::move(version));
+        }
+        return Result<WindowsInstalledVersionsInspection>::success(std::move(inspection));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
 Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_execution_lease(
     const WindowsInstalledVersionRequest &a_request, const AssertContext &a_assertContext) noexcept
 {
@@ -4322,6 +4873,12 @@ Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_
         {
             return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*executionLease.try_error()));
         }
+        auto editorHandle =
+            lock_installed_editor_executable(*installRoot, a_request.versionDirectory, expected, a_assertContext);
+        if (!editorHandle)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*editorHandle.try_error()));
+        }
         auto revalidated = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
         if (!revalidated || revalidated.try_value()->registry != expected.registry ||
             revalidated.try_value()->entry != expected.entry ||
@@ -4332,6 +4889,13 @@ Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_
                                                       "Installed Version changed while acquiring its Execution Lease")
                             : std::move(*revalidated.try_error()));
         }
+        auto paths =
+            make_installed_version_launch_paths(*installRoot, a_request.versionDirectory, *revalidated.try_value(),
+                                                a_assertContext);
+        if (!paths)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*paths.try_error()));
+        }
         auto encodedRoot = to_utf8(installRoot->native());
         if (!encodedRoot)
         {
@@ -4339,10 +4903,351 @@ Result<WindowsInstalledVersionExecutionLease> acquire_windows_installed_version_
                 make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
                                         "Install Root could not be encoded for its Execution Lease"));
         }
+        auto publisherIdentityDigest = make_publisher_build_identity_digest(
+            revalidated.try_value()->bundle.manifest.publisherBuildIdentity, a_assertContext);
+        if (!publisherIdentityDigest)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                std::move(*publisherIdentityDigest.try_error()));
+        }
         WindowsInstalledVersionExecutionLease lease(
-            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()), std::move(*encodedRoot),
-            a_request.versionDirectory);
+            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()),
+            reinterpret_cast<std::uintptr_t>(editorHandle.try_value()->executable.release()),
+            std::move(editorHandle.try_value()->ancestryHandles), std::move(*encodedRoot),
+            a_request.versionDirectory, revalidated.try_value()->entry.engineVersion,
+            revalidated.try_value()->entry.bundleId, revalidated.try_value()->entry.manifestDigest,
+            std::move(paths.try_value()->editorExecutable), std::move(paths.try_value()->engineSourceRoot),
+            revalidated.try_value()->bundle.manifest.engineSourceRevision,
+            revalidated.try_value()->bundle.manifest.sourceInventoryHash,
+            std::move(*publisherIdentityDigest.try_value()));
         return Result<WindowsInstalledVersionExecutionLease>::success(std::move(lease));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<WindowsInstalledVersionExecutionLease> adopt_windows_inherited_version_execution_lease(
+    const WindowsInheritedVersionExecutionLeaseRequest &a_request, const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        HandleOwner inheritedLease(reinterpret_cast<HANDLE>(a_request.inheritedLeaseHandle));
+        auto installRoot = normalize_absolute(a_request.installRoot);
+        if (!inheritedLease.valid() || !installRoot || !is_local_fixed_path(*installRoot) ||
+            !is_plain_directory(*installRoot) || !has_plain_existing_ancestry(*installRoot) ||
+            !is_version_directory(a_request.versionDirectory) || a_request.bundleId.empty() ||
+            a_request.manifestDigest.empty())
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InvalidInstallState,
+                                        "Inherited Installed Version launch request is invalid"));
+        }
+        const std::filesystem::path expectedLeasePath = execution_lease_path(*installRoot, a_request.versionDirectory);
+        if (!handle_matches_plain_file(inheritedLease.get(), expectedLeasePath))
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Inherited Execution Lease does not match the requested Version"));
+        }
+        auto controlLease = acquire_shared_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*controlLease.try_error()));
+        }
+        const std::filesystem::path journalsRoot = *installRoot / L"Operations" / L"Journals";
+        if (!is_plain_directory(journalsRoot))
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState, "Install Journal directory is unavailable"));
+        }
+        std::error_code journalError;
+        const std::filesystem::directory_iterator journal(extended_filesystem_path(journalsRoot), journalError);
+        if (journalError || journal != std::filesystem::directory_iterator{})
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "An incomplete Install operation blocks inherited Version launch"));
+        }
+        auto snapshot = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
+        if (!snapshot || snapshot.try_value()->entry.bundleId != a_request.bundleId ||
+            snapshot.try_value()->entry.manifestDigest != a_request.manifestDigest)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                snapshot ? make_distribution_error(
+                               a_assertContext, DistributionError::InstallConflict,
+                               "Inherited Distribution Identity no longer matches the requested Version")
+                         : std::move(*snapshot.try_error()));
+        }
+        const InstalledVersionSnapshot expected = *snapshot.try_value();
+        auto executionLease = acquire_shared_execution_lease(*installRoot, a_request.versionDirectory, a_assertContext);
+        if (!executionLease)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*executionLease.try_error()));
+        }
+        auto editorHandle =
+            lock_installed_editor_executable(*installRoot, a_request.versionDirectory, expected, a_assertContext);
+        if (!editorHandle)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(std::move(*editorHandle.try_error()));
+        }
+        if (!has_same_file_identity(inheritedLease.get(), executionLease.try_value()->get()))
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                        "Inherited Execution Lease File Identity changed before adoption"));
+        }
+        auto revalidated = read_installed_version(*installRoot, a_request.versionDirectory, false, a_assertContext);
+        if (!revalidated || revalidated.try_value()->entry != expected.entry)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                revalidated ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                      "Installed Version changed while adopting its Execution Lease")
+                            : std::move(*revalidated.try_error()));
+        }
+        auto paths =
+            make_installed_version_launch_paths(*installRoot, a_request.versionDirectory, *revalidated.try_value(),
+                                                a_assertContext);
+        auto encodedRoot = to_utf8(installRoot->native());
+        if (!paths || !encodedRoot)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                paths ? make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                                "Install Root could not be encoded after Lease adoption")
+                      : std::move(*paths.try_error()));
+        }
+        if (SetHandleInformation(executionLease.try_value()->get(), HANDLE_FLAG_INHERIT, 0U) == FALSE)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                make_distribution_error(a_assertContext, DistributionError::PlatformOperationFailed,
+                                        "Adopted Execution Lease inheritance could not be disabled"));
+        }
+        auto publisherIdentityDigest = make_publisher_build_identity_digest(
+            revalidated.try_value()->bundle.manifest.publisherBuildIdentity, a_assertContext);
+        if (!publisherIdentityDigest)
+        {
+            return Result<WindowsInstalledVersionExecutionLease>::failure(
+                std::move(*publisherIdentityDigest.try_error()));
+        }
+        WindowsInstalledVersionExecutionLease lease(
+            reinterpret_cast<std::uintptr_t>(executionLease.try_value()->release()),
+            reinterpret_cast<std::uintptr_t>(editorHandle.try_value()->executable.release()),
+            std::move(editorHandle.try_value()->ancestryHandles), std::move(*encodedRoot),
+            a_request.versionDirectory, revalidated.try_value()->entry.engineVersion,
+            revalidated.try_value()->entry.bundleId, revalidated.try_value()->entry.manifestDigest,
+            std::move(paths.try_value()->editorExecutable), std::move(paths.try_value()->engineSourceRoot),
+            revalidated.try_value()->bundle.manifest.engineSourceRevision,
+            revalidated.try_value()->bundle.manifest.sourceInventoryHash,
+            std::move(*publisherIdentityDigest.try_value()));
+        return Result<WindowsInstalledVersionExecutionLease>::success(std::move(lease));
+    }
+    catch (const std::bad_alloc &)
+    {
+        terminate_allocation(a_assertContext);
+    }
+    catch (...)
+    {
+        terminate_exception(a_assertContext);
+    }
+}
+
+Result<std::optional<WindowsInstalledSourceBuildLease>> acquire_windows_installed_source_build_lease(
+    const WindowsInstalledVersionExecutionLease &a_executionLease,
+    const ChildProcessCancellation &a_cancellation,
+    const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        using BuildLeaseResult = Result<std::optional<WindowsInstalledSourceBuildLease>>;
+        const auto cancelled = []() noexcept -> BuildLeaseResult
+        { return BuildLeaseResult::success(std::nullopt); };
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        auto installRoot = normalize_absolute(a_executionLease.install_root());
+        auto sourceRoot = normalize_absolute(a_executionLease.engine_source_root());
+        const auto versionDirectory = to_wide(a_executionLease.version_directory());
+        if (!installRoot || !sourceRoot || !versionDirectory ||
+            !is_version_directory(a_executionLease.version_directory()))
+        {
+            return BuildLeaseResult::failure(make_distribution_error(
+                a_assertContext, DistributionError::InvalidInstallState,
+                "Installed Source Build lease request is invalid"));
+        }
+        const std::filesystem::path versionRoot = *installRoot / L"Versions" / *versionDirectory;
+        if (_wcsicmp(sourceRoot->native().c_str(), versionRoot.native().c_str()) != 0)
+        {
+            return BuildLeaseResult::failure(make_distribution_error(
+                a_assertContext, DistributionError::InstallConflict,
+                "Installed Source Root does not match its Execution Lease"));
+        }
+        auto controlLease = acquire_shared_control_lease(*installRoot, a_assertContext);
+        if (!controlLease)
+        {
+            return BuildLeaseResult::failure(std::move(*controlLease.try_error()));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        const std::filesystem::path journalsRoot = *installRoot / L"Operations" / L"Journals";
+        std::error_code journalError;
+        const std::filesystem::directory_iterator journal(extended_filesystem_path(journalsRoot), journalError);
+        if (journalError || journal != std::filesystem::directory_iterator{})
+        {
+            return BuildLeaseResult::failure(make_distribution_error(
+                a_assertContext, DistributionError::InstallConflict,
+                "An incomplete Install operation blocks Installed Source Build"));
+        }
+        auto expected = read_installed_version(*installRoot, a_executionLease.version_directory(), false,
+                                               a_assertContext, &a_cancellation);
+        if (!expected && a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        if (!expected || expected.try_value()->entry.engineVersion != a_executionLease.engine_version() ||
+            expected.try_value()->entry.bundleId != a_executionLease.bundle_id() ||
+            expected.try_value()->entry.manifestDigest != a_executionLease.manifest_digest() ||
+            expected.try_value()->bundle.manifest.engineSourceRevision !=
+                a_executionLease.engine_source_revision() ||
+            expected.try_value()->bundle.manifest.sourceInventoryHash !=
+                a_executionLease.source_inventory_hash())
+        {
+            return BuildLeaseResult::failure(
+                expected ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                   "Installed Source Evidence changed before Build")
+                         : std::move(*expected.try_error()));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        auto publisherDigest = make_publisher_build_identity_digest(
+            expected.try_value()->bundle.manifest.publisherBuildIdentity, a_assertContext);
+        if (!publisherDigest ||
+            *publisherDigest.try_value() != a_executionLease.publisher_build_identity_digest())
+        {
+            return BuildLeaseResult::failure(
+                publisherDigest ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                          "Installed Publisher Identity changed before Build")
+                                : std::move(*publisherDigest.try_error()));
+        }
+
+        auto ancestry = windows_detail::WindowsDirectoryAncestryLock::acquire(versionRoot, a_assertContext);
+        if (!ancestry)
+        {
+            return BuildLeaseResult::failure(std::move(*ancestry.try_error()));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        std::vector<std::uintptr_t> ancestryHandles = ancestry.try_value()->take_handles();
+        std::vector<HandleOwner> lockedHandles;
+        lockedHandles.reserve(expected.try_value()->bundle.manifest.files.size() + ancestryHandles.size() + 1U);
+        for (const std::uintptr_t handle : ancestryHandles)
+        {
+            lockedHandles.emplace_back(reinterpret_cast<HANDLE>(handle));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        const auto lock_directory = [&](const std::filesystem::path &a_path) -> bool
+        {
+            HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+            if (!handle.valid() || !handle_matches_plain_directory(handle.get(), a_path))
+            {
+                return false;
+            }
+            lockedHandles.push_back(std::move(handle));
+            return true;
+        };
+        const auto lock_file = [&](const std::filesystem::path &a_path) -> bool
+        {
+            HandleOwner handle(CreateFileW(win32_path(a_path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                                           nullptr));
+            if (!handle.valid() || !handle_matches_plain_file(handle.get(), a_path))
+            {
+                return false;
+            }
+            lockedHandles.push_back(std::move(handle));
+            return true;
+        };
+        if (!lock_directory(versionRoot))
+        {
+            return BuildLeaseResult::failure(make_distribution_error(
+                a_assertContext, DistributionError::InstallConflict,
+                "Installed Source Root could not be locked for Build"));
+        }
+        std::error_code enumerationError;
+        std::filesystem::recursive_directory_iterator entry(
+            extended_filesystem_path(versionRoot), std::filesystem::directory_options::none, enumerationError);
+        const std::filesystem::recursive_directory_iterator end;
+        while (!enumerationError && entry != end)
+        {
+            if (a_cancellation.is_cancel_requested())
+            {
+                return cancelled();
+            }
+            const bool isDirectory = entry->is_directory(enumerationError);
+            const bool isFile = !enumerationError && entry->is_regular_file(enumerationError);
+            if (lockedHandles.size() > k_maximumInstallEntries + 16U ||
+                (isDirectory && !lock_directory(entry->path())) || (isFile && !lock_file(entry->path())) ||
+                (!enumerationError && !isDirectory && !isFile))
+            {
+                return BuildLeaseResult::failure(make_distribution_error(
+                    a_assertContext, DistributionError::InstallConflict,
+                    "Installed Source Inventory could not be locked for Build"));
+            }
+            entry.increment(enumerationError);
+        }
+        if (enumerationError)
+        {
+            return BuildLeaseResult::failure(make_distribution_error(
+                a_assertContext, DistributionError::PlatformOperationFailed,
+                "Installed Source Inventory enumeration failed"));
+        }
+        auto mutationMonitor = WindowsInstalledSourceMutationMonitor::create(versionRoot, a_assertContext);
+        if (!mutationMonitor)
+        {
+            return BuildLeaseResult::failure(std::move(*mutationMonitor.try_error()));
+        }
+        auto revalidated = read_installed_version(*installRoot, a_executionLease.version_directory(), false,
+                                                  a_assertContext, &a_cancellation);
+        if (!revalidated && a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        if (!revalidated || revalidated.try_value()->entry != expected.try_value()->entry)
+        {
+            return BuildLeaseResult::failure(
+                revalidated ? make_distribution_error(a_assertContext, DistributionError::InstallConflict,
+                                                      "Installed Source changed while acquiring its Build lease")
+                            : std::move(*revalidated.try_error()));
+        }
+        if (a_cancellation.is_cancel_requested())
+        {
+            return cancelled();
+        }
+        std::vector<std::uintptr_t> handles;
+        handles.reserve(lockedHandles.size());
+        for (HandleOwner &handle : lockedHandles)
+        {
+            handles.push_back(reinterpret_cast<std::uintptr_t>(handle.release()));
+        }
+        WindowsInstalledSourceBuildLease lease(std::move(handles), std::move(*mutationMonitor.try_value()));
+        return BuildLeaseResult::success(
+            std::optional<WindowsInstalledSourceBuildLease>(std::move(lease)));
     }
     catch (const std::bad_alloc &)
     {
