@@ -231,12 +231,16 @@ namespace
     const std::filesystem::path sdkRoot(*root);
     const std::filesystem::path include =
         to_extended_windows_path((sdkRoot / L"Include" / *windowsVersion / L"um" / L"Windows.h").native());
+    const std::filesystem::path ucrtInclude =
+        to_extended_windows_path((sdkRoot / L"Include" / *windowsVersion / L"ucrt" / L"corecrt.h").native());
     const std::filesystem::path library =
         to_extended_windows_path((sdkRoot / L"Lib" / *windowsVersion / L"um" / L"x64" / L"kernel32.lib").native());
     const std::filesystem::path ucrtLibrary =
         to_extended_windows_path((sdkRoot / L"Lib" / *windowsVersion / L"ucrt" / L"x64" / L"ucrt.lib").native());
     std::error_code error;
     candidate.available = std::filesystem::is_regular_file(include, error) && !error;
+    error.clear();
+    candidate.available = candidate.available && std::filesystem::is_regular_file(ucrtInclude, error) && !error;
     error.clear();
     candidate.available = candidate.available && std::filesystem::is_regular_file(library, error) && !error;
     error.clear();
