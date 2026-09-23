@@ -75,6 +75,16 @@ int main(int a_argumentCount, char **a_arguments)
 
     const cue::BuildEnvironmentInventory inventory = cue::discover_current_windows_build_environment(assertContext);
     const cue::BuildEnvironmentReport report = cue::validate_current_windows_build_environment(assertContext);
+    cue::BuildEnvironmentInventory futureGitInventory = inventory;
+    for (cue::BuildToolCandidate &candidate : futureGitInventory.candidates)
+    {
+        if (candidate.kind == cue::BuildToolKind::Git)
+        {
+            candidate.version = cue::BuildToolVersion{3U, 0U, 0U, 0U};
+        }
+    }
+    const cue::BuildEnvironmentReport futureGitReport = cue::validate_build_environment(
+        futureGitInventory, cue::current_windows_build_requirements(assertContext), assertContext);
     std::array<wchar_t, 32768U> modulePath{};
     const DWORD modulePathSize = GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
     const auto invalidGitPath = to_utf8(std::wstring_view(modulePath.data(), modulePathSize));
@@ -100,7 +110,8 @@ int main(int a_argumentCount, char **a_arguments)
         report.selectedTools.size() == 5U && report.supportedConfigurations.size() == 3U &&
         report.diagnostics.empty() && nativeArchitectureMatches && modulePathSize > 0U &&
         modulePathSize < modulePath.size() && invalidGitPath && invalidGitRoot && !invalidGit.available &&
-        !invalidGit.version)
+        !invalidGit.version && futureGitReport.support == cue::BuildEnvironmentSupport::Supported &&
+        futureGitReport.diagnostics.empty())
     {
         return 0;
     }

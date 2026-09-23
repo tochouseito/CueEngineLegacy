@@ -401,8 +401,10 @@ BuildEnvironmentRequirements current_windows_build_requirements(const AssertCont
         BuildToolVersion sdkMaximum = *sdkVersion;
         ++sdkMaximum.build;
         requirements.tools.push_back({BuildToolKind::WindowsSdk, *sdkVersion, sdkMaximum, BuildArchitecture::X64});
-        requirements.tools.push_back(
-            {BuildToolKind::Git, {2U, 44U, 0U, 0U}, {3U, 0U, 0U, 0U}, BuildArchitecture::X64});
+        requirements.tools.push_back({BuildToolKind::Git,
+                                      {2U, 44U, 0U, 0U},
+                                      {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX},
+                                      BuildArchitecture::X64});
         return requirements;
     }
     catch (...)

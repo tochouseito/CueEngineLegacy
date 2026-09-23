@@ -739,7 +739,8 @@ void create_bundle(const std::filesystem::path &a_bundleRoot, const cue::AssertC
                     const std::filesystem::path &a_probeExecutable = installer_executable(),
                     std::size_t a_paddingBytes = 0U, std::string a_bundleId = "12345678-1234-4abc-8def-1234567890ab",
                     std::string a_engineVersion = "1.0.0", std::byte a_sourceByte = std::byte{'c'},
-                    std::string a_minimumCompilerVersion = "19.51.36231")
+                    std::string a_minimumCompilerVersion = "19.51.36231",
+                    std::string a_minimumGitVersion = "2.44.0")
 {
     using cue::distribution::DistributionFileRole;
     static const std::vector<std::byte> executable = read_bytes(installer_executable());
@@ -759,7 +760,7 @@ void create_bundle(const std::filesystem::path &a_bundleRoot, const cue::AssertC
     manifest.sourceInventoryHash = std::string(64U, '1');
     manifest.dependencyDefinitionId = std::string(64U, '2');
     manifest.publisherBuildIdentity = publisher_identity();
-    manifest.minimumToolchain = {"4.2.0", "2.44.0", "msvc", std::move(a_minimumCompilerVersion),
+    manifest.minimumToolchain = {"4.2.0", std::move(a_minimumGitVersion), "msvc", std::move(a_minimumCompilerVersion),
                                  "10.0.26100.0"};
     manifest.entryPoints = {
         "Bin/CueEngineBootstrap.exe", "Bin/CueProjectHubTool.exe",      "Bin/CueEditorTool.exe",
@@ -824,6 +825,18 @@ void test_unsupported_prerequisite_has_no_install_side_effect(const cue::AssertC
     require(installed.try_error()->summary() ==
             "MSVC x64 prerequisite is missing or older than the Bundle minimum version");
     require(!std::filesystem::exists(installRoot));
+
+    const std::filesystem::path gitBundleRoot = temporary.path() / L"UnsupportedGitPrerequisiteBundle";
+    const std::filesystem::path gitInstallRoot = temporary.path() / L"UnsupportedGitPrerequisiteInstall";
+    create_bundle(gitBundleRoot, a_assertContext, installer_executable(), 0U,
+                  "22345678-1234-4abc-8def-1234567890ab", "1.0.0", std::byte{'c'}, "19.51.36231", "99.0.0");
+    const cue::distribution::WindowsInstallRequest gitRequest{utf8_path(gitBundleRoot), utf8_path(gitInstallRoot),
+                                                              false, true};
+    const auto gitRejected = cue::distribution::install_windows_source_sdk(gitRequest, a_assertContext);
+    require(!gitRejected);
+    require(gitRejected.try_error()->summary() ==
+            "Git for Windows prerequisite is missing or older than 99.0.0");
+    require(!std::filesystem::exists(gitInstallRoot));
 }
 
 /// @brief RegistryをCanonical Readerで読み込む

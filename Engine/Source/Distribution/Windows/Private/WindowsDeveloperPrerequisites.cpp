@@ -508,8 +508,9 @@ cue::Result<void> cue::distribution::validate_windows_developer_prerequisites(
             { return is_compatible_git_for_windows(**runner.try_value(), a_candidate, *gitMinimum); });
         if (!hasCompatibleGit)
         {
-            return Result<void>::failure(prerequisite_error(
-                a_assertContext, "Git for Windows prerequisite is missing or older than 2.44.0"));
+            std::string diagnostic = "Git for Windows prerequisite is missing or older than ";
+            diagnostic.append(a_minimumToolchain.gitVersion);
+            return Result<void>::failure(prerequisite_error(a_assertContext, diagnostic));
         }
 
         auto compilerCandidates = find_visual_studio_files(
