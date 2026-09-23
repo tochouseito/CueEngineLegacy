@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$RepositoryRoot
+    [string]$RepositoryRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string]$GitFailureProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +34,72 @@ function Assert-RestoreRejected
     {
         throw "Restore rejection did not contain '$ExpectedMessage'. Output: $output"
     }
+}
+
+$missingGitRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    "CueEngine-RestoreContract-MissingGit-$([Guid]::NewGuid().ToString('N'))"
+$missingGitTool = Join-Path $missingGitRoot "Tool"
+$missingGitInstall = Join-Path $missingGitRoot "Installed"
+$missingGitOutput = (& $powerShell -NoProfile -File $restoreScript `
+    -ToolRoot $missingGitTool `
+    -InstallRoot $missingGitInstall `
+    -GitExecutable (Join-Path $missingGitRoot "missing-git.exe") 2>&1 | Out-String)
+if ($LASTEXITCODE -eq 0 -or
+    -not $missingGitOutput.Contains("GitExecutable must be an absolute path to an existing file.",
+        [StringComparison]::Ordinal))
+{
+    throw "Missing Git prerequisite was not diagnosed before restore: $missingGitOutput"
+}
+if ((Test-Path -LiteralPath $missingGitTool) -or (Test-Path -LiteralPath $missingGitInstall))
+{
+    throw "Missing Git prerequisite mutated dependency roots."
+}
+
+$invalidGitRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    "CueEngine-RestoreContract-InvalidGit-$([Guid]::NewGuid().ToString('N'))"
+$invalidGitTool = Join-Path $invalidGitRoot "Tool"
+$invalidGitInstall = Join-Path $invalidGitRoot "Installed"
+$invalidGitExecutable = Join-Path ([Environment]::GetFolderPath('System')) "where.exe"
+$invalidGitOutput = (& $powerShell -NoProfile -File $restoreScript `
+    -ToolRoot $invalidGitTool `
+    -InstallRoot $invalidGitInstall `
+    -GitExecutable $invalidGitExecutable 2>&1 | Out-String)
+if ($LASTEXITCODE -eq 0 -or
+    -not $invalidGitOutput.Contains("Git for Windows prerequisite identity could not be diagnosed.",
+        [StringComparison]::Ordinal))
+{
+    throw "Invalid Git prerequisite was not diagnosed before restore: $invalidGitOutput"
+}
+if ((Test-Path -LiteralPath $invalidGitTool) -or (Test-Path -LiteralPath $invalidGitInstall))
+{
+    throw "Invalid Git prerequisite mutated dependency roots."
+}
+
+$outdatedGitRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    "CueEngine-RestoreContract-OutdatedGit-$([Guid]::NewGuid().ToString('N'))"
+$outdatedGitTool = Join-Path $outdatedGitRoot "Tool"
+$outdatedGitInstall = Join-Path $outdatedGitRoot "Installed"
+$env:CUE_TEST_OUTDATED_GIT = "1"
+try
+{
+    $outdatedGitOutput = (& $powerShell -NoProfile -File $restoreScript `
+        -ToolRoot $outdatedGitTool `
+        -InstallRoot $outdatedGitInstall `
+        -GitExecutable $GitFailureProbe 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0 -or
+        -not $outdatedGitOutput.Contains("Git for Windows 2.44.0 or newer is required before dependency restore.",
+            [StringComparison]::Ordinal))
+    {
+        throw "Outdated Git prerequisite was not rejected before restore: $outdatedGitOutput"
+    }
+    if ((Test-Path -LiteralPath $outdatedGitTool) -or (Test-Path -LiteralPath $outdatedGitInstall))
+    {
+        throw "Outdated Git prerequisite mutated dependency roots."
+    }
+}
+finally
+{
+    Remove-Item Env:CUE_TEST_OUTDATED_GIT -ErrorAction SilentlyContinue
 }
 
 Assert-RestoreRejected -Arguments @(
@@ -101,11 +170,10 @@ $quarantineInstall = Join-Path $quarantineDependencyRoot "Installed"
 try
 {
     New-Item -ItemType Directory -Path $quarantineDependencyRoot | Out-Null
-    $failingExecutable = Join-Path ([Environment]::GetFolderPath('System')) "where.exe"
     $output = (& $powerShell -NoProfile -File $restoreScript `
         -ToolRoot $quarantineTool `
         -InstallRoot $quarantineInstall `
-        -GitExecutable $failingExecutable `
+        -GitExecutable $GitFailureProbe `
         -InstalledVersionRoot $versionRoot `
         -DependencyRootId $dependencyId `
         -DependencyDefinitionId $definitionId `
@@ -147,11 +215,10 @@ try
 {
     New-Item -ItemType Directory -Path $fileCollisionParent | Out-Null
     [IO.File]::WriteAllText($fileCollisionDependencyRoot, "invalid dependency root")
-    $failingExecutable = Join-Path ([Environment]::GetFolderPath('System')) "where.exe"
     $output = (& $powerShell -NoProfile -File $restoreScript `
         -ToolRoot $fileCollisionTool `
         -InstallRoot $fileCollisionInstall `
-        -GitExecutable $failingExecutable `
+        -GitExecutable $GitFailureProbe `
         -InstalledVersionRoot $versionRoot `
         -DependencyRootId $dependencyId `
         -DependencyDefinitionId $definitionId `

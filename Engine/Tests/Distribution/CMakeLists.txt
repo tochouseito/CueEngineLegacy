@@ -65,17 +65,21 @@ if(WIN32)
     add_executable(CueDistributionWindowsPublisherTests WindowsPublisherTests.cpp)
     add_executable(CueDistributionWindowsInstallerTests WindowsInstallerTests.cpp)
     add_executable(CueDistributionInstallerProbeHelper InstallerProbeHelper.cpp)
+    add_executable(CueDistributionGitFailureProbeHelper GitFailureProbeHelper.cpp)
     add_dependencies(
         CueDistributionWindowsInstallerTests
         CueEngineInstallerTool
         CueEngineInstallWorker
         CueDistributionInstallerProbeHelper
+        CueDistributionGitFailureProbeHelper
     )
     add_dependencies(
         Cue.Distribution.Tests
+        CueEngineBootstrap
         CueDistributionWindowsPublisherTests
         CueDistributionWindowsInstallerTests
         CueDistributionInstallerProbeHelper
+        CueDistributionGitFailureProbeHelper
     )
     target_link_libraries(CueDistributionWindowsPublisherTests PRIVATE Cue.Distribution.Windows)
     target_link_libraries(CueDistributionWindowsInstallerTests PRIVATE Cue.Distribution.Windows)
@@ -87,10 +91,12 @@ if(WIN32)
     target_compile_features(CueDistributionWindowsPublisherTests PRIVATE cxx_std_20)
     target_compile_features(CueDistributionWindowsInstallerTests PRIVATE cxx_std_20)
     target_compile_features(CueDistributionInstallerProbeHelper PRIVATE cxx_std_20)
+    target_compile_features(CueDistributionGitFailureProbeHelper PRIVATE cxx_std_20)
     set_target_properties(
         CueDistributionWindowsPublisherTests
         CueDistributionWindowsInstallerTests
         CueDistributionInstallerProbeHelper
+        CueDistributionGitFailureProbeHelper
         PROPERTIES
             CXX_EXTENSIONS OFF
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
@@ -127,6 +133,15 @@ if(WIN32)
                 /Zc:__cplusplus
                 /utf-8
         )
+        target_compile_options(
+            CueDistributionGitFailureProbeHelper
+            PRIVATE
+                /W4
+                /WX
+                /permissive-
+                /Zc:__cplusplus
+                /utf-8
+        )
         target_link_options(
             CueDistributionWindowsPublisherTests
             PRIVATE
@@ -136,6 +151,11 @@ if(WIN32)
     endif()
 
     find_program(cueDistributionPowerShell NAMES pwsh REQUIRED)
+    get_filename_component(cueDistributionCompilerDirectory "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(cueDistributionDumpbin "${cueDistributionCompilerDirectory}/dumpbin.exe")
+    if(NOT EXISTS "${cueDistributionDumpbin}")
+        message(FATAL_ERROR "CueEngineBootstrap contract requires the MSVC dumpbin tool")
+    endif()
     add_test(
         NAME Cue.Distribution.RestoreVcpkgContract
         COMMAND
@@ -145,8 +165,27 @@ if(WIN32)
             "${CMAKE_CURRENT_SOURCE_DIR}/RestoreVcpkgContractTests.ps1"
             -RepositoryRoot
             "${CMAKE_SOURCE_DIR}"
+            -GitFailureProbe
+            "$<TARGET_FILE:CueDistributionGitFailureProbeHelper>"
+    )
+    add_test(NAME Cue.Distribution.BootstrapProbe COMMAND CueEngineBootstrap --install-probe)
+    add_test(
+        NAME Cue.Distribution.BootstrapStaticContract
+        COMMAND
+            "${cueDistributionPowerShell}"
+            -NoProfile
+            -File
+            "${CMAKE_CURRENT_SOURCE_DIR}/BootstrapContractTests.ps1"
+            -Bootstrap
+            "$<TARGET_FILE:CueEngineBootstrap>"
+            -Dumpbin
+            "${cueDistributionDumpbin}"
     )
     add_test(NAME Cue.Distribution.WindowsPublisher COMMAND CueDistributionWindowsPublisherTests)
+    add_test(
+        NAME Cue.Distribution.WindowsPrerequisites
+        COMMAND CueDistributionWindowsInstallerTests --prerequisites
+    )
     add_test(NAME Cue.Distribution.WindowsInstaller COMMAND CueDistributionWindowsInstallerTests)
     add_test(
         NAME Cue.Distribution.WindowsInstallerRecovery
@@ -160,7 +199,10 @@ if(WIN32)
         APPEND
         cueDistributionTests
         Cue.Distribution.RestoreVcpkgContract
+        Cue.Distribution.BootstrapProbe
+        Cue.Distribution.BootstrapStaticContract
         Cue.Distribution.WindowsPublisher
+        Cue.Distribution.WindowsPrerequisites
         Cue.Distribution.WindowsInstaller
         Cue.Distribution.WindowsInstallerRecovery
         Cue.Distribution.WindowsInstallerVersionOperations

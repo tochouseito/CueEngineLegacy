@@ -143,6 +143,12 @@ cue_add_static_runtime_clone(Cue.InstallWorker.Platform Cue.Platform)
 cue_add_static_runtime_clone(Cue.InstallWorker.Platform.Windows Cue.Platform.Windows)
 cue_add_static_runtime_clone(Cue.InstallWorker.Distribution Cue.Distribution)
 cue_add_static_runtime_clone(Cue.InstallWorker.Distribution.Windows Cue.Distribution.Windows)
+# WorkerはInstall APIを呼ばず、Toolchain診断のRegistry／Version依存をImport閉包へ含めない。
+target_compile_definitions(
+    Cue.InstallWorker.Distribution.Windows
+    PRIVATE
+        CUE_INSTALL_WORKER_STATIC_RUNTIME=1
+)
 
 target_link_libraries(Cue.InstallWorker.Foundation.Windows PUBLIC Cue.InstallWorker.Foundation)
 target_link_libraries(Cue.InstallWorker.IO PUBLIC Cue.InstallWorker.Foundation)

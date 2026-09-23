@@ -225,6 +225,11 @@ if(WIN32)
     add_executable(CueBuildWindowsToolchainTests WindowsToolchainTests.cpp)
     target_link_libraries(CueBuildWindowsToolchainTests PRIVATE Cue.Build.Windows)
     target_compile_features(CueBuildWindowsToolchainTests PRIVATE cxx_std_20)
+    target_include_directories(
+        CueBuildWindowsToolchainTests
+        PRIVATE
+            "${CMAKE_SOURCE_DIR}/Engine/Source/Build/Windows/Private"
+    )
 
     add_executable(CueBuildWindowsPublicHeaderTest WindowsPublicHeaderCompile.cpp)
     target_link_libraries(CueBuildWindowsPublicHeaderTest PRIVATE Cue.Build.Windows)

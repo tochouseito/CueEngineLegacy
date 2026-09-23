@@ -1,5 +1,8 @@
 #include <Cue/Distribution/Windows/Installer.h>
 
+#if !defined(CUE_INSTALL_WORKER_STATIC_RUNTIME)
+#include "WindowsDeveloperPrerequisites.h"
+#endif
 #include "WindowsDirectoryAncestryLock.h"
 #include "WindowsStablePath.h"
 
@@ -4412,6 +4415,14 @@ Result<WindowsInstallOutcome> install_windows_source_sdk(const WindowsInstallReq
         {
             return Result<WindowsInstallOutcome>::failure(std::move(*bundle.try_error()));
         }
+#if !defined(CUE_INSTALL_WORKER_STATIC_RUNTIME)
+        auto prerequisites =
+            validate_windows_developer_prerequisites(bundle.try_value()->manifest.minimumToolchain, a_assertContext);
+        if (!prerequisites)
+        {
+            return Result<WindowsInstallOutcome>::failure(std::move(*prerequisites.try_error()));
+        }
+#endif
         std::error_code error;
         std::filesystem::create_directories(extended_filesystem_path(*installRoot), error);
         if (error || !is_plain_directory(*installRoot) || !has_plain_existing_ancestry(*installRoot))

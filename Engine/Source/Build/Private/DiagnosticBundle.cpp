@@ -565,7 +565,7 @@ void replace_path(std::string &a_text, std::string_view a_prefix, std::string_vi
 /// @brief Version 1で永続化できるTool種別か検証する
 [[nodiscard]] bool valid_tool_kind(cue::BuildToolKind a_kind) noexcept
 {
-    return a_kind >= cue::BuildToolKind::CMake && a_kind <= cue::BuildToolKind::WindowsSdk;
+    return a_kind >= cue::BuildToolKind::CMake && a_kind <= cue::BuildToolKind::Git;
 }
 
 /// @brief Version 1で永続化できる対応可否か検証する
@@ -854,7 +854,7 @@ void replace_path(std::string &a_text, std::string_view a_prefix, std::string_vi
         a_environment.support == cue::BuildEnvironmentSupport::Supported
             ? "supported"
             : (a_environment.support == cue::BuildEnvironmentSupport::Unsupported ? "unsupported" : "unknown");
-    if (!output.append("{\n\"schemaVersion\":1,\n\"support\":") || !output.append_json_string(support) ||
+    if (!output.append("{\n\"schemaVersion\":2,\n\"support\":") || !output.append_json_string(support) ||
         !output.append(",\n\"engineSourceRoot\":") ||
         !append_redacted_json(output, a_environment.engineSourceRoot, a_mappings) ||
         !output.append(",\n\"engineBinaryRoot\":") ||
@@ -1563,11 +1563,11 @@ class JsonSchemaReader final
     return false;
 }
 
-/// @brief Toolchain Report内のTool Objectを固定Schemaで読み取る
-[[nodiscard]] bool read_tool(JsonSchemaReader &a_reader) noexcept
+/// @brief Toolchain Report内のTool ObjectをSchemaごとの最大列挙値で読み取る
+[[nodiscard]] bool read_tool(JsonSchemaReader &a_reader, cue::BuildToolKind a_maximumKind) noexcept
 {
     if (!a_reader.begin_object() || !a_reader.member("kind") ||
-        !a_reader.unsigned_integer(static_cast<std::uint64_t>(cue::BuildToolKind::WindowsSdk)) || !a_reader.comma() ||
+        !a_reader.unsigned_integer(static_cast<std::uint64_t>(a_maximumKind)) || !a_reader.comma() ||
         !a_reader.member("path") || !a_reader.string() || !a_reader.comma() || !a_reader.member("root") ||
         !a_reader.string() || !a_reader.comma() || !a_reader.member("version"))
     {
@@ -1582,8 +1582,8 @@ class JsonSchemaReader final
            a_reader.boolean() && a_reader.end_object();
 }
 
-/// @brief Toolchain Report内のTool Arrayを固定Schemaで読み取る
-[[nodiscard]] bool read_tool_array(JsonSchemaReader &a_reader) noexcept
+/// @brief Toolchain Report内のTool ArrayをSchemaごとの最大列挙値で読み取る
+[[nodiscard]] bool read_tool_array(JsonSchemaReader &a_reader, cue::BuildToolKind a_maximumKind) noexcept
 {
     if (!a_reader.begin_array())
     {
@@ -1593,7 +1593,7 @@ class JsonSchemaReader final
     {
         return a_reader.end_array();
     }
-    while (read_tool(a_reader))
+    while (read_tool(a_reader, a_maximumKind))
     {
         if (a_reader.next_is(']'))
         {
@@ -1607,8 +1607,8 @@ class JsonSchemaReader final
     return false;
 }
 
-/// @brief Toolchain Report内のDiagnostic Objectを固定Schemaで読み取る
-[[nodiscard]] bool read_environment_diagnostic(JsonSchemaReader &a_reader) noexcept
+/// @brief Toolchain Report内のDiagnostic ObjectをSchemaごとの最大Tool列挙値で読み取る
+[[nodiscard]] bool read_environment_diagnostic(JsonSchemaReader &a_reader, cue::BuildToolKind a_maximumKind) noexcept
 {
     if (!a_reader.begin_object() || !a_reader.member("code") ||
         !a_reader.unsigned_integer(
@@ -1617,9 +1617,8 @@ class JsonSchemaReader final
     {
         return false;
     }
-    if (!(a_reader.next_is('n')
-              ? a_reader.null_value()
-              : a_reader.unsigned_integer(static_cast<std::uint64_t>(cue::BuildToolKind::WindowsSdk))))
+    if (!(a_reader.next_is('n') ? a_reader.null_value()
+                                : a_reader.unsigned_integer(static_cast<std::uint64_t>(a_maximumKind))))
     {
         return false;
     }
@@ -1629,8 +1628,9 @@ class JsonSchemaReader final
            a_reader.comma() && a_reader.member("repairHint") && a_reader.string() && a_reader.end_object();
 }
 
-/// @brief Toolchain Report内のDiagnostic Arrayを固定Schemaで読み取る
-[[nodiscard]] bool read_environment_diagnostic_array(JsonSchemaReader &a_reader) noexcept
+/// @brief Toolchain Report内のDiagnostic ArrayをSchemaごとの最大Tool列挙値で読み取る
+[[nodiscard]] bool read_environment_diagnostic_array(JsonSchemaReader &a_reader,
+                                                     cue::BuildToolKind a_maximumKind) noexcept
 {
     if (!a_reader.begin_array())
     {
@@ -1640,7 +1640,7 @@ class JsonSchemaReader final
     {
         return a_reader.end_array();
     }
-    while (read_environment_diagnostic(a_reader))
+    while (read_environment_diagnostic(a_reader, a_maximumKind))
     {
         if (a_reader.next_is(']'))
         {
@@ -1894,18 +1894,25 @@ struct ArtifactReadState final
     return reader.end_object() && reader.finished();
 }
 
-/// @brief Environment PayloadをVersion 1固定Schemaとして検証する
+/// @brief Environment PayloadをVersion 1互換またはGitを追加したVersion 2 Schemaとして検証する
 [[nodiscard]] bool valid_environment_payload(std::string_view a_text) noexcept
 {
     JsonSchemaReader reader(a_text);
-    return read_schema_header(reader) && reader.comma() && reader.member("support") &&
-           reader.string_is({"supported", "unsupported", "unknown"}) && reader.comma() &&
-           reader.member("engineSourceRoot") && reader.string() && reader.comma() &&
+    std::uint64_t schemaVersion = 0U;
+    if (!reader.begin_object() || !reader.member("schemaVersion") ||
+        !reader.unsigned_integer_value(schemaVersion, 2U) || schemaVersion == 0U)
+    {
+        return false;
+    }
+    const cue::BuildToolKind maximumKind =
+        schemaVersion == 1U ? cue::BuildToolKind::WindowsSdk : cue::BuildToolKind::Git;
+    return reader.comma() && reader.member("support") && reader.string_is({"supported", "unsupported", "unknown"}) &&
+           reader.comma() && reader.member("engineSourceRoot") && reader.string() && reader.comma() &&
            reader.member("engineBinaryRoot") && reader.string() && reader.comma() &&
            reader.member("supportedConfigurations") && read_configuration_array(reader) && reader.comma() &&
-           reader.member("selectedTools") && read_tool_array(reader) && reader.comma() &&
-           reader.member("diagnostics") && read_environment_diagnostic_array(reader) && reader.end_object() &&
-           reader.finished();
+           reader.member("selectedTools") && read_tool_array(reader, maximumKind) && reader.comma() &&
+           reader.member("diagnostics") && read_environment_diagnostic_array(reader, maximumKind) &&
+           reader.end_object() && reader.finished();
 }
 
 /// @brief Stage PayloadをVersion 1固定Schemaと成功Operationの終端条件で検証する

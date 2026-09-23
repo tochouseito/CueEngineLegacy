@@ -103,6 +103,7 @@ target_sources(
         Private/WindowsProductSecurity.cpp
         Private/WindowsProductSecurityInternal.h
         Private/WindowsToolchain.cpp
+        Private/WindowsToolchainInternal.h
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS Public

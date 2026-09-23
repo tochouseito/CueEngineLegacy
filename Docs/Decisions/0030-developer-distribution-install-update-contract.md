@@ -172,6 +172,9 @@ PDB／OBJ／LIB／DLL／EXE、Credential／署名Key、Player ProductとAllowlis
 - Windows SDK、CMake、MSVC、Git for Windows 2.44.0以上はDeveloper PrerequisiteとしてVersion診断する。
   vcpkg ToolはPin済みRestoreで外部Dependency Rootへ取得する。Toolchain SourceやBinaryをEngine
   Bundleへ複製しない
+- M18実装では、Build Environment ReportとDiagnostic BundleへGit for Windowsを独立Tool種別として記録する。
+  InstallerはBundle Manifest検証後かつInstall Root作成前にCMake、Git for Windows、MSVC x64、Windows SDKを
+  `minimumToolchain`と照合し、Dependency RestoreはGit for WindowsのIdentityと2.44.0以上をRoot変更前に検証する
 
 ### Install Root and Ownership
 

@@ -556,8 +556,10 @@ Byte数、欠損理由を含み、Canonical表現とのByte完全一致を要求
 | `stderr.log` | Redaction済み標準エラーChunkの連結Byte列 |
 
 `environment.json`の選択Toolは`kind`、`path`、`root`、任意`version`、`architecture`、`available`を持つ。
-Environment診断は`code`、任意`tool`、`support`、`path`、`summary`、`repairHint`を持つ。`kind`と`tool`は
+Environment診断は`code`、任意`tool`、`support`、`path`、`summary`、`repairHint`を持つ。Schema v1の`kind`と`tool`は
 `CMake = 0`、`VisualStudio = 1`、`MsvcCompiler = 2`、`WindowsSdk = 3`の安定した数値値だけを許可する。
+Schema v2はこの列挙へ`Git = 4`だけを追加する。WriterはSchema v2を生成し、Readerは既存Schema v1を読み取るが、
+Schema v1内の`Git = 4`をVersion偽装として拒否する。他のPayloadはSchema v1を維持する。
 `code`は`UnsupportedHostArchitecture = 0`、`MissingTool = 1`、`UnknownToolIdentity = 2`、`UnsupportedTool = 3`、
 `AmbiguousTool = 4`、`MissingEngineSource = 5`、`MissingEngineBinary = 6`だけを許可する。
 `support`は`supported`、`unsupported`、`unknown`、`architecture`は`unknown`、`x64`、`x86`、`arm64`、
@@ -584,8 +586,9 @@ Log先頭のUTF-8 BOMは除去し、CRLFと単独CRはLFへ正規化し、空Log
 変換して`FILE_ATTRIBUTE_REPARSE_POINT`を明示検査し、Tagの種類に関係なく追跡せず拒否する。列挙とFile読込も
 同じNative Pathを使用し、WriterのDestination／Stagingも含め`MAX_PATH`を超える有効な絶対Pathを短いPathと同じ契約で扱う。
 
-`schemaVersion`は全JSONで整数`1`だけを受理する。v1 Bundleは診断用Snapshotであり、Readerは未知Versionを推測読込または
-In-place Migrationしない。Schema追加、Member意味変更、列挙値変更、Redaction契約変更は先行ADRで新Versionと互換性方針を決め、
+`schemaVersion`は`environment.json`だけ整数`1`または`2`、他のJSONは整数`1`だけを受理する。v1 Bundleは診断用Snapshotであり、
+Readerは未知Versionを推測読込またはIn-place Migrationしない。Schema追加、Member意味変更、列挙値変更、Redaction契約変更は
+先行ADRで新Versionと互換性方針を決め、
 Writer、全Payload Reader、Canonical Manifest、拒否経路Testを同時に更新する。旧Bundleの利用が必要なら、元Engine Versionで読込み、
 新Versionへ明示Exportする別Toolを設計し、通常Readerへ暗黙Migrationを入れない。
 
