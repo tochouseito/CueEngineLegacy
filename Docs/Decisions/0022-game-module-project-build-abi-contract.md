@@ -556,8 +556,10 @@ Byte数、欠損理由を含み、Canonical表現とのByte完全一致を要求
 | `stderr.log` | Redaction済み標準エラーChunkの連結Byte列 |
 
 `environment.json`の選択Toolは`kind`、`path`、`root`、任意`version`、`architecture`、`available`を持つ。
-Environment診断は`code`、任意`tool`、`support`、`path`、`summary`、`repairHint`を持つ。`kind`と`tool`は
+Environment診断は`code`、任意`tool`、`support`、`path`、`summary`、`repairHint`を持つ。Schema v1の`kind`と`tool`は
 `CMake = 0`、`VisualStudio = 1`、`MsvcCompiler = 2`、`WindowsSdk = 3`の安定した数値値だけを許可する。
+Schema v2はこの列挙へ`Git = 4`だけを追加する。WriterはSchema v2を生成し、Readerは既存Schema v1を読み取るが、
+Schema v1内の`Git = 4`をVersion偽装として拒否する。他のPayloadはSchema v1を維持する。
 `code`は`UnsupportedHostArchitecture = 0`、`MissingTool = 1`、`UnknownToolIdentity = 2`、`UnsupportedTool = 3`、
 `AmbiguousTool = 4`、`MissingEngineSource = 5`、`MissingEngineBinary = 6`だけを許可する。
 `support`は`supported`、`unsupported`、`unknown`、`architecture`は`unknown`、`x64`、`x86`、`arm64`、

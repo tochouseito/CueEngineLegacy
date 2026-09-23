@@ -118,6 +118,9 @@ template <typename T> [[nodiscard]] T take_value(cue::Result<T> a_result) noexce
     environment.selectedTools.push_back({cue::BuildToolKind::CMake, "C:/Program Files/CMake/bin/cmake.exe",
                                          "C:/Program Files/CMake", cue::BuildToolVersion{4U, 2U, 0U, 0U},
                                          cue::BuildArchitecture::X64, true});
+    environment.selectedTools.push_back({cue::BuildToolKind::Git, "C:/Program Files/Git/cmd/git.exe",
+                                         "C:/Program Files/Git", cue::BuildToolVersion{2U, 44U, 0U, 1U},
+                                         cue::BuildArchitecture::X64, true});
     environment.diagnostics.push_back({cue::BuildEnvironmentDiagnosticCode::UnsupportedTool,
                                        cue::BuildEnvironmentSupport::Unsupported, cue::BuildToolKind::MsvcCompiler,
                                        "D:/Internal/Toolchain/cl.exe", "Unsupported compiler",
@@ -588,6 +591,8 @@ void test_diagnostic_bundle(std::string_view a_testRoot, const cue::AssertContex
     {
         originalEnvironment.push_back(static_cast<char>(std::to_integer<unsigned char>(value)));
     }
+    require(originalEnvironment.find("\"schemaVersion\":2") != std::string::npos);
+    require(originalEnvironment.find("\"kind\":4") != std::string::npos);
     /// @brief Environment Payload差替えを完了してからReaderへ渡す
     const auto write_environment = [&destination](std::string_view a_text)
     {
@@ -596,6 +601,19 @@ void test_diagnostic_bundle(std::string_view a_testRoot, const cue::AssertContex
         stream.close();
         require(stream.good());
     };
+    std::string legacyEnvironment = originalEnvironment;
+    const std::size_t environmentSchema = legacyEnvironment.find("\"schemaVersion\":2");
+    const std::size_t gitKind = legacyEnvironment.find("\"kind\":4");
+    require(environmentSchema != std::string::npos);
+    require(gitKind != std::string::npos);
+    legacyEnvironment[environmentSchema + std::string_view("\"schemaVersion\":").size()] = '1';
+    legacyEnvironment[gitKind + std::string_view("\"kind\":").size()] = '3';
+    write_environment(legacyEnvironment);
+    require(cue::read_build_diagnostic_bundle_directory(destinationUtf8, limits, a_assertContext).has_value());
+    std::string invalidLegacyEnvironment = originalEnvironment;
+    invalidLegacyEnvironment[environmentSchema + std::string_view("\"schemaVersion\":").size()] = '1';
+    write_environment(invalidLegacyEnvironment);
+    require(!cue::read_build_diagnostic_bundle_directory(destinationUtf8, limits, a_assertContext).has_value());
     std::string unknownToolKind = originalEnvironment;
     const std::size_t toolKind = unknownToolKind.find("\"kind\":0");
     require(toolKind != std::string::npos);

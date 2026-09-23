@@ -406,7 +406,7 @@ struct ToolVersion final
     return selected;
 }
 
-/// @brief Windows SDK Include Rootから最低Version以上のSDKを検出する
+/// @brief Windows SDKのHeaderとx64 Libraryから最低Version以上のSDKを検出する
 [[nodiscard]] bool has_compatible_windows_sdk(const ToolVersion &a_minimum) noexcept
 {
     const auto kitsRoot = registry_string(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots",
@@ -429,7 +429,9 @@ struct ToolVersion final
             const auto nameUtf8 = to_utf8(iterator->path().filename().native());
             const auto version = nameUtf8 ? parse_version(*nameUtf8) : std::nullopt;
             if (version && !(*version < a_minimum) && is_plain_file(iterator->path() / L"um" / L"Windows.h") &&
-                is_plain_file(iterator->path() / L"ucrt" / L"corecrt.h"))
+                is_plain_file(iterator->path() / L"ucrt" / L"corecrt.h") &&
+                is_plain_file(std::filesystem::path(*kitsRoot) / L"Lib" / iterator->path().filename() / L"um" /
+                              L"x64" / L"kernel32.lib"))
             {
                 return true;
             }

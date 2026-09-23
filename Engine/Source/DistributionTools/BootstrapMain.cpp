@@ -1,6 +1,9 @@
 #include <Windows.h>
+#include <bcrypt.h>
 
 #include <array>
+#include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <optional>
@@ -16,6 +19,16 @@ constexpr int k_missingRuntime = 21;
 constexpr int k_invalidBootstrapPath = 22;
 constexpr int k_invalidInstaller = 23;
 constexpr int k_installerLaunchFailure = 24;
+constexpr std::uint64_t k_maximumManifestBytes = 16U * 1024U * 1024U;
+constexpr std::string_view k_manifestPrefix = "{\"schemaVersion\":1,\"distributionKind\":\"DeveloperSourceSdk\",";
+constexpr std::string_view k_installerEntryPrefix =
+    "{\"role\":\"installer\",\"path\":\"Bin/CueEngineInstallerTool.exe\",\"sizeBytes\":";
+
+struct InstallerInventoryEntry final
+{
+    std::uint64_t byteSize = 0U;
+    std::array<unsigned char, 32U> sha256{};
+};
 
 /// @brief Absolute PathをExtended-length Win32 Pathへ変換する
 [[nodiscard]] std::wstring extended_path(const std::filesystem::path &a_path)
@@ -83,6 +96,235 @@ constexpr int k_installerLaunchFailure = 24;
         static_cast<void>(FreeLibrary(module));
     }
     return true;
+}
+
+/// @brief Open済みHandleがDirectoryやReparse Pointではない通常Fileか判定する
+[[nodiscard]] bool is_plain_file(HANDLE a_file) noexcept
+{
+    FILE_ATTRIBUTE_TAG_INFO information{};
+    return GetFileInformationByHandleEx(a_file, FileAttributeTagInfo, &information, sizeof(information)) != FALSE &&
+           (information.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U;
+}
+
+/// @brief 小容量Manifestを固定Handleから上限付きで読み取る
+[[nodiscard]] std::optional<std::string> read_manifest(const std::filesystem::path &a_path) noexcept
+{
+    try
+    {
+        const std::wstring nativePath = extended_path(a_path);
+        HANDLE file = CreateFileW(nativePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (file == INVALID_HANDLE_VALUE || !is_plain_file(file))
+        {
+            if (file != INVALID_HANDLE_VALUE)
+            {
+                static_cast<void>(CloseHandle(file));
+            }
+            return std::nullopt;
+        }
+        LARGE_INTEGER size{};
+        if (GetFileSizeEx(file, &size) == FALSE || size.QuadPart <= 0 ||
+            static_cast<std::uint64_t>(size.QuadPart) > k_maximumManifestBytes)
+        {
+            static_cast<void>(CloseHandle(file));
+            return std::nullopt;
+        }
+        std::string bytes(static_cast<std::size_t>(size.QuadPart), '\0');
+        std::size_t offset = 0U;
+        while (offset < bytes.size())
+        {
+            DWORD transferred = 0U;
+            const DWORD requested = static_cast<DWORD>(bytes.size() - offset);
+            if (ReadFile(file, bytes.data() + offset, requested, &transferred, nullptr) == FALSE || transferred == 0U)
+            {
+                static_cast<void>(CloseHandle(file));
+                return std::nullopt;
+            }
+            offset += transferred;
+        }
+        static_cast<void>(CloseHandle(file));
+        return bytes;
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+}
+
+/// @brief Lowercase SHA-256文字列を固定長Byte列へ変換する
+[[nodiscard]] bool parse_sha256(std::string_view a_text, std::array<unsigned char, 32U> &a_output) noexcept
+{
+    if (a_text.size() != a_output.size() * 2U)
+    {
+        return false;
+    }
+    /// @brief Lowercase Hex一文字を値へ変換する
+    const auto nibble = [](char a_value) noexcept -> std::optional<unsigned char>
+    {
+        if (a_value >= '0' && a_value <= '9')
+        {
+            return static_cast<unsigned char>(a_value - '0');
+        }
+        if (a_value >= 'a' && a_value <= 'f')
+        {
+            return static_cast<unsigned char>(a_value - 'a' + 10);
+        }
+        return std::nullopt;
+    };
+    for (std::size_t index = 0U; index < a_output.size(); ++index)
+    {
+        const auto high = nibble(a_text[index * 2U]);
+        const auto low = nibble(a_text[index * 2U + 1U]);
+        if (!high || !low)
+        {
+            return false;
+        }
+        a_output[index] = static_cast<unsigned char>((*high << 4U) | *low);
+    }
+    return true;
+}
+
+/// @brief Canonical Bundle Manifestから唯一のInstaller Inventory Entryを抽出する
+[[nodiscard]] std::optional<InstallerInventoryEntry> parse_installer_entry(std::string_view a_manifest) noexcept
+{
+    if (!a_manifest.starts_with(k_manifestPrefix) || !a_manifest.ends_with("]}\n"))
+    {
+        return std::nullopt;
+    }
+    const std::size_t files = a_manifest.find("\"files\":[");
+    const std::size_t entry =
+        files == std::string_view::npos
+            ? std::string_view::npos
+            : a_manifest.find(k_installerEntryPrefix, files + std::string_view("\"files\":[").size());
+    if (entry == std::string_view::npos ||
+        a_manifest.find(k_installerEntryPrefix, entry + k_installerEntryPrefix.size()) != std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+    const std::size_t sizeBegin = entry + k_installerEntryPrefix.size();
+    const std::size_t sizeEnd = a_manifest.find(",\"sha256\":\"", sizeBegin);
+    if (sizeEnd == std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+    InstallerInventoryEntry result;
+    const auto parsed = std::from_chars(a_manifest.data() + sizeBegin, a_manifest.data() + sizeEnd, result.byteSize);
+    if (parsed.ec != std::errc{} || parsed.ptr != a_manifest.data() + sizeEnd || result.byteSize == 0U)
+    {
+        return std::nullopt;
+    }
+    constexpr std::string_view hashPrefix = ",\"sha256\":\"";
+    const std::size_t hashBegin = sizeEnd + hashPrefix.size();
+    const std::size_t hashEnd = hashBegin + result.sha256.size() * 2U;
+    if (hashEnd + 2U > a_manifest.size() || a_manifest.substr(hashEnd, 2U) != "\"}" ||
+        !parse_sha256(a_manifest.substr(hashBegin, result.sha256.size() * 2U), result.sha256))
+    {
+        return std::nullopt;
+    }
+    return result;
+}
+
+/// @brief KERNEL32以外を静的Importせず固定HandleのSHA-256を計算する
+[[nodiscard]] std::optional<std::array<unsigned char, 32U>> hash_file(HANDLE a_file) noexcept
+{
+    HMODULE library = LoadLibraryExW(L"bcrypt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (library == nullptr)
+    {
+        return std::nullopt;
+    }
+    const auto openAlgorithm = reinterpret_cast<decltype(&BCryptOpenAlgorithmProvider)>(
+        GetProcAddress(library, "BCryptOpenAlgorithmProvider"));
+    const auto getProperty =
+        reinterpret_cast<decltype(&BCryptGetProperty)>(GetProcAddress(library, "BCryptGetProperty"));
+    const auto createHash = reinterpret_cast<decltype(&BCryptCreateHash)>(GetProcAddress(library, "BCryptCreateHash"));
+    const auto updateHash = reinterpret_cast<decltype(&BCryptHashData)>(GetProcAddress(library, "BCryptHashData"));
+    const auto finishHash = reinterpret_cast<decltype(&BCryptFinishHash)>(GetProcAddress(library, "BCryptFinishHash"));
+    const auto destroyHash =
+        reinterpret_cast<decltype(&BCryptDestroyHash)>(GetProcAddress(library, "BCryptDestroyHash"));
+    const auto closeAlgorithm = reinterpret_cast<decltype(&BCryptCloseAlgorithmProvider)>(
+        GetProcAddress(library, "BCryptCloseAlgorithmProvider"));
+    if (openAlgorithm == nullptr || getProperty == nullptr || createHash == nullptr || updateHash == nullptr ||
+        finishHash == nullptr || destroyHash == nullptr || closeAlgorithm == nullptr)
+    {
+        static_cast<void>(FreeLibrary(library));
+        return std::nullopt;
+    }
+
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    std::optional<std::array<unsigned char, 32U>> result;
+    do
+    {
+        if (!BCRYPT_SUCCESS(openAlgorithm(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0U)))
+        {
+            break;
+        }
+        DWORD objectBytes = 0U;
+        DWORD hashBytes = 0U;
+        DWORD transferred = 0U;
+        if (!BCRYPT_SUCCESS(getProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectBytes),
+                                        sizeof(objectBytes), &transferred, 0U)) ||
+            transferred != sizeof(objectBytes) || objectBytes == 0U ||
+            !BCRYPT_SUCCESS(getProperty(algorithm, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hashBytes),
+                                        sizeof(hashBytes), &transferred, 0U)) ||
+            transferred != sizeof(hashBytes) || hashBytes != 32U)
+        {
+            break;
+        }
+        std::vector<unsigned char> object(objectBytes);
+        if (!BCRYPT_SUCCESS(createHash(algorithm, &hash, object.data(), objectBytes, nullptr, 0U, 0U)))
+        {
+            break;
+        }
+        LARGE_INTEGER origin{};
+        if (SetFilePointerEx(a_file, origin, nullptr, FILE_BEGIN) == FALSE)
+        {
+            break;
+        }
+        std::array<unsigned char, 64U * 1024U> buffer{};
+        for (;;)
+        {
+            transferred = 0U;
+            if (ReadFile(a_file, buffer.data(), static_cast<DWORD>(buffer.size()), &transferred, nullptr) == FALSE)
+            {
+                break;
+            }
+            if (transferred == 0U)
+            {
+                std::array<unsigned char, 32U> digest{};
+                if (BCRYPT_SUCCESS(finishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0U)))
+                {
+                    result = digest;
+                }
+                break;
+            }
+            if (!BCRYPT_SUCCESS(updateHash(hash, buffer.data(), transferred, 0U)))
+            {
+                break;
+            }
+        }
+    } while (false);
+    if (hash != nullptr)
+    {
+        static_cast<void>(destroyHash(hash));
+    }
+    if (algorithm != nullptr)
+    {
+        static_cast<void>(closeAlgorithm(algorithm, 0U));
+    }
+    static_cast<void>(FreeLibrary(library));
+    return result;
+}
+
+/// @brief InstallerのSizeとSHA-256をBundle ManifestのRoleおよび固定Pathへ照合する
+[[nodiscard]] bool matches_installer_inventory(const std::filesystem::path &a_bundleRoot, HANDLE a_installer) noexcept
+{
+    const auto manifest = read_manifest(a_bundleRoot / L"CueEngineDistribution.json");
+    const auto entry = manifest ? parse_installer_entry(*manifest) : std::nullopt;
+    LARGE_INTEGER size{};
+    const auto digest = entry ? hash_file(a_installer) : std::nullopt;
+    return entry && GetFileSizeEx(a_installer, &size) != FALSE && size.QuadPart >= 0 &&
+           static_cast<std::uint64_t>(size.QuadPart) == entry->byteSize && digest && *digest == entry->sha256;
 }
 
 /// @brief Installer PE Headerを固定Handleから読込みx64 Imageだけを許可する
@@ -206,20 +448,18 @@ int wmain(int a_argumentCount, wchar_t **a_arguments)
     }
     if (!has_visual_cpp_runtime())
     {
-        std::fwprintf(stderr,
-                      L"Install the current Microsoft Visual C++ Redistributable for x64 before continuing.\n");
+        std::fwprintf(stderr, L"Install the current Microsoft Visual C++ Redistributable for x64 before continuing.\n");
         return k_missingRuntime;
     }
-    if (a_argumentCount == 2 && (std::wstring_view(a_arguments[1]) == L"--install-probe" ||
-                                 std::wstring_view(a_arguments[1]) == L"--diagnose"))
+    if (a_argumentCount == 2 &&
+        (std::wstring_view(a_arguments[1]) == L"--install-probe" || std::wstring_view(a_arguments[1]) == L"--diagnose"))
     {
         return 0;
     }
     if (a_argumentCount < 2)
     {
-        std::fwprintf(stderr,
-                      L"Usage: CueEngineBootstrap <install|update> --bundle-root <absolute> "
-                      L"--install-root <absolute> --allow-unsigned-local\n");
+        std::fwprintf(stderr, L"Usage: CueEngineBootstrap <install|update> --bundle-root <absolute> "
+                              L"--install-root <absolute> --allow-unsigned-local\n");
         return k_usageFailure;
     }
 
@@ -238,8 +478,10 @@ int wmain(int a_argumentCount, wchar_t **a_arguments)
         return k_invalidInstaller;
     }
     HANDLE installerHandle = CreateFileW(nativeInstaller.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-    if (installerHandle == INVALID_HANDLE_VALUE || !is_x64_installer(installerHandle))
+                                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (installerHandle == INVALID_HANDLE_VALUE || !is_plain_file(installerHandle) ||
+        !matches_installer_inventory(bootstrap->parent_path().parent_path(), installerHandle) ||
+        !is_x64_installer(installerHandle))
     {
         if (installerHandle != INVALID_HANDLE_VALUE)
         {
