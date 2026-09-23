@@ -1,12 +1,17 @@
 #include <Cue/Build/Windows/WindowsToolchain.h>
 
+#include "WindowsToolchainInternal.h"
+
 #include <Cue/Foundation/Assert.h>
 #include <Cue/Foundation/Windows/UtfConversion.h>
+#include <Cue/Platform/Windows/WindowsProcess.h>
 
 #include <EngineBuildMetadata.h>
 
 #include <Windows.h>
 
+#include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -212,6 +217,47 @@ namespace
     return partIndex >= 2U ? std::optional<cue::BuildToolVersion>(version) : std::nullopt;
 }
 
+/// @brief Child Process出力を一つの診断文字列へ連結する
+[[nodiscard]] std::string process_output(const cue::ChildProcessResult &a_result)
+{
+    std::string output;
+    for (const cue::ChildProcessOutputChunk &chunk : a_result.output())
+    {
+        output.append(chunk.bytes);
+    }
+    return output;
+}
+
+/// @brief `git --version`のGit for Windows形式からVersionを厳密に取得する
+[[nodiscard]] std::optional<cue::BuildToolVersion> parse_git_for_windows_version(std::string_view a_output) noexcept
+{
+    while (!a_output.empty() && (a_output.back() == '\r' || a_output.back() == '\n'))
+    {
+        a_output.remove_suffix(1U);
+    }
+    constexpr std::string_view prefix = "git version ";
+    constexpr std::string_view suffix = ".windows.";
+    if (!a_output.starts_with(prefix))
+    {
+        return std::nullopt;
+    }
+    const std::size_t suffixOffset = a_output.find(suffix, prefix.size());
+    if (suffixOffset == std::string_view::npos || suffixOffset + suffix.size() >= a_output.size())
+    {
+        return std::nullopt;
+    }
+    const auto version = parse_version(a_output.substr(prefix.size(), suffixOffset - prefix.size()));
+    std::uint32_t windowsRevision = 0U;
+    const std::string_view revision = a_output.substr(suffixOffset + suffix.size());
+    const auto [end, error] =
+        std::from_chars(revision.data(), revision.data() + revision.size(), windowsRevision);
+    if (!version || error != std::errc{} || end != revision.data() + revision.size())
+    {
+        return std::nullopt;
+    }
+    return version;
+}
+
 /// @brief Engineが記録したWindows SDK VersionのHeaderとx64 Libraryを検査する
 [[nodiscard]] cue::BuildToolCandidate probe_windows_sdk(const cue::AssertContext &a_assertContext)
 {
@@ -272,6 +318,48 @@ namespace
     return std::filesystem::is_regular_file(to_extended_windows_path(marker.native()), error) && !error;
 }
 } // namespace
+
+namespace cue::detail
+{
+BuildToolCandidate probe_git_for_windows(std::string_view a_path, std::string_view a_installationRoot,
+                                         const AssertContext &a_assertContext) noexcept
+{
+    try
+    {
+        BuildToolCandidate candidate =
+            probe_executable(BuildToolKind::Git, a_path, a_installationRoot, a_assertContext);
+        if (!candidate.available)
+        {
+            return candidate;
+        }
+        auto runner = create_windows_child_process_runner(a_assertContext);
+        if (!runner)
+        {
+            candidate.available = false;
+            candidate.version.reset();
+            return candidate;
+        }
+        ChildProcessRequest request(std::string(a_path), {"--version"}, std::string(a_installationRoot), {},
+                                    std::chrono::seconds(5), 4096U);
+        ChildProcessCancellation cancellation;
+        auto result = (*runner.try_value())->run(request, cancellation);
+        if (!result || result.try_value()->outcome() != ChildProcessOutcome::Exited ||
+            !result.try_value()->exit_code() || *result.try_value()->exit_code() != 0U)
+        {
+            candidate.available = false;
+            candidate.version.reset();
+            return candidate;
+        }
+        candidate.version = parse_git_for_windows_version(process_output(*result.try_value()));
+        candidate.available = candidate.version.has_value();
+        return candidate;
+    }
+    catch (...)
+    {
+        terminate_discovery_exception(a_assertContext);
+    }
+}
+} // namespace cue::detail
 
 namespace cue
 {
@@ -370,8 +458,8 @@ BuildEnvironmentInventory discover_current_windows_build_environment(const Asser
             const std::filesystem::path gitPath(*gitWindowsPath);
             gitRoot = to_utf8_path(gitPath.parent_path().parent_path().native(), a_assertContext);
         }
-        inventory.candidates.push_back(probe_executable(BuildToolKind::Git, build_metadata::k_gitCommand,
-                                                        gitRoot ? *gitRoot : std::string_view{}, a_assertContext));
+        inventory.candidates.push_back(detail::probe_git_for_windows(
+            build_metadata::k_gitCommand, gitRoot ? *gitRoot : std::string_view{}, a_assertContext));
         return inventory;
     }
     catch (...)
