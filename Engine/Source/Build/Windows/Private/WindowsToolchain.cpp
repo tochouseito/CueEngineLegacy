@@ -233,10 +233,14 @@ namespace
         to_extended_windows_path((sdkRoot / L"Include" / *windowsVersion / L"um" / L"Windows.h").native());
     const std::filesystem::path library =
         to_extended_windows_path((sdkRoot / L"Lib" / *windowsVersion / L"um" / L"x64" / L"kernel32.lib").native());
+    const std::filesystem::path ucrtLibrary =
+        to_extended_windows_path((sdkRoot / L"Lib" / *windowsVersion / L"ucrt" / L"x64" / L"ucrt.lib").native());
     std::error_code error;
     candidate.available = std::filesystem::is_regular_file(include, error) && !error;
     error.clear();
     candidate.available = candidate.available && std::filesystem::is_regular_file(library, error) && !error;
+    error.clear();
+    candidate.available = candidate.available && std::filesystem::is_regular_file(ucrtLibrary, error) && !error;
     candidate.version = version;
     candidate.architecture = candidate.available ? cue::BuildArchitecture::X64 : cue::BuildArchitecture::Unknown;
     if (auto utf8 = to_utf8_path((sdkRoot / L"Include" / *windowsVersion).native(), a_assertContext))

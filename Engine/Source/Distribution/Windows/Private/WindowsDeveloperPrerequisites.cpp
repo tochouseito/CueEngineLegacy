@@ -431,7 +431,9 @@ struct ToolVersion final
             if (version && !(*version < a_minimum) && is_plain_file(iterator->path() / L"um" / L"Windows.h") &&
                 is_plain_file(iterator->path() / L"ucrt" / L"corecrt.h") &&
                 is_plain_file(std::filesystem::path(*kitsRoot) / L"Lib" / iterator->path().filename() / L"um" /
-                              L"x64" / L"kernel32.lib"))
+                              L"x64" / L"kernel32.lib") &&
+                is_plain_file(std::filesystem::path(*kitsRoot) / L"Lib" / iterator->path().filename() / L"ucrt" /
+                              L"x64" / L"ucrt.lib"))
             {
                 return true;
             }
